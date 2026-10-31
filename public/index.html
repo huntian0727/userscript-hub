@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>油猴脚本安装中心</title>
+  <link rel="stylesheet" href="./style.css">
+  <link rel="alternate" type="text/plain" href="./llms.txt" title="AI quick discovery instructions">
+  <link rel="alternate" type="text/markdown" href="./ai-integration.md" title="AI integration guide">
+  <link rel="alternate" type="application/json" href="./api/integration.json" title="Machine-readable AI integration descriptor">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">JS</div>
+        <div>
+          <div class="eyebrow">PUBLIC USERSCRIPT HUB</div>
+          <h1>油猴脚本安装中心</h1>
+          <p class="subtitle">云端托管 · 一键安装 · 快速更新</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="server-state" id="server-state"><i></i>正在读取公开清单</span>
+        <button class="icon-button" id="refresh-button" type="button" title="重新读取脚本清单">↻ <span>刷新</span></button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <span class="eyebrow">PUBLIC INSTALLATION HUB</span>
+          <h2>修改完成，点一下就安装更新。</h2>
+          <p>脚本通过 GitHub Pages 安全托管。每次发布新版本后，安装中心自动提供最新安装包和更新地址。</p>
+          <div class="hero-meta">
+            <span><b class="dot"></b>全球 HTTPS 访问</span>
+            <span>GitHub Pages</span>
+            <span id="hub-version">安装中心 v1.0.0</span>
+            <span id="build-time">正在读取构建信息…</span>
+          </div>
+        </div>
+        <div class="hero-symbol" aria-hidden="true">
+          <div class="symbol-window"><span></span><span></span><span></span><strong>JS</strong></div>
+          <div class="symbol-arrow">↻</div>
+        </div>
+      </section>
+
+
+
+      <section class="ai-access" id="ai-integration">
+        <div class="ai-access-heading">
+          <div>
+            <span class="eyebrow">AI INTEGRATION ENTRYPOINT</span>
+            <h2>AI 开发者接入入口</h2>
+            <p>新项目或新 AI 首次接入时，先读取快速说明，再读取完整规范和机器可读配置。</p>
+          </div>
+          <span class="ai-ready">可供 AI 读取</span>
+        </div>
+        <div class="ai-resource-grid">
+          <a class="ai-resource" href="./llms.txt" target="_blank" rel="noopener">
+            <span class="ai-resource-number">01</span>
+            <span class="ai-resource-copy"><strong>AI 快速发现</strong><small>/llms.txt · 先读这个</small></span>
+            <span class="ai-resource-arrow">↗</span>
+          </a>
+          <a class="ai-resource" href="./ai-integration.md" target="_blank" rel="noopener">
+            <span class="ai-resource-number">02</span>
+            <span class="ai-resource-copy"><strong>完整接入规范</strong><small>/ai-integration.md · 开发流程与安全规则</small></span>
+            <span class="ai-resource-arrow">↗</span>
+          </a>
+          <a class="ai-resource" href="./api/integration.json" target="_blank" rel="noopener">
+            <span class="ai-resource-number">03</span>
+            <span class="ai-resource-copy"><strong>机器可读配置</strong><small>/api/integration.json · 项目路径与脚本目录</small></span>
+            <span class="ai-resource-arrow">↗</span>
+          </a>
+        </div>
+        <div class="ai-prompt">
+          <span>给新 AI 项目的接入指令</span>
+          <code>请先访问 https://huntian0727.github.io/userscript-hub/llms.txt，阅读公开油猴脚本平台的接入规范，再按规则接入和交付脚本。</code>
+        </div>
+        <p class="ai-boundary">注意：任何获得公开网址的浏览器或 AI 都可以读取接入说明；仓库不提供远程写入或命令执行能力。</p>
+      </section>
+
+      <section class="section-heading">
+        <div>
+          <span class="eyebrow">SCRIPT LIBRARY</span>
+          <h2>脚本列表</h2>
+        </div>
+        <span class="count" id="script-count">—</span>
+      </section>
+
+      <section id="script-list" class="script-grid" aria-live="polite">
+        <div class="loading-card">正在读取公开脚本清单…</div>
+      </section>
+
+      <section class="info-grid">
+        <article class="info-card">
+          <div class="info-icon">01</div>
+          <div>
+            <h3>安装 / 更新</h3>
+            <p>点击脚本卡片中的按钮，浏览器会交给 Tampermonkey 打开官方安装确认界面。确认后完成安装或更新。</p>
+          </div>
+        </article>
+        <article class="info-card">
+          <div class="info-icon">02</div>
+          <div>
+            <h3>固定更新地址</h3>
+            <p>脚本安装时写入固定的 HTTPS 更新地址。版本号递增并重新构建后，Tampermonkey 可以从同一地址检查新版本。</p>
+          </div>
+        </article>
+        <article class="info-card">
+          <div class="info-icon">03</div>
+          <div>
+            <h3>历史版本留档</h3>
+            <p>每个版本首次构建时保存不可覆盖的历史快照。相同版本如果代码发生变化，构建会拒绝，避免版本号未更新。</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="notice">
+        <span class="notice-mark">i</span>
+        <div>
+          <strong>关于安装状态与自动更新</strong>
+          <p>网页无法读取 Tampermonkey 内部已安装脚本清单，因此不会虚报“已安装”。安装或更新需要在 Tampermonkey 确认一次。自动检查更新通过 GitHub Pages 提供，无需保持本地电脑或服务运行。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>PUBLIC USERSCRIPT HUB</span>
+      <span>GitHub Pages 静态托管 · HTTPS · 公开只读</span>
+    </footer>
+  </div>
+</body>
+</html>
+
+
+

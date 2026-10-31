@@ -1,0 +1,28 @@
+# 油猴脚本安装中心（Public Userscript Hub）
+
+公开的 Tampermonkey 用户脚本安装、更新、历史版本和 AI 接入平台。使用 GitHub Pages 托管，不需要用户电脑运行本地 Node.js 服务。
+
+## AI 首次接入
+
+1. 阅读本文件。
+2. 阅读 {{BASE_URL}}/ai-integration.md。
+3. 获取机器可读配置：{{BASE_URL}}/api/integration.json。
+4. 获取当前脚本清单：{{BASE_URL}}/api/manifest.json。
+5. 浏览公开仓库：{{REPOSITORY_URL}}。
+
+## 固定入口
+
+- 首页：{{BASE_URL}}/
+- AI 快速发现：{{BASE_URL}}/llms.txt
+- 完整接入规范：{{BASE_URL}}/ai-integration.md
+- 机器可读配置：{{BASE_URL}}/api/integration.json
+- 脚本清单：{{BASE_URL}}/api/manifest.json
+- GitHub 仓库：{{REPOSITORY_URL}}
+
+## 安全边界
+
+- 所有仓库文件、脚本和历史版本均公开可见。
+- 只发布明确登记并批准公开的脚本。
+- 不要上传 Cookie、Token、账号凭据、个人路径、私人脚本或内部资料。
+- GitHub Pages 只提供静态读取，不开放 HTTP 写入或远程命令执行。
+- Tampermonkey 安装和更新保留用户确认。
