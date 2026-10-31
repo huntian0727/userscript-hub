@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器-目录索引验证版
 // @namespace    local.115.multiview
-// @version      0.2.1
-// @description  本地开发验证：只读读取115目录分页及可选递归索引，不修改网盘内容。
+// @version      0.3.0
+// @description  只读读取115目录，支持IndexedDB分批保存与中断续扫。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -496,16 +496,462 @@
   });
 });
 
+(function attach115IndexStore(root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.N115IndexStore = api;
+})(typeof globalThis === 'object' ? globalThis : this, function create115IndexStoreModule() {
+  'use strict';
+
+  const DEFAULT_DB_NAME = '115-multiview-index';
+  const DB_VERSION = 1;
+
+  function create115IndexStore(options = {}) {
+    const indexedDBRef = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+    const keyRangeRef = options.IDBKeyRange || (typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : null);
+    const dbName = String(options.dbName || DEFAULT_DB_NAME);
+    let databasePromise = null;
+
+    function requestPromise(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('IndexedDB请求失败'));
+      });
+    }
+
+    function transactionPromise(transaction) {
+      return new Promise((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error || new Error('IndexedDB事务已中止'));
+        transaction.onerror = () => reject(transaction.error || new Error('IndexedDB事务失败'));
+      });
+    }
+
+    function openDatabase() {
+      if (!indexedDBRef) return Promise.reject(new Error('当前浏览器不支持IndexedDB，无法安全保存目录索引'));
+      if (databasePromise) return databasePromise;
+      databasePromise = new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = indexedDBRef.open(dbName, DB_VERSION);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          let scans;
+          if (db.objectStoreNames.contains('scans')) {
+            scans = request.transaction.objectStore('scans');
+          } else {
+            scans = db.createObjectStore('scans', { keyPath: 'scanId' });
+          }
+          if (!scans.indexNames.contains('byScope')) {
+            scans.createIndex('byScope', 'scopeKey', { unique: false });
+          }
+          if (!scans.indexNames.contains('byScopeUpdated')) {
+            scans.createIndex('byScopeUpdated', ['scopeKey', 'updatedAt'], { unique: false });
+          }
+
+          let records;
+          if (db.objectStoreNames.contains('records')) {
+            records = request.transaction.objectStore('records');
+          } else {
+            records = db.createObjectStore('records', { keyPath: ['scanId', 'type', 'id'] });
+          }
+          if (!records.indexNames.contains('byScan')) {
+            records.createIndex('byScan', 'scanId', { unique: false });
+          }
+          if (!records.indexNames.contains('byScanVideo')) {
+            records.createIndex('byScanVideo', ['scanId', 'isVideoKey'], { unique: false });
+          }
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          db.onversionchange = () => db.close();
+          resolve(db);
+        };
+        request.onerror = () => {
+          databasePromise = null;
+          reject(request.error || new Error('无法打开本地索引数据库'));
+        };
+        request.onblocked = () => {
+          databasePromise = null;
+          reject(new Error('本地索引数据库升级被其他页面阻止，请关闭其他115页面后重试'));
+        };
+      });
+      return databasePromise;
+    }
+
+    function only(value) {
+      if (!keyRangeRef) throw new Error('当前浏览器不支持IndexedDB范围查询');
+      return keyRangeRef.only(value);
+    }
+
+    async function getScan(scanId) {
+      const db = await openDatabase();
+      const tx = db.transaction('scans', 'readonly');
+      const done = transactionPromise(tx);
+      const result = await requestPromise(tx.objectStore('scans').get(String(scanId)));
+      await done;
+      return result || null;
+    }
+
+    async function getLatest(accountId, rootCid, recursive) {
+      const db = await openDatabase();
+      const tx = db.transaction('scans', 'readonly');
+      const done = transactionPromise(tx);
+      const index = tx.objectStore('scans').index('byScope');
+      const scopeKey = JSON.stringify([String(accountId), String(rootCid), recursive === true]);
+      const items = await requestPromise(index.getAll(only(scopeKey)));
+      await done;
+      items.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+      return items[0] || null;
+    }
+
+    async function saveScan(scan) {
+      const db = await openDatabase();
+      const tx = db.transaction('scans', 'readwrite');
+      const done = transactionPromise(tx);
+      tx.objectStore('scans').put(scan);
+      await done;
+      return scan;
+    }
+
+    async function commitDirectory(scan, records) {
+      const db = await openDatabase();
+      const tx = db.transaction(['scans', 'records'], 'readwrite');
+      const done = transactionPromise(tx);
+      const recordStore = tx.objectStore('records');
+      for (const record of records || []) {
+        recordStore.put(Object.assign({}, record, {
+          scanId: scan.scanId,
+          isVideoKey: record.isVideo === true ? 1 : 0
+        }));
+      }
+      tx.objectStore('scans').put(scan);
+      await done;
+      return scan;
+    }
+
+    async function getRecords(scanId) {
+      const db = await openDatabase();
+      const tx = db.transaction('records', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('records').index('byScan').getAll(only(String(scanId))));
+      await done;
+      return items;
+    }
+
+    async function getVideos(scanId) {
+      const db = await openDatabase();
+      const tx = db.transaction('records', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('records').index('byScanVideo').getAll(only([String(scanId), 1])));
+      await done;
+      return items;
+    }
+
+    async function getVideoSamples(scanId, limit = 10) {
+      const count = Math.max(1, Math.min(100, Math.floor(Number(limit) || 10)));
+      const db = await openDatabase();
+      const tx = db.transaction('records', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('records').index('byScanVideo')
+        .getAll(only([String(scanId), 1]), count));
+      await done;
+      return items;
+    }
+
+    async function deleteScan(scanId) {
+      const db = await openDatabase();
+      const tx = db.transaction(['scans', 'records'], 'readwrite');
+      const done = transactionPromise(tx);
+      const records = tx.objectStore('records');
+      const cursorRequest = records.index('byScan').openCursor(only(String(scanId)));
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      tx.objectStore('scans').delete(String(scanId));
+      await done;
+    }
+
+    function close() {
+      if (!databasePromise) return;
+      databasePromise.then(db => db.close()).catch(() => {});
+      databasePromise = null;
+    }
+
+    return Object.freeze({
+      getScan,
+      getLatest,
+      saveScan,
+      commitDirectory,
+      getRecords,
+      getVideos,
+      getVideoSamples,
+      deleteScan,
+      close
+    });
+  }
+
+  return Object.freeze({ create115IndexStore, DEFAULT_DB_NAME });
+});
+
+(function attach115IndexManager(root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.N115IndexManager = api;
+})(typeof globalThis === 'object' ? globalThis : this, function create115IndexManagerModule() {
+  'use strict';
+
+  function now() {
+    return Date.now();
+  }
+
+  function abortError() {
+    const error = new Error('目录读取已取消');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError();
+  }
+
+  function createScanId() {
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return 'scan-' + crypto.randomUUID();
+      }
+    } catch { /* 使用不依赖Crypto的本地随机标识。 */ }
+    return 'scan-' + now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+  }
+
+  function create115IndexManager(options = {}) {
+    const adapter = options.adapter;
+    const store = options.store;
+    if (!adapter || typeof adapter.listDirectory !== 'function') {
+      throw new TypeError('目录索引管理器需要115数据适配器');
+    }
+    if (!store || typeof store.getLatest !== 'function' || typeof store.commitDirectory !== 'function') {
+      throw new TypeError('目录索引管理器需要本地索引存储');
+    }
+
+    function initialScan(config) {
+      const timestamp = now();
+      return {
+        scanId: createScanId(),
+        accountId: String(config.accountId),
+        rootCid: String(config.rootCid),
+        recursive: config.recursive === true,
+        scopeKey: JSON.stringify([String(config.accountId), String(config.rootCid), config.recursive === true]),
+        status: 'scanning',
+        complete: false,
+        queue: [{ id: String(config.rootCid), depth: 0, fallbackPath: [] }],
+        visited: [],
+        maxDepth: Math.max(0, Number.isSafeInteger(config.maxDepth) ? config.maxDepth : 20),
+        stats: {
+          directoriesScanned: 0,
+          pagesFetched: 0,
+          recordsScanned: 0,
+          recordsStored: 0,
+          files: 0,
+          videos: 0,
+          folders: 0,
+          duplicates: 0,
+          unknown: 0
+        },
+        integrityOk: true,
+        depthLimitedCount: 0,
+        warnings: [],
+        pauseReason: null,
+        lastError: null,
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+    }
+
+    async function scan(config = {}) {
+      const accountId = String(config.accountId || '').trim();
+      const rootCid = String(config.rootCid || '').trim();
+      if (!accountId) throw new TypeError('缺少115账号标识，已阻止创建本地索引');
+      if (!/^\d+$/.test(rootCid)) throw new TypeError('目录ID必须是数字字符串');
+      const recursive = config.recursive === true;
+      const maxFilesPerBatch = Math.max(1, Number.isSafeInteger(config.maxFilesPerBatch) ? config.maxFilesPerBatch : 50000);
+      const maxDirectoriesPerBatch = Math.max(1, Number.isSafeInteger(config.maxDirectoriesPerBatch) ? config.maxDirectoriesPerBatch : 2000);
+      const maxDepth = Math.max(0, Number.isSafeInteger(config.maxDepth) ? config.maxDepth : 20);
+      const signal = config.signal;
+      const onProgress = typeof config.onProgress === 'function' ? config.onProgress : null;
+
+      let scan = config.restart
+        ? null
+        : await store.getLatest(accountId, rootCid, recursive);
+      if (!scan || !['paused', 'scanning'].includes(scan.status)) {
+        scan = initialScan({ accountId, rootCid, recursive, maxDepth });
+        await store.saveScan(scan);
+      }
+
+      scan = Object.assign({}, scan, {
+        status: 'scanning',
+        pauseReason: null,
+        lastError: null,
+        updatedAt: now()
+      });
+      await store.saveScan(scan);
+
+      let filesThisBatch = 0;
+      let directoriesThisBatch = 0;
+
+      try {
+        while (scan.queue.length) {
+          throwIfAborted(signal);
+          if (directoriesThisBatch >= maxDirectoriesPerBatch) {
+            scan.status = 'paused';
+            scan.pauseReason = '本批次达到目录数量上限';
+            scan.updatedAt = now();
+            await store.saveScan(scan);
+            return scan;
+          }
+
+          const current = scan.queue[0];
+          const result = await adapter.listDirectory(current.id, {
+            signal,
+            fallbackPath: current.fallbackPath,
+            onProgress: progress => {
+              if (onProgress) onProgress(Object.assign({}, progress, {
+                phase: 'directory-page',
+                directoriesVisited: scan.stats.directoriesScanned,
+                filesStored: scan.stats.files,
+                videosFound: scan.stats.videos
+              }));
+            }
+          });
+
+          const nextQueue = scan.queue.slice(1);
+          const visited = new Set(scan.visited);
+          const queued = new Set(nextQueue.map(item => String(item.id)));
+          const warnings = scan.warnings.slice();
+          let depthLimitedCount = scan.depthLimitedCount;
+
+          if (!result.complete) {
+            scan.integrityOk = false;
+            warnings.push('目录 ' + current.id + ' 存在重复或无法识别的记录');
+          }
+
+          if (recursive) {
+            for (const folder of result.folders) {
+              if (current.depth >= maxDepth) {
+                depthLimitedCount += 1;
+                warnings.push('目录深度达到安全上限 ' + maxDepth + '，未继续扫描 ' + folder.path);
+                continue;
+              }
+              const folderId = String(folder.id);
+              if (!visited.has(folderId) && !queued.has(folderId)) {
+                queued.add(folderId);
+                nextQueue.push({
+                  id: folderId,
+                  depth: current.depth + 1,
+                  fallbackPath: Array.isArray(folder.pathSegments) ? folder.pathSegments : []
+                });
+              }
+            }
+          }
+
+          const nextStats = Object.assign({}, scan.stats, {
+            directoriesScanned: scan.stats.directoriesScanned + 1,
+            pagesFetched: scan.stats.pagesFetched + result.pagesFetched,
+            recordsScanned: scan.stats.recordsScanned + result.rawRecordCount,
+            recordsStored: scan.stats.recordsStored + result.records.length,
+            files: scan.stats.files + result.files.length,
+            videos: scan.stats.videos + result.videos.length,
+            folders: scan.stats.folders + result.folders.length,
+            duplicates: scan.stats.duplicates + result.duplicateCount,
+            unknown: scan.stats.unknown + result.unknownCount
+          });
+
+          const nextVisited = scan.visited.concat([String(current.id)]);
+          const nextScan = Object.assign({}, scan, {
+            queue: nextQueue,
+            visited: nextVisited,
+            stats: nextStats,
+            warnings,
+            integrityOk: scan.integrityOk && result.complete,
+            depthLimitedCount,
+            updatedAt: now()
+          });
+
+          // 每个目录的记录与下一检查点放在同一个IndexedDB事务中提交。
+          // 如果请求中断或事务失败，旧检查点仍保留当前目录，恢复时会安全重读。
+          await store.commitDirectory(nextScan, result.records);
+          scan = nextScan;
+          filesThisBatch += result.files.length;
+          directoriesThisBatch += 1;
+
+          if (onProgress) onProgress({
+            phase: 'directory-complete',
+            directoryId: current.id,
+            directoriesVisited: scan.stats.directoriesScanned,
+            directoriesQueued: scan.queue.length,
+            recordsScanned: scan.stats.recordsScanned,
+            filesFound: scan.stats.files,
+            videosFound: scan.stats.videos,
+            pagesFetched: scan.stats.pagesFetched
+          });
+
+          if (scan.queue.length &&
+              (filesThisBatch >= maxFilesPerBatch || directoriesThisBatch >= maxDirectoriesPerBatch)) {
+            scan.status = 'paused';
+            scan.pauseReason = filesThisBatch >= maxFilesPerBatch
+              ? '本批次达到文件数量上限，已保存进度'
+              : '本批次达到目录数量上限，已保存进度';
+            scan.updatedAt = now();
+            await store.saveScan(scan);
+            return scan;
+          }
+        }
+
+        scan.status = scan.integrityOk && scan.depthLimitedCount === 0 ? 'complete' : 'incomplete';
+        scan.complete = scan.status === 'complete';
+        scan.pauseReason = null;
+        scan.completedAt = now();
+        scan.updatedAt = scan.completedAt;
+        await store.saveScan(scan);
+        return scan;
+      } catch (error) {
+        scan.status = 'paused';
+        scan.pauseReason = error && error.name === 'AbortError'
+          ? '用户暂停，已完成目录已保存'
+          : '读取中断，可在处理登录或网络问题后继续';
+        scan.lastError = String(error && error.message || error);
+        scan.updatedAt = now();
+        try { await store.saveScan(scan); } catch { /* 保留最近一次成功的目录检查点。 */ }
+        throw error;
+      }
+    }
+
+    return Object.freeze({ scan });
+  }
+
+  return Object.freeze({ create115IndexManager });
+});
+
 /* global GM_xmlhttpRequest */
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.2.1';
+  const VERSION = '0.3.0';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
+  const N115IndexStore = globalThis.N115IndexStore;
+  const N115IndexManager = globalThis.N115IndexManager;
 
-  if (window.top !== window.self || document.getElementById(HOST_ID) || !N115Adapter) return;
+  if (window.top !== window.self || document.getElementById(HOST_ID) ||
+      !N115Adapter || !N115IndexStore || !N115IndexManager) return;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -545,7 +991,7 @@
 
       try {
         const parsed = new URL(url);
-        if (parsed.origin !== API_ORIGIN || parsed.pathname !== '/files') {
+        if (parsed.origin !== API_ORIGIN || !['/files', '/offine/downpath'].includes(parsed.pathname)) {
           finish(new Error('已阻止非115目录接口请求'));
           return;
         }
@@ -567,7 +1013,7 @@
               return;
             }
             const finalUrl = new URL(response.finalUrl || parsed.href);
-            if (finalUrl.origin !== API_ORIGIN || finalUrl.pathname !== '/files') {
+            if (finalUrl.origin !== API_ORIGIN || finalUrl.pathname !== parsed.pathname) {
               finish(new Error('115目录接口发生了非预期跳转，已停止读取'));
               return;
             }
@@ -586,6 +1032,8 @@
   const adapter = N115Adapter.create115DataAdapter({
     request: (url, options) => requestText(url, options && options.signal)
   });
+  const indexStore = N115IndexStore.create115IndexStore();
+  const indexManager = N115IndexManager.create115IndexManager({ adapter, store: indexStore });
 
   const host = element('div');
   host.id = HOST_ID;
@@ -653,7 +1101,7 @@
   top.append(heading, close);
 
   const hint = element('div', 'hint',
-    '只读取115目录元数据，不下载、不移动、不删除、不修改任何网盘文件。首次建议先扫描当前目录；子目录递归需要主动勾选。');
+    '只读取115目录元数据，不下载、不移动、不删除、不修改任何网盘文件。索引按目录分批保存到本地IndexedDB，中断后可以继续；递归需要主动勾选。');
   const directory = element('div', 'directory');
   const options = element('div', 'options');
   const recursiveLabel = element('label');
@@ -692,6 +1140,19 @@
 
   let controller = null;
 
+  async function resolveAccountId(signal) {
+    const response = await requestText(API_ORIGIN + '/offine/downpath', signal);
+    let payload;
+    try { payload = JSON.parse(response.text); }
+    catch { throw new Error('115账号识别接口返回了无效数据'); }
+    const userId = payload && payload.state && payload.data && payload.data[0]
+      ? payload.data[0].user_id : null;
+    if (userId === null || userId === undefined || String(userId).trim() === '') {
+      throw new Error('无法识别当前115账号，已停止索引以避免不同账号数据混用');
+    }
+    return String(userId);
+  }
+
   function refreshDirectoryLabel() {
     const cid = currentCid();
     directory.textContent = cid === null
@@ -706,11 +1167,14 @@
     else fill.style.width = '0%';
   }
 
-  function renderResult(result) {
+  function renderResult(scan, videoSamples) {
     results.hidden = false;
-    resultTitle.textContent = result.complete
+    const stats = scan.stats || {};
+    resultTitle.textContent = scan.status === 'complete'
       ? '索引完成：数据完整'
-      : (result.truncated ? '索引已停止：达到安全上限' : '索引存在异常：不可视为完整');
+      : scan.status === 'paused'
+        ? '索引已暂停：进度已保存，可以继续读取'
+        : '索引存在异常：不可视为完整';
     summary.replaceChildren();
     const metrics = [
       ['directoriesScanned', '扫描目录'],
@@ -722,21 +1186,29 @@
     ];
     for (const metric of metrics) {
       const card = element('div', 'metric');
-      const value = metric[0] === 'files' ? result.files.length
-        : metric[0] === 'videos' ? result.videos.length
-          : metric[0] === 'folders' ? result.folders.length : result[metric[0]];
-      card.append(element('strong', '', String(value)));
+      card.append(element('strong', '', String(stats[metric[0]] || 0)));
       card.append(element('span', '', metric[1]));
       summary.append(card);
     }
     const issueLines = [];
-    if (result.duplicateCount) issueLines.push('重复记录：' + result.duplicateCount);
-    if (result.unknownCount) issueLines.push('未识别记录：' + result.unknownCount);
-    if (result.warnings.length) issueLines.push(...result.warnings);
+    if (stats.duplicates) issueLines.push('重复记录：' + stats.duplicates);
+    if (stats.unknown) issueLines.push('未识别记录：' + stats.unknown);
+    if (scan.pauseReason) issueLines.push(scan.pauseReason);
+    if (scan.lastError) issueLines.push('最近错误：' + scan.lastError);
+    if (scan.warnings && scan.warnings.length) issueLines.push(...scan.warnings);
     warnings.textContent = issueLines.join('\n');
-    sample.textContent = result.videos.slice(0, 10).map((item, index) =>
+    sample.textContent = (videoSamples || []).map((item, index) =>
       (index + 1) + '. ' + item.name + '\n   ' + item.path + '\n   ID: ' + item.id
-    ).join('\n') || '当前范围没有识别到视频。';
+    ).join('\n') || '当前索引范围没有识别到视频。';
+    start.textContent = scan.status === 'paused' ? '继续读取' : '重新扫描';
+  }
+
+  async function showSavedScan(accountId, cid, recursiveValue) {
+    if (!accountId) return;
+    const saved = await indexStore.getLatest(accountId, cid, recursiveValue);
+    if (!saved) return;
+    const samples = await indexStore.getVideoSamples(saved.scanId, 10);
+    renderResult(saved, samples);
   }
 
   async function startScan() {
@@ -748,16 +1220,27 @@
     }
     controller = new AbortController();
     const activeController = controller;
+    let accountId = null;
     start.disabled = true;
     cancel.disabled = false;
     recursive.disabled = true;
     results.hidden = true;
-    setStatus('正在连接115目录接口…', 0);
+    setStatus('正在识别当前115账号…', 0);
 
     try {
-      const result = await adapter.scanTree(cid, {
+      accountId = await resolveAccountId(activeController.signal);
+      const latest = await indexStore.getLatest(accountId, cid, recursive.checked);
+      const restart = Boolean(latest && ['complete', 'incomplete'].includes(latest.status));
+      setStatus('正在连接115目录接口…', 0);
+      const scan = await indexManager.scan({
+        accountId,
+        rootCid: cid,
         recursive: recursive.checked,
+        restart,
         signal: activeController.signal,
+        maxFilesPerBatch: 50000,
+        maxDirectoriesPerBatch: 2000,
+        maxDepth: 20,
         onProgress: progress => {
           if (controller !== activeController || activeController.signal.aborted) return;
           if (progress.phase === 'directory-page') {
@@ -766,35 +1249,47 @@
               '正在读取目录 ' + progress.directoryId +
               ' · 第 ' + progress.page + ' 页' +
               ' · 当前目录 ' + progress.offset + '/' + progress.total +
-              ' · 已扫描目录 ' + progress.directoriesVisited,
+              ' · 已保存目录 ' + progress.directoriesVisited +
+              ' · 已保存视频 ' + progress.videosFound,
               percent
             );
           } else {
             setStatus(
-              '已完成目录 ' + progress.directoriesVisited +
+              '已保存目录 ' + progress.directoriesVisited +
               ' · 累计读取 ' + progress.recordsScanned +
-              ' 条 · 已发现视频 ' + progress.videosFound,
+              ' 条 · 已保存视频 ' + progress.videosFound,
               100
             );
           }
         }
       });
       if (controller !== activeController || activeController.signal.aborted) return;
+      const samples = await indexStore.getVideoSamples(scan.scanId, 10);
       setStatus(
-        (result.complete ? '读取完成。' : '读取结束，但结果不完整。') +
-        '\n目录：' + result.directoriesScanned +
-        ' · 文件：' + result.files.length +
-        ' · 视频：' + result.videos.length +
-        ' · 文件夹：' + result.folders.length +
-        ' · 分页：' + result.pagesFetched,
+        (scan.status === 'complete' ? '读取完成，完整索引已保存在本地。' : '本批读取结束，进度已保存在本地。') +
+        '\n目录：' + scan.stats.directoriesScanned +
+        ' · 文件：' + scan.stats.files +
+        ' · 视频：' + scan.stats.videos +
+        ' · 文件夹：' + scan.stats.folders +
+        ' · 分页：' + scan.stats.pagesFetched,
         100
       );
-      renderResult(result);
+      renderResult(scan, samples);
     } catch (error) {
       if (error && error.name === 'AbortError') {
-        setStatus('已取消读取。已取得的临时结果不会保存。', 0);
+        if (accountId) {
+          setStatus('已暂停读取。已完成目录已保存，可继续读取。', 0);
+          try { await showSavedScan(accountId, cid, recursive.checked); }
+          catch (storageError) { setStatus('本地索引读取失败：' + String(storageError && storageError.message || storageError), 0); }
+        } else {
+          setStatus('已取消读取，尚未开始扫描。', 0);
+        }
       } else {
         setStatus('读取失败：' + String(error && error.message || error), 0);
+        if (accountId) {
+          try { await showSavedScan(accountId, cid, recursive.checked); }
+          catch (storageError) { setStatus('本地索引读取失败：' + String(storageError && storageError.message || storageError), 0); }
+        }
       }
     } finally {
       if (controller === activeController) controller = null;
@@ -803,7 +1298,6 @@
       recursive.disabled = false;
     }
   }
-
   function openPanel() {
     refreshDirectoryLabel();
     overlay.hidden = false;
@@ -833,4 +1327,3 @@
   });
 
 })();
-

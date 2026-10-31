@@ -20,11 +20,10 @@
     {
       "id": "115-index-verifier",
       "displayName": "115 多画面播放器 · 目录索引验证版",
-      "description": "只读扫描当前目录及可选子目录，显示分页进度、文件数量、视频数量和路径。当前为开发验证版。",
+      "description": "只读扫描115目录，支持IndexedDB本地分批保存、断点续扫和视频索引。",
       "source": "userscripts/115-index-verifier.user.js",
       "channel": "公开开发验证",
       "enabled": true
     }
   ]
 }
-
