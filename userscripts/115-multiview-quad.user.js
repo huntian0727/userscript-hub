@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（四宫格验证版）
 // @namespace    local.115.multiview
-// @version      0.1.0
+// @version      0.1.1
 // @description  从115当前页面已加载的视频中随机抽取最多4个，同时静音播放。仅供本地功能验证。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -20,7 +20,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const HOST_ID = 'local-115-multiview';
   const MAX_VIDEOS = 4;
   const VIDEO_EXT = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob|iso)$/i;
@@ -480,3 +480,4 @@
   document.documentElement.append(host);
   window.addEventListener('pagehide', closePlayer);
 })();
+

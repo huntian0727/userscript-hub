@@ -14,7 +14,7 @@
       "displayName": "115 多画面播放器（四宫格验证版）",
       "description": "从 115 当前页面已加载的视频中随机抽取最多 4 个，同时静音播放。当前为验证体验版。",
       "source": "userscripts/115-multiview-quad.user.js",
-      "channel": "验证体验",
+      "channel": "公开验证体验",
       "enabled": true
     },
     {
@@ -22,8 +22,9 @@
       "displayName": "115 多画面播放器 · 目录索引验证版",
       "description": "只读扫描当前目录及可选子目录，显示分页进度、文件数量、视频数量和路径。当前为开发验证版。",
       "source": "userscripts/115-index-verifier.user.js",
-      "channel": "开发验证",
+      "channel": "公开开发验证",
       "enabled": true
     }
   ]
 }
+

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器-目录索引验证版
 // @namespace    local.115.multiview
-// @version      0.2.0
+// @version      0.2.1
 // @description  本地开发验证：只读读取115目录分页及可选递归索引，不修改网盘内容。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -500,7 +500,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -645,7 +645,7 @@
   const top = element('header', 'top');
   const heading = element('div');
   const title = element('span', 'title', '115 目录索引验证');
-  const version = element('span', 'version', '本地开发版 v' + VERSION);
+  const version = element('span', 'version', '公开验证版 v' + VERSION);
   title.append(version);
   heading.append(title);
   const close = element('button', 'close', '关闭');
@@ -833,3 +833,4 @@
   });
 
 })();
+
