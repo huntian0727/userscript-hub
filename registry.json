@@ -24,6 +24,14 @@
       "source": "userscripts/115-index-verifier.user.js",
       "channel": "公开开发验证",
       "enabled": true
+    },
+    {
+      "id": "115-multiview-indexed",
+      "displayName": "115 多画面播放器 · 索引驱动四宫格",
+      "description": "从115已完成的本地递归索引中随机抽取最多4个带有效提取码的视频进行播放。当前为公开测试版。",
+      "source": "userscripts/115-multiview-indexed.user.js",
+      "channel": "公开测试版",
+      "enabled": true
     }
   ]
 }
