@@ -56,6 +56,25 @@ test('withUpdateUrls injects stable HTTPS metadata endpoints', () => {
   assert.doesNotMatch(result.content, /127\.0\.0\.1/);
 });
 
+test('withUpdateUrls preserves CRLF line endings from Windows userscripts', () => {
+  const crlf = String.fromCharCode(13, 10);
+  const source = [
+    '// ==UserScript==',
+    '// @name Windows sample',
+    '// @namespace test.windows',
+    '// @version 1.0.0',
+    '// @updateURL https://old.example/update.meta.js',
+    '// @downloadURL https://old.example/script.user.js',
+    '// ==/UserScript==',
+    'console.log("sample");',
+    ''
+  ].join(crlf);
+  const result = withUpdateUrls(source, 'windows-sample', 'https://example.github.io/repo');
+  const lineFeed = String.fromCharCode(10);
+  assert.equal(result.content.replaceAll(crlf, '').includes(lineFeed), false);
+  assert.ok(result.content.includes('@updateURL   https://example.github.io/repo/userscripts/windows-sample.meta.js'));
+  assert.ok(result.content.includes('@downloadURL https://example.github.io/repo/userscripts/windows-sample.user.js'));
+});
 test('public source scanner rejects common embedded credentials', () => {
   assert.doesNotThrow(() => assertNoEmbeddedSecrets('const x = 1;', 'safe'));
   const fakeToken = 'ghp_' + 'a'.repeat(26);

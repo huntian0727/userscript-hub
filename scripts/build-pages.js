@@ -122,7 +122,8 @@ function withUpdateUrls(source, id, baseUrl) {
     '// @updateURL   ' + updateUrl,
     '// @downloadURL ' + downloadUrl
   );
-  const header = lines.join('\n');
+  const newline = metadata.header.includes('\r\n') ? '\r\n' : '\n';
+  const header = lines.join(newline);
   return {
     content: source.replace(metadata.header, header),
     header,
