@@ -28,9 +28,9 @@
     {
       "id": "115-multiview-indexed",
       "displayName": "115 多画面播放器 · 索引驱动多宫格",
-      "description": "多种主副屏布局与智能画幅；包含/排除关键词、自定义换片数量、排除列表恢复、播完控制、快捷键和JSON备份恢复；保留索引部分可播与HLS分级缓冲。",
+      "description": "多种主副屏布局与智能画幅；包含/排除关键词、自定义换片数量、排除列表恢复、播完控制、快捷键和JSON备份恢复；新增单一声音来源、全屏声音交接与最近目录清理；保留索引部分可播与HLS分级缓冲。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · v0.8.0独立版功能对齐",
+      "channel": "统一测试安装中心 · v0.8.1声音来源与全屏补齐",
       "enabled": true
     }
   ]
