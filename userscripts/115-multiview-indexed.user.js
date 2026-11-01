@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.8.3
+// @version      0.8.4
 // @description  115索引多画面播放器，支持主副屏布局、智能画幅、关键词筛选、排除管理和JSON备份恢复。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -947,7 +947,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.8.3';
+  const VERSION = '0.8.4';
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -1465,7 +1465,7 @@
 
   function updateCellControls(session, cell) {
     if (cell.pauseButton) cell.pauseButton.textContent = cell.video.paused ? '播放' : '暂停';
-    if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '取消静音' : '静音';
+    if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '声音' : '静音';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
     if (cell.mainButton) {
@@ -1487,26 +1487,36 @@
     }
     if (cell.lockButton) cell.lockButton.textContent = cell.locked ? '已锁定' : '锁定';
     const key = cell.item ? itemKey(cell.item) : '';
+    const favorite = Boolean(key && session.preferenceState.favoritePickcodes.has(key));
+    const excluded = Boolean(key && session.preferenceState.excludedPickcodes.has(key));
+    const isMain = session.layoutMode !== 'mainDual' && session.mainSlotId === cell.slotId;
     if (cell.favoriteButton) {
-      const favorite = key && session.preferenceState.favoritePickcodes.has(key);
       cell.favoriteButton.textContent = favorite ? '★ 已收藏' : '☆ 收藏';
-      cell.favoriteButton.setAttribute('aria-pressed', String(Boolean(favorite)));
+      cell.favoriteButton.setAttribute('aria-pressed', String(favorite));
       cell.favoriteButton.disabled = !cell.item;
     }
     if (cell.excludeButton) {
-      const excluded = key && session.preferenceState.excludedPickcodes.has(key);
       cell.excludeButton.textContent = excluded ? '已排除' : '排除';
-      cell.excludeButton.setAttribute('aria-pressed', String(Boolean(excluded)));
+      cell.excludeButton.setAttribute('aria-pressed', String(excluded));
       cell.excludeButton.disabled = !cell.item;
     }
     if (cell.nextButton) {
       cell.nextButton.textContent = cell.locked ? '已锁定' : '换片';
       cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked || !session.availableItems.length;
     }
+    if (cell.lockIndicator) cell.lockIndicator.hidden = !cell.locked;
+    if (cell.favoriteIndicator) cell.favoriteIndicator.hidden = !favorite;
+    if (cell.soundIndicator) cell.soundIndicator.hidden = cell.video.muted;
+    if (cell.mainIndicator) {
+      cell.mainIndicator.hidden = !isMain;
+      cell.mainIndicator.textContent = session.layoutMode === 'mainDual'
+        ? (session.mainSlotId === cell.slotId ? '主屏 A' : '主屏 B') : '主屏';
+    }
     cell.box.classList.toggle('is-locked', cell.locked);
-    cell.box.classList.toggle('is-favorite', Boolean(key && session.preferenceState.favoritePickcodes.has(key)));
-    cell.box.classList.toggle('is-excluded', Boolean(key && session.preferenceState.excludedPickcodes.has(key)));
+    cell.box.classList.toggle('is-favorite', favorite);
+    cell.box.classList.toggle('is-excluded', excluded);
     cell.box.classList.toggle('is-selected', session.selectedSlotId === cell.slotId);
+    cell.box.classList.toggle('is-main', isMain);
     cell.box.classList.toggle('is-main-a', session.mainSlotId === cell.slotId && session.layoutMode === 'mainDual');
     cell.box.classList.toggle('is-main-b', session.secondaryMainSlotId === cell.slotId && session.layoutMode === 'mainDual');
   }
@@ -2925,6 +2935,46 @@
     return panel;
   }
 
+  function closeToolsDrawer(session, restoreFocus = false) {
+    if (!session || !session.toolsDrawerLayer) return;
+    session.toolsDrawerLayer.hidden = true;
+    if (session.toolsButton) session.toolsButton.setAttribute('aria-expanded', 'false');
+    Object.values(session.toolsTabButtons || {}).forEach(button => {
+      button.setAttribute('aria-selected', 'false');
+      button.classList.remove('is-active');
+    });
+    if (restoreFocus) session.toolsButton?.focus();
+  }
+
+  function setToolsDrawerTab(session, tab, toggle = true) {
+    if (!session || !session.toolsDrawerLayer) return;
+    const panels = {
+      filter: session.filterPanel,
+      recent: session.recentPanel,
+      favorites: session.favoritePanel,
+      excluded: session.excludedPanel
+    };
+    if (!panels[tab]) return;
+    if (toggle && !session.toolsDrawerLayer.hidden && session.activeToolTab === tab) {
+      closeToolsDrawer(session, true);
+      return;
+    }
+    session.toolsDrawerLayer.hidden = false;
+    session.activeToolTab = tab;
+    Object.entries(panels).forEach(([key, panel]) => {
+      if (panel) panel.hidden = key !== tab;
+    });
+    Object.entries(session.toolsTabButtons || {}).forEach(([key, button]) => {
+      const selected = key === tab;
+      button.setAttribute('aria-selected', String(selected));
+      button.classList.toggle('is-active', selected);
+    });
+    if (session.toolsButton) session.toolsButton.setAttribute('aria-expanded', 'true');
+    if (tab === 'filter') session.filterInputs?.keyword?.focus();
+    if (tab === 'favorites') void refreshFavoritesPanel(session);
+    if (tab === 'excluded') void refreshExclusionsPanel(session);
+  }
+
   function createCell(session, index) {
     const item = collectNextItem(session);
     const slotId = 'slot-' + (index + 1);
@@ -2936,7 +2986,17 @@
     const name = element('span', 'name', item ? (index + 1) + '. ' + item.name : (index + 1) + '. 空窗口');
     name.title = item?.name || '';
     const quality = element('span', 'quality');
+    const indicators = element('div', 'cell-indicators');
+    const mainIndicator = element('span', 'cell-indicator cell-indicator-main', '主屏');
+    const lockIndicator = element('span', 'cell-indicator cell-indicator-lock', '锁定');
+    const favoriteIndicator = element('span', 'cell-indicator cell-indicator-favorite', '收藏');
+    const soundIndicator = element('span', 'cell-indicator cell-indicator-sound', '声音');
+    [mainIndicator, lockIndicator, favoriteIndicator, soundIndicator].forEach(indicator => { indicator.hidden = true; });
+    indicators.append(mainIndicator, lockIndicator, favoriteIndicator, soundIndicator);
     const tools = element('div', 'cell-tools');
+    tools.setAttribute('aria-label', '视频窗口操作');
+    const primaryTools = element('div', 'cell-primary-tools');
+    const secondaryTools = element('div', 'cell-secondary-tools');
     const video = element('video');
     video.controls = true;
     video.tabIndex = 0;
@@ -2947,13 +3007,14 @@
     const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个 · 本轮候选已用完，请开启新一轮');
     const cell = {
       index, slotId, layoutSlot: index, item, box, video, status, quality, name,
+      mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
       hls: null, timer: null, abort: null, generation: 0,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false,
       aspectRatio: DEFAULT_ASPECT_RATIO, retryCount: 0, authBlocked: false
     };
 
-    const makeTool = (className, label, handler) => {
+    const makeTool = (className, label, handler, target = primaryTools) => {
       const button = element('button', 'cell-tool ' + className, label);
       button.type = 'button';
       button.disabled = !item;
@@ -2962,7 +3023,7 @@
         updateCellControls(session, cell);
         handler(event);
       };
-      tools.append(button);
+      target.append(button);
       return button;
     };
 
@@ -2982,24 +3043,25 @@
     cell.forwardButton = makeTool('cell-forward', '+10秒', () => {
       if (Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
     });
-    cell.muteButton = makeTool('cell-mute', '取消静音', () => {
+    cell.muteButton = makeTool('cell-mute', '声音', () => {
       applyAudioSource(session, video.muted ? cell.index : -1);
     });
     cell.nextButton = makeTool('cell-next', '换片', () => swapCell(session, cell));
     cell.favoriteButton = makeTool('cell-favorite', '☆ 收藏', () => { void toggleFavorite(session, cell); });
-    cell.excludeButton = makeTool('cell-exclude', '排除', () => { void toggleExcluded(session, cell); });
-    cell.mainButton = makeTool('cell-main', '主屏', () => promoteMainCell(session, cell, 'A'));
-    cell.mainAButton = makeTool('cell-main-a', '设为主屏A', () => promoteMainCell(session, cell, 'A'));
-    cell.mainBButton = makeTool('cell-main-b', '设为主屏B', () => promoteMainCell(session, cell, 'B'));
-    cell.focusButton = makeTool('cell-focus', '全屏', () => toggleCellFullscreen(session, cell));
+    cell.excludeButton = makeTool('cell-exclude', '排除', () => { void toggleExcluded(session, cell); }, secondaryTools);
+    cell.mainButton = makeTool('cell-main', '主屏', () => promoteMainCell(session, cell, 'A'), secondaryTools);
+    cell.mainAButton = makeTool('cell-main-a', '设为主屏A', () => promoteMainCell(session, cell, 'A'), secondaryTools);
+    cell.mainBButton = makeTool('cell-main-b', '设为主屏B', () => promoteMainCell(session, cell, 'B'), secondaryTools);
+    cell.focusButton = makeTool('cell-focus', '全屏', () => toggleCellFullscreen(session, cell), secondaryTools);
     cell.lockButton = makeTool('cell-lock', '锁定', () => {
       cell.locked = !cell.locked;
       updateCellControls(session, cell);
       updateRoundControls(session);
-    });
+    }, secondaryTools);
 
-    heading.append(name, quality, tools);
-    box.append(heading, video, status);
+    heading.append(name, quality, indicators);
+    tools.append(primaryTools, secondaryTools);
+    box.append(heading, video, tools, status);
     session.grid.append(box);
     session.cells[index] = cell;
     box.addEventListener('click', event => {
@@ -3109,101 +3171,42 @@
   }
 
   function applySmartGridLayout(session) {
-    const [defaultColumns, defaultRows] = STANDARD_LAYOUTS[session.layoutCount] || [2, 2];
+    const [columns, rows] = STANDARD_LAYOUTS[session.layoutCount] || [2, 2];
     const visibleCells = session.cells.filter(cell => cell && cell.index < session.layoutCount);
-    if (session.mainSlotId) {
-      const main = visibleCells.find(cell => cell.slotId === session.mainSlotId);
-      const ratio = mediaAspectRatio(main);
-      const portrait = session.smartAspectMode && ratio < 0.82;
-      session.grid.style.gridTemplateColumns = portrait
-        ? 'minmax(0,1fr) minmax(0,2fr)' : 'minmax(0,2fr) minmax(180px,1fr)';
-      session.grid.style.gridTemplateRows = 'repeat(2,minmax(0,1fr))';
-      return;
-    }
     if (!session.smartAspectMode || !visibleCells.length) {
-      session.grid.style.gridTemplateColumns = 'repeat(' + defaultColumns + ',minmax(0,1fr))';
-      session.grid.style.gridTemplateRows = 'repeat(' + defaultRows + ',minmax(0,1fr))';
+      session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',minmax(0,1fr))';
+      session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
       return;
     }
 
-    // 以已解码视频的中位画幅为目标，结合可用宽高计算最大化窗口尺寸的网格。
+    // 智能画幅只调整单格尺寸，不改变2/4/6/9/12格的稳定网格结构。
+    // 这样9格始终是3×3、12格始终是4×3，避免最后一行被挤成不规则布局。
     const ratios = visibleCells.map(mediaAspectRatio).sort((a, b) => a - b);
-    const targetAspect = Math.max(0.35, Math.min(3.2, ratios[Math.floor(ratios.length / 2)] || DEFAULT_ASPECT_RATIO));
+    const targetAspect = Math.max(0.35, Math.min(3.2,
+      ratios[Math.floor(ratios.length / 2)] || DEFAULT_ASPECT_RATIO));
     const computed = window.getComputedStyle(session.grid);
     const paddingX = (parseFloat(computed.paddingLeft) || 0) + (parseFloat(computed.paddingRight) || 0);
     const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0);
+    const gapX = parseFloat(computed.columnGap) || 3;
+    const gapY = parseFloat(computed.rowGap) || 3;
     const availableWidth = Math.max(1, (session.grid.clientWidth || window.innerWidth) - paddingX);
     const availableHeight = Math.max(1, (session.grid.clientHeight || window.innerHeight) - paddingY);
-    const measureHeadingHeight = () => Math.max(30, ...visibleCells.map(cell => {
+    const headingHeight = Math.max(30, ...visibleCells.map(cell => {
       const heading = cell.box && cell.box.querySelector('.heading');
       return heading ? heading.getBoundingClientRect().height : 30;
     }));
-    const chooseBest = headingHeight => {
-      let best = null;
-      for (let rows = 1; rows <= visibleCells.length; rows++) {
-        const columns = Math.ceil(visibleCells.length / rows);
-        const usableHeight = Math.max(1, availableHeight - 3 * (rows - 1));
-        const rowHeightLimit = usableHeight / rows;
-        const widthBound = availableWidth / columns - 3;
-        // 标题工具条不属于视频画面，必须从每行高度预算中扣除。
-        const heightBound = Math.max(1, rowHeightLimit - headingHeight) * targetAspect;
-        const cellWidth = Math.min(widthBound, heightBound);
-        if (!Number.isFinite(cellWidth) || cellWidth <= 0) continue;
-        const unused = columns * rows - visibleCells.length;
-        const candidate = { rows, columns, cellWidth, unused, defaultDistance: Math.abs(rows - defaultRows) };
-        if (!best || candidate.cellWidth > best.cellWidth + 0.5 ||
-            (Math.abs(candidate.cellWidth - best.cellWidth) <= 0.5 && candidate.unused < best.unused) ||
-            (Math.abs(candidate.cellWidth - best.cellWidth) <= 0.5 && candidate.unused === best.unused &&
-              candidate.defaultDistance < best.defaultDistance)) best = candidate;
-      }
-      return best;
-    };
-    const applyBest = (best, headingHeight) => {
-      if (!best) return false;
-      const cellHeight = best.cellWidth / targetAspect + headingHeight;
-      const halfTrackWidth = (best.cellWidth + 3) / 2;
-      session.grid.style.columnGap = '0px';
-      session.grid.style.rowGap = '3px';
-      session.grid.style.justifyContent = 'center';
-      session.grid.style.alignContent = 'center';
-      session.grid.style.gridTemplateColumns = Array(best.columns * 2).fill(halfTrackWidth.toFixed(2) + 'px').join(' ');
-      session.grid.style.gridTemplateRows = Array(best.rows).fill(cellHeight.toFixed(2) + 'px').join(' ');
+    const widthLimit = Math.max(1, (availableWidth - gapX * (columns - 1)) / columns);
+    const heightLimit = Math.max(1, (availableHeight - gapY * (rows - 1)) / rows - headingHeight);
+    const cellWidth = Math.max(1, Math.min(widthLimit, heightLimit * targetAspect));
+    const cellHeight = cellWidth / targetAspect + headingHeight;
 
-      // 使用半格列定位，使最后一行数量较少时仍能居中，所有视频窗口保持统一尺寸。
-      const baseCount = Math.floor(visibleCells.length / best.rows);
-      const extra = visibleCells.length % best.rows;
-      let cellIndex = 0;
-      for (let row = 0; row < best.rows; row++) {
-        const rowCount = baseCount + (row < extra ? 1 : 0);
-        const startHalf = best.columns - rowCount;
-        for (let offset = 0; offset < rowCount; offset++) {
-          const cell = visibleCells[cellIndex++];
-          cell.box.style.gridColumn = (startHalf + offset * 2 + 1) + ' / span 2';
-          cell.box.style.gridRow = String(row + 1) + ' / span 1';
-          cell.box.style.margin = '0 1.5px';
-        }
-      }
-      return true;
-    };
-
-    // 首次套用布局后，标题栏可能因新窗口宽度而换行或收起控件；再测一次并修正行高，避免比例被标题栏挤偏。
-    let headingHeight = measureHeadingHeight();
-    let best = chooseBest(headingHeight);
-    if (!best) {
-      session.grid.style.gridTemplateColumns = 'repeat(' + defaultColumns + ',minmax(0,1fr))';
-      session.grid.style.gridTemplateRows = 'repeat(' + defaultRows + ',minmax(0,1fr))';
-      return;
-    }
-    for (let pass = 0; pass < 4; pass++) {
-      applyBest(best, headingHeight);
-      const measuredHeadingHeight = measureHeadingHeight();
-      if (Math.abs(measuredHeadingHeight - headingHeight) < 1) return;
-      headingHeight = measuredHeadingHeight;
-      best = chooseBest(headingHeight) || best;
-    }
-    applyBest(best, headingHeight);
-  }
-  function applyMainLayoutPositions(session) {
+    session.grid.style.columnGap = gapX + 'px';
+    session.grid.style.rowGap = gapY + 'px';
+    session.grid.style.justifyContent = 'center';
+    session.grid.style.alignContent = 'center';
+    session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',' + cellWidth.toFixed(2) + 'px)';
+    session.grid.style.gridTemplateRows = 'repeat(' + rows + ',' + cellHeight.toFixed(2) + 'px)';
+  }  function applyMainLayoutPositions(session) {
     const cells = session.cells.filter(cell => cell && cell.index < session.layoutCount)
       .slice().sort((a, b) => a.layoutSlot - b.layoutSlot);
     if (session.layoutMode === 'mainDual') {
@@ -3559,14 +3562,16 @@
       panel.setAttribute('aria-label', '115索引多画面播放');
       const bar = element('header', 'bar');
       const description = element('div', 'description');
+      const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
+        (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
+        (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
+        ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
+        indexed.total + ' 个 · 本次抽样 ' + items.length + ' 个 · 默认静音';
+      description.title = fullIndexSummary;
+      description.setAttribute('aria-label', '115 多画面播放 · 索引版 v' + VERSION + ' · ' + fullIndexSummary);
       description.append(
         element('strong', '', '115 多画面播放'),
-        element('small', '', '索引版 v' + VERSION + ' · ' +
-          (indexed.scan.recursive ? '包含子文件夹' : '仅当前目录') + ' · ' +
-          (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') + ' · 默认静音'),
-        element('small', 'index-summary', '索引状态：' + indexed.statusLabel +
-          ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
-          indexed.total + ' 个 · 本次抽样 ' + items.length + ' 个')
+        element('small', '', '索引版 v' + VERSION + ' · ' + indexed.total + ' 个候选')
       );
 
       const grid = element('div', 'grid');
@@ -3588,6 +3593,8 @@
         lastAudioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) && indexed.settings.audioSourceIndex >= 0 ? indexed.settings.audioSourceIndex : 0,
         fullscreenAudioBackup: null, fullscreenExitAt: 0,
         layoutResizeObserver: null, layoutResizeHandler: null, moreDetails: null,
+        toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
+        toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
         mainSlotId: null, secondaryMainSlotId: null, focusSlotId: null, selectedSlotId: 'slot-1',
         layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, smartAspectButton: null, endModeSelect: null,
         audioSourceSelect: null, pauseAllButton: null, muteAllButton: null,
@@ -3601,6 +3608,12 @@
           const formEditing = eventPath.some(target => target instanceof Element && target.matches('input,textarea,select,[contenteditable="true"]'));
           const buttonFocused = eventPath.some(target => target instanceof Element && target.matches('button'));
           if (event.key === 'Escape') {
+            if (session.toolsDrawerLayer && !session.toolsDrawerLayer.hidden) {
+              event.preventDefault();
+              event.stopPropagation();
+              closeToolsDrawer(session, true);
+              return;
+            }
             if (formEditing) return;
             if (session.fullscreenExitAt && Date.now() - session.fullscreenExitAt < 400) {
               event.preventDefault();
@@ -3651,6 +3664,34 @@
       session.favoritePanel = favoritePanel;
       const excludedPanel = createExclusionsPanel(session);
       session.excludedPanel = excludedPanel;
+      const toolsLayer = element('div', 'tools-drawer-layer');
+      toolsLayer.hidden = true;
+      const toolsBackdrop = element('button', 'tools-drawer-backdrop');
+      toolsBackdrop.type = 'button';
+      toolsBackdrop.setAttribute('aria-label', '关闭工具抽屉');
+      toolsBackdrop.onclick = () => closeToolsDrawer(session, true);
+      const toolsDrawer = element('aside', 'tools-drawer');
+      toolsDrawer.setAttribute('role', 'complementary');
+      toolsDrawer.setAttribute('aria-label', '播放器工具');
+      const toolsHeader = element('div', 'tools-drawer-header');
+      const toolsTitle = element('div', 'tools-drawer-title');
+      toolsTitle.append(element('strong', '', '工具中心'), element('small', '', '筛选、目录与偏好管理'));
+      const toolsClose = element('button', 'tools-drawer-close', '✕');
+      toolsClose.type = 'button';
+      toolsClose.setAttribute('aria-label', '关闭工具抽屉');
+      toolsClose.onclick = () => closeToolsDrawer(session, true);
+      toolsHeader.append(toolsTitle, toolsClose);
+      const toolsTabs = element('nav', 'tools-drawer-tabs');
+      toolsTabs.setAttribute('role', 'tablist');
+      toolsTabs.setAttribute('aria-label', '工具分类');
+      const toolsBody = element('div', 'tools-drawer-body');
+      toolsBody.append(filterPanel, recentPanel, favoritePanel, excludedPanel);
+      toolsDrawer.append(toolsHeader, toolsTabs, toolsBody);
+      toolsLayer.append(toolsBackdrop, toolsDrawer);
+      Object.assign(session, {
+        toolsDrawerLayer: toolsLayer, toolsDrawer, toolsDrawerTabs: toolsTabs,
+        toolsDrawerBody: toolsBody
+      });
       const toolbar = element('nav', 'toolbar');
       toolbar.setAttribute('role', 'toolbar');
       toolbar.setAttribute('aria-label', '多画面布局与播放控制');
@@ -3754,67 +3795,21 @@
         applyAudioSource(session, target);
         if (session.moreDetails) session.moreDetails.open = false;
       };
-      session.filterToggleButton = element('button', 'toolbar-button', '智能筛选');
-      session.filterToggleButton.type = 'button';
-      session.filterToggleButton.setAttribute('aria-expanded', 'false');
-      session.filterToggleButton.onclick = () => {
-        filterPanel.hidden = !filterPanel.hidden;
-        recentPanel.hidden = true;
-        favoritePanel.hidden = true;
-        excludedPanel.hidden = true;
-        session.filterToggleButton.setAttribute('aria-expanded', String(!filterPanel.hidden));
-        session.recentButton.setAttribute('aria-expanded', 'false');
-        session.favoritesButton.setAttribute('aria-expanded', 'false');
-        session.excludedButton.setAttribute('aria-expanded', 'false');
-        if (!filterPanel.hidden) session.filterInputs.keyword.focus();
+      const createToolsTab = (key, label) => {
+        const button = element('button', 'drawer-tab', label);
+        button.type = 'button';
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', 'false');
+        button.onclick = () => setToolsDrawerTab(session, key, true);
+        session.toolsTabButtons[key] = button;
+        toolsTabs.append(button);
+        return button;
       };
-      session.recentButton = element('button', 'toolbar-button', '最近目录');
-      session.recentButton.type = 'button';
-      session.recentButton.setAttribute('aria-expanded', 'false');
-      session.recentButton.onclick = () => {
-        recentPanel.hidden = !recentPanel.hidden;
-        filterPanel.hidden = true;
-        favoritePanel.hidden = true;
-        excludedPanel.hidden = true;
-        session.recentButton.setAttribute('aria-expanded', String(!recentPanel.hidden));
-        session.filterToggleButton.setAttribute('aria-expanded', 'false');
-        session.favoritesButton.setAttribute('aria-expanded', 'false');
-        session.excludedButton.setAttribute('aria-expanded', 'false');
-      };
-      session.favoritesButton = element('button', 'toolbar-button', '收藏列表');
-      session.favoritesButton.type = 'button';
-      session.favoritesButton.setAttribute('aria-expanded', 'false');
-      session.favoritesButton.onclick = () => {
-        if (session.moreDetails) session.moreDetails.open = false;
-        favoritePanel.hidden = !favoritePanel.hidden;
-        filterPanel.hidden = true;
-        recentPanel.hidden = true;
-        excludedPanel.hidden = true;
-        session.favoritesButton.setAttribute('aria-expanded', String(!favoritePanel.hidden));
-        session.filterToggleButton.setAttribute('aria-expanded', 'false');
-        session.recentButton.setAttribute('aria-expanded', 'false');
-        session.excludedButton.setAttribute('aria-expanded', 'false');
-        if (!favoritePanel.hidden) void refreshFavoritesPanel(session);
-      };
-      session.excludedButton = element('button', 'toolbar-button', '排除列表');
-      session.excludedButton.type = 'button';
-      session.excludedButton.setAttribute('aria-expanded', 'false');
-      session.excludedButton.onclick = () => {
-        if (session.moreDetails) session.moreDetails.open = false;
-        excludedPanel.hidden = !excludedPanel.hidden;
-        filterPanel.hidden = true;
-        recentPanel.hidden = true;
-        favoritePanel.hidden = true;
-        session.excludedButton.setAttribute('aria-expanded', String(!excludedPanel.hidden));
-        session.filterToggleButton.setAttribute('aria-expanded', 'false');
-        session.recentButton.setAttribute('aria-expanded', 'false');
-        session.favoritesButton.setAttribute('aria-expanded', 'false');
-        if (!excludedPanel.hidden) void refreshExclusionsPanel(session);
-      };
-      if (!items.length) {
-        filterPanel.hidden = false;
-        session.filterToggleButton.setAttribute('aria-expanded', 'true');
-      }
+      session.filterToggleButton = createToolsTab('filter', '智能筛选');
+      session.recentButton = createToolsTab('recent', '最近目录');
+      session.favoritesButton = createToolsTab('favorites', '收藏列表');
+      session.excludedButton = createToolsTab('excluded', '排除列表');
+      if (!items.length) setToolsDrawerTab(session, 'filter', false);
       session.swapAllButton = element('button', 'toolbar-button', '全部换一批');
       session.swapAllButton.type = 'button';
       session.swapAllButton.onclick = () => swapAllUnlocked(session);
@@ -3825,33 +3820,46 @@
       session.resumeButton.type = 'button';
       session.resumeButton.hidden = true;
       session.resumeButton.onclick = () => resumeAfterAuth(session);
+      session.toolsButton = element('button', 'toolbar-button tools-toggle', '工具');
+      session.toolsButton.type = 'button';
+      session.toolsButton.setAttribute('aria-expanded', String(!toolsLayer.hidden));
+      session.toolsButton.onclick = () => {
+        if (!toolsLayer.hidden) closeToolsDrawer(session);
+        else setToolsDrawerTab(session, session.activeToolTab || 'filter', false);
+      };
       session.roundStatus = element('small', 'round-status', '第1轮 · 剩余' + items.length + '/' + items.length);
       const moreDetails = element('details', 'toolbar-more');
       moreDetails.setAttribute('aria-label', '更多播放设置');
       const moreSummary = element('summary', 'toolbar-more-summary', '更多');
-      moreSummary.title = '声音来源、智能画幅、播放结束行为、收藏和排除管理';
+      moreSummary.title = '智能画幅、播放结束行为和声音来源设置';
       const moreMenu = element('div', 'toolbar-more-menu');
-      moreMenu.append(session.favoritesButton, session.excludedButton, session.smartAspectButton,
-        session.endModeSelect, session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
+      moreMenu.append(session.smartAspectButton, session.endModeSelect,
+        session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
       moreDetails.append(moreSummary, moreMenu);
       session.moreDetails = moreDetails;
-      toolbar.append(session.recentButton, layoutGroup, session.swapAllButton, session.pauseAllButton,
-        session.newRoundButton, session.filterToggleButton, session.resumeButton, session.roundStatus, moreDetails);
+      toolbar.append(layoutGroup, session.swapAllButton, session.pauseAllButton,
+        session.newRoundButton, session.toolsButton, session.resumeButton, session.roundStatus, moreDetails);
 
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
       close.onclick = closePlayer;
       bar.append(description, toolbar, close);
-      panel.append(bar, filterPanel, recentPanel, favoritePanel, excludedPanel, grid);
+      panel.append(bar, grid, toolsLayer);
       shadow.append(panel);
+      const updateToolsDrawerOffset = () => {
+        toolsLayer.style.top = Math.max(0, bar.getBoundingClientRect().height) + 'px';
+      };
+      updateToolsDrawerOffset();
       active = session;
       if (typeof ResizeObserver === 'function') {
         session.layoutResizeObserver = new ResizeObserver(() => {
+          updateToolsDrawerOffset();
           if (!session.closed) applyLayoutPositions(session);
         });
         session.layoutResizeObserver.observe(grid);
+        session.layoutResizeObserver.observe(bar);
       } else {
-        session.layoutResizeHandler = () => { if (!session.closed) applyLayoutPositions(session); };
+        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (!session.closed) applyLayoutPositions(session); };
         window.addEventListener('resize', session.layoutResizeHandler);
       }
       shadow.addEventListener('keydown', session.onKey, true);
@@ -3877,45 +3885,39 @@
     .launcher{pointer-events:auto;position:absolute;right:22px;bottom:108px;padding:11px 17px;
       color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
-    .panel{pointer-events:auto;position:absolute;inset:0;background:#080b10;color:#eee;display:flex;flex-direction:column;font-size:14px}
-    .bar{position:relative;z-index:20;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"description close" "toolbar toolbar";align-items:center;gap:7px 12px;flex-shrink:0;padding:8px 12px;background:#171c25;border-bottom:1px solid #303744}
-    .description{grid-area:description;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-width:0;flex:1}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
-    .toolbar{grid-area:toolbar;display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0}.layout-group{display:flex;gap:3px;padding:2px;border:1px solid #394456;border-radius:7px;background:#101722}.round-status{display:block;max-width:150px;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:#aab5c7;white-space:nowrap}
-    .toolbar-more{position:relative;z-index:30;flex-shrink:0}.toolbar-more-summary{display:inline-flex;align-items:center;justify-content:center;list-style:none;cursor:pointer;color:#eaf0fb;background:#283447;border:1px solid #4b5d78;border-radius:5px;padding:5px 10px;font:inherit;font-size:11px;white-space:nowrap}.toolbar-more-summary::-webkit-details-marker{display:none}.toolbar-more[open]>.toolbar-more-summary{background:#245dd6;border-color:#77a0f5}
-    .toolbar-more-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:100;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:270px;max-width:min(88vw,360px);padding:10px;border:1px solid #43536b;border-radius:8px;background:#171f2b;box-shadow:0 10px 30px #0009}.toolbar-more-menu button,.toolbar-more-menu select{width:100%;min-width:0;max-width:none}.toolbar-more-menu select{font-size:11px}.toolbar-more-menu .dual-small-count-select[hidden]{display:none}
-    .filter-panel{display:flex;flex-direction:column;gap:8px;flex-shrink:0;padding:10px 14px;background:#101722;border-bottom:1px solid #303744}.filter-panel[hidden]{display:none}
-    .recent-panel,.favorites-panel{display:flex;flex-direction:column;gap:8px;flex-shrink:0;max-height:260px;overflow:auto;padding:10px 14px;background:#101722;border-bottom:1px solid #303744}
-    .recent-panel[hidden],.favorites-panel[hidden]{display:none}
-    .recent-panel-heading{display:flex;flex-direction:column;gap:6px}.recent-panel-title{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-    .recent-panel-heading small,.favorites-panel-heading small{font-size:11px;color:#aab5c7}.recent-message{display:block;min-height:14px;color:#aab5c7;font-size:11px}.recent-message.is-error{color:#ff9c9c}
-    .recent-list,.favorites-list{display:flex;flex-direction:column;gap:6px;min-width:0}
-    .recent-row,.favorite-row{display:flex;align-items:center;gap:9px;min-width:0;padding:7px 9px;border:1px solid #303d50;border-radius:6px;background:#0b111a}
-    .recent-details,.favorite-details{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
-    .recent-path,.favorite-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
-    .recent-meta,.favorite-meta,.favorite-message,.favorite-selection-label{font-size:11px;color:#aab5c7;overflow-wrap:anywhere}
-    .favorites-actions,.favorite-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-    .favorite-select{flex-shrink:0;accent-color:#4f8df5}
-    .favorite-message.is-error{color:#ff9c9c}
-    .panel-empty{margin:0;padding:8px;color:#aab5c7;font-size:12px}
-
-    .filter-fields{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.filter-field{display:flex;flex-direction:column;gap:4px;min-width:0;color:#aab5c7;font-size:11px}
-    .filter-field input,.filter-schemes input,.filter-schemes select{width:100%;min-width:0;padding:7px 8px;border:1px solid #46566e;border-radius:5px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
-    .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}.filter-check input{accent-color:#4f8df5}
-    .filter-schemes{display:flex;gap:7px;flex-wrap:wrap}.filter-profile-select{max-width:220px}.filter-profile-name{max-width:220px}
-    .filter-actions{display:flex;gap:6px;flex-wrap:wrap}.filter-message{min-height:14px;color:#aab5c7;font-size:11px}.filter-message.is-error{color:#ff9c9c}
-    .data-management{margin-top:10px;padding-top:9px;border-top:1px solid #344258}.data-management-summary{cursor:pointer;color:#dce6f5;font-size:12px;font-weight:700;padding:4px 0}
-    .data-management-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:7px 0}.data-management-actions select{min-width:170px;max-width:220px;padding:6px 8px;border:1px solid #4b5d78;border-radius:5px;background:#202b3b;color:#eaf0fb;font:inherit;font-size:12px}
-    .backup-preview,.backup-status{display:block;color:#aab5c7;font-size:11px;line-height:1.5;margin-top:5px}.backup-status.is-error{color:#ff9c9c}.backup-file-input[hidden]{display:none}
-    .toolbar button,.cell-tool{font:inherit;color:#eaf0fb;background:#283447;border:1px solid #4b5d78;border-radius:5px;padding:5px 7px;font-size:11px;white-space:nowrap}
-    .toolbar button:hover,.cell-tool:hover{background:#38527b}.toolbar .is-active{background:#245dd6;border-color:#77a0f5}.toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}.toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:2px}
-    .toolbar-button{background:#303947!important}.close{grid-area:close;justify-self:end;background:#303947;border:1px solid #536078;color:#fff;padding:6px 12px;border-radius:5px;white-space:nowrap}
-    .toolbar select{max-width:150px;min-width:88px;padding:5px 7px;border:1px solid #4b5d78;border-radius:5px;background:#202b3b;color:#eaf0fb;font:inherit;font-size:11px}
+    .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
+    .bar{position:relative;z-index:20;display:grid;grid-template-columns:minmax(210px,.95fr) minmax(0,2fr) auto;grid-template-areas:"description toolbar close";align-items:center;gap:5px 9px;flex-shrink:0;padding:4px 10px;background:#111720;border-bottom:1px solid #273243;box-shadow:0 5px 18px #0003}
+    .description{grid-area:description;display:flex;flex-wrap:nowrap;align-items:center;gap:4px 9px;min-width:0;overflow:hidden}
+    .description strong{font-size:15px;font-weight:700;letter-spacing:.1px;white-space:nowrap;flex-shrink:0}
+    .description small{font-size:10px;color:#8e9db2;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+    .toolbar{grid-area:toolbar;display:flex;align-items:center;gap:5px;flex-wrap:nowrap;min-width:0;overflow-x:auto;scrollbar-width:none;padding:1px 0}
+    .toolbar::-webkit-scrollbar{display:none}
+    .layout-group{display:flex;align-items:center;gap:3px;padding:2px;border:1px solid #2c3a4d;border-radius:8px;background:#0b111a;flex-shrink:0}
+    .round-status{display:block;max-width:210px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:#91a2b9;white-space:nowrap;flex-shrink:1}
+    .toolbar-more{position:relative;z-index:30;flex-shrink:0}
+    .toolbar-more-summary{display:inline-flex;align-items:center;justify-content:center;list-style:none;cursor:pointer;color:#dce7f7;background:#1a2635;border:1px solid #35465d;border-radius:7px;padding:4px 8px;font:inherit;font-size:10px;white-space:nowrap}
+    .toolbar-more-summary::-webkit-details-marker{display:none}
+    .toolbar-more[open]>.toolbar-more-summary{background:#244d8c;border-color:#5484d0}
+    .toolbar-more-menu{position:absolute;top:calc(100% + 7px);right:0;z-index:100;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:270px;max-width:min(88vw,360px);padding:12px;border:1px solid #35465d;border-radius:10px;background:#121b27;box-shadow:0 14px 40px #000b}
+    .toolbar-more-menu button,.toolbar-more-menu select{width:100%;min-width:0;max-width:none}
+    .toolbar-more-menu select{font-size:11px}
+    .toolbar-more-menu .dual-small-count-select[hidden]{display:none}
+    .close{grid-area:close;justify-self:end;background:#1a2635;border:1px solid #35465d;color:#dce7f7;padding:4px 9px;border-radius:7px;white-space:nowrap;font-size:10px}
+    .toolbar button,.cell-tool{font:inherit;color:#dce7f7;background:#1a2635;border:1px solid #35465d;border-radius:7px;padding:4px 7px;font-size:10px;white-space:nowrap;transition:background .15s,border-color .15s,transform .15s}
+    .toolbar button:hover,.cell-tool:hover{background:#263b56;border-color:#55749d}
+    .toolbar .is-active,.toolbar .layout-button.is-active{background:#214f96;border-color:#5c8edb;color:#fff}
+    .toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}
+    .toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible,.drawer-tab:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
+    .toolbar-button{background:#1a2635!important}
+    .toolbar select{max-width:150px;min-width:88px;padding:6px 8px;border:1px solid #35465d;border-radius:7px;background:#121b27;color:#dce7f7;font:inherit;font-size:11px}
     .grid.main-layout{grid-auto-flow:row;grid-auto-rows:minmax(0,1fr)}
     .grid.main2-layout,.grid.main5-layout,.grid.dual-main-layout{align-content:stretch}
     .grid.dual-main-layout .cell.is-main-a .heading{border-bottom:2px solid #4f8df5}
     .grid.dual-main-layout .cell.is-main-b .heading{border-bottom:2px solid #39b7a5}
-    .cell.is-selected{outline:1px solid #6e9dff;outline-offset:-1px}
-    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;min-width:0;gap:3px;padding:3px;overflow:auto}
+    .cell.is-selected{outline:1px solid #5f8fe0;outline-offset:-1px}
+    .cell.is-main{border:1px solid #4f8df5;box-shadow:inset 0 0 0 1px #4f8df544}
+    .cell.is-main-b{border-color:#39b7a5;box-shadow:inset 0 0 0 1px #39b7a544}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;min-width:0;gap:4px;padding:4px;overflow:auto;background:#05070b}
     .grid[data-layout="2"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(1,minmax(0,1fr))}
     .grid[data-layout="4"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
     .grid[data-layout="6"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
@@ -3924,18 +3926,112 @@
     .grid.has-main{grid-template-columns:minmax(0,2fr) minmax(180px,1fr);grid-template-rows:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(0,1fr)}
     .grid.has-main .cell:not(.is-main){grid-column:2}.grid.has-main .cell.is-main{grid-column:1;grid-row:1 / span 2}
     .grid.has-focus{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}.grid.has-focus .cell.is-focused{grid-column:1;grid-row:1}
-    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}.cell[hidden]{display:none!important}.cell:fullscreen{width:100vw;height:100vh;max-width:100vw;max-height:100vh;background:#000}.cell.fullscreen-fallback{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:2147483000!important}.cell.is-locked .heading{border-left:3px solid #e3b341}.cell.is-favorite .cell-favorite{color:#f6d66e;border-color:#9b7b2b}.cell.is-excluded .cell-exclude{color:#ffaaaa;border-color:#9e5555}
-    .heading{display:flex;gap:6px;flex-shrink:0;align-items:center;flex-wrap:wrap;min-height:30px;padding:5px 7px;background:#141923;font-size:12px}
-    .name{flex:1;min-width:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.quality{color:#a2b7d5;font-size:11px;white-space:nowrap}.cell-tools{display:flex;gap:3px;flex-wrap:wrap}.cell-tool{padding:3px 5px;font-size:10px}.cell-tool:disabled{opacity:.35;cursor:not-allowed}
-    video{display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
-    @media(max-width:1000px){.grid[data-layout="12"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}}
-    @media(max-width:900px){.filter-fields{grid-template-columns:repeat(2,minmax(120px,1fr))}}
-    @media(max-width:620px){.bar{padding:8px;gap:7px}.description{min-width:0}.toolbar{width:100%;gap:4px}.toolbar-more-menu{right:auto;left:0}.filter-panel{padding:8px}.filter-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.filter-schemes>*{max-width:none;flex:1 1 140px}.grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.heading{padding:3px;gap:3px}.cell-tool{padding:2px 4px}}
-    .status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:10px 14px;line-height:1.7;
-      background:#151b25ee;border-radius:6px;color:#d7e0ef;text-align:center;font-size:13px;pointer-events:none;overflow-wrap:anywhere}
+    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column;border:1px solid #151d29;border-radius:3px}
+    .cell[hidden]{display:none!important}
+    .cell:fullscreen{width:100vw;height:100vh;max-width:100vw;max-height:100vh;background:#000}
+    .cell.fullscreen-fallback{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:2147483000!important}
+    .cell.is-locked .heading{border-left:2px solid #d8ad52}
+    .cell.is-favorite .cell-indicator-favorite{color:#f5d98c;background:#4c3b1c}
+    .heading{position:relative;z-index:6;display:flex;gap:7px;flex-shrink:0;align-items:center;flex-wrap:nowrap;min-height:29px;height:29px;padding:4px 8px;background:#111923;font-size:11px;border-bottom:1px solid #1d2a39}
+    .name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#dbe4f1;font-size:11px}
+    .quality{color:#8ea8c9;font-size:10px;white-space:nowrap;flex-shrink:0}
+    .cell-indicators{display:flex;align-items:center;gap:3px;flex-shrink:0}
+    .cell-indicator{display:inline-flex;align-items:center;padding:2px 5px;border-radius:4px;background:#1a2a3d;color:#b9cce6;font-size:9px;line-height:1.2;white-space:nowrap}
+    .cell-indicator[hidden]{display:none}
+    .cell-indicator-main{background:#1d3c69;color:#c8ddff}
+    .cell-indicator-lock{background:#493819;color:#f0d69c}
+    .cell-indicator-favorite{background:#493819;color:#f5d98c}
+    .cell-indicator-sound{background:#16443c;color:#9ce0ce}
+    video{position:relative;z-index:1;display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
+    .cell-tools{position:absolute;z-index:5;left:7px;right:7px;bottom:40px;display:flex;flex-direction:column;gap:5px;padding:18px 7px 7px;border:1px solid #ffffff12;border-radius:8px;background:linear-gradient(180deg,transparent 0%,#05080ee8 38%);opacity:0;visibility:hidden;transform:translateY(7px);transition:opacity .16s ease,transform .16s ease,visibility .16s;pointer-events:none}
+    .cell:hover .cell-tools,.cell:focus-within .cell-tools{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto}
+    .cell-primary-tools,.cell-secondary-tools{display:flex;align-items:center;justify-content:flex-start;gap:4px;flex-wrap:wrap}
+    .cell-secondary-tools{padding-top:4px;border-top:1px solid #ffffff20}
+    .cell-tool{padding:4px 7px;font-size:10px;line-height:1.2;background:#172436eF;border-color:#50627b}
+    .cell-tool[hidden]{display:none!important}
+    .status{position:absolute;z-index:3;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:9px 13px;line-height:1.6;
+      background:#111923eF;border:1px solid #ffffff18;border-radius:7px;color:#d7e0ef;text-align:center;font-size:12px;pointer-events:none;overflow-wrap:anywhere}
     .status[hidden]{display:none}
-  `;
-  const launcher = element('button', 'launcher', '多画面播放（索引版）');
+    .tools-drawer-layer{position:absolute;inset:0;z-index:80;pointer-events:none}
+    .tools-drawer-layer[hidden]{display:none!important}
+    .tools-drawer-backdrop{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;background:#02050a99;pointer-events:auto;cursor:default}
+    .tools-drawer{position:absolute;top:0;right:0;bottom:0;display:flex;flex-direction:column;width:min(380px,94vw);max-width:100%;background:#101823;border-left:1px solid #34445a;box-shadow:-18px 0 48px #0009;pointer-events:auto;animation:tools-drawer-in .18s ease-out}
+    @keyframes tools-drawer-in{from{transform:translateX(18px);opacity:.75}to{transform:translateX(0);opacity:1}}
+    .tools-drawer-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 17px 12px;border-bottom:1px solid #2a394c}
+    .tools-drawer-title{display:flex;flex-direction:column;gap:4px;min-width:0}
+    .tools-drawer-title strong{font-size:15px;color:#edf4ff}
+    .tools-drawer-title small{font-size:11px;color:#8d9eb4}
+    .tools-drawer-close{width:30px;height:30px;border:1px solid #35465d;border-radius:7px;background:#1a2635;color:#c9d6e8;font-size:13px}
+    .tools-drawer-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;padding:10px 12px;border-bottom:1px solid #2a394c;background:#0d141e}
+    .drawer-tab{min-width:0;padding:8px 4px;border:1px solid transparent;border-radius:7px;background:transparent;color:#91a2b9;font-size:11px;white-space:nowrap}
+    .drawer-tab:hover{background:#1a2635;color:#e4edf9}
+    .drawer-tab.is-active{background:#1e3c66;border-color:#426da8;color:#eaf3ff}
+    .tools-drawer-body{display:flex;flex:1;min-height:0;overflow:auto}
+    .tools-drawer-body .filter-panel,.tools-drawer-body .recent-panel,.tools-drawer-body .favorites-panel{display:flex;flex:1;min-height:0;max-height:none;overflow:auto;flex-direction:column;gap:10px;padding:15px 16px;background:transparent;border:0}
+    .filter-panel[hidden],.recent-panel[hidden],.favorites-panel[hidden]{display:none!important}
+    .filter-panel{flex-shrink:0}
+    .recent-panel-heading{display:flex;flex-direction:column;gap:6px}
+    .recent-panel-title{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+    .recent-panel-heading small,.favorites-panel-heading small{font-size:11px;color:#8d9eb4}
+    .recent-message{display:block;min-height:14px;color:#9aabc0;font-size:11px}
+    .recent-message.is-error{color:#ff9c9c}
+    .recent-list,.favorites-list{display:flex;flex-direction:column;gap:7px;min-width:0}
+    .recent-row,.favorite-row{display:flex;align-items:center;gap:9px;min-width:0;padding:8px 9px;border:1px solid #2b3b50;border-radius:7px;background:#0b111a}
+    .recent-details,.favorite-details{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
+    .recent-path,.favorite-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+    .recent-meta,.favorite-meta,.favorite-message,.favorite-selection-label{font-size:11px;color:#8d9eb4;overflow-wrap:anywhere}
+    .favorites-actions,.favorite-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .favorite-select{flex-shrink:0;accent-color:#4f8df5}
+    .favorite-message.is-error{color:#ff9c9c}
+    .panel-empty{margin:0;padding:8px;color:#aab5c7;font-size:12px}
+    .filter-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+    .filter-field{display:flex;flex-direction:column;gap:5px;min-width:0;color:#aab5c7;font-size:11px}
+    .filter-field input,.filter-schemes input,.filter-schemes select{width:100%;min-width:0;padding:8px 9px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
+    .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}
+    .filter-check input{accent-color:#4f8df5}
+    .filter-schemes{display:flex;gap:7px;flex-wrap:wrap}
+    .filter-profile-select,.filter-profile-name{flex:1 1 150px;max-width:none}
+    .filter-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .filter-message{min-height:14px;color:#9aabc0;font-size:11px}
+    .filter-message.is-error{color:#ff9c9c}
+    .data-management{margin-top:10px;padding-top:10px;border-top:1px solid #2a394c}
+    .data-management-summary{cursor:pointer;color:#dce6f5;font-size:12px;font-weight:700;padding:5px 0}
+    .data-management-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0}
+    .data-management-actions select{min-width:150px;max-width:220px;padding:7px 8px;border:1px solid #35465d;border-radius:7px;background:#1a2635;color:#eaf0fb;font:inherit;font-size:12px}
+    .backup-preview,.backup-status{display:block;color:#9aabc0;font-size:11px;line-height:1.5;margin-top:5px}
+    .backup-status.is-error{color:#ff9c9c}
+    .backup-file-input[hidden]{display:none}
+    @media(max-width:1000px){
+      .bar{grid-template-columns:minmax(140px,.8fr) minmax(0,2.4fr) auto;grid-template-areas:"description toolbar close";gap:4px 7px;padding:4px 8px}
+      .description strong{font-size:14px}
+      .description small{font-size:9px}
+      .toolbar{flex-wrap:nowrap;gap:4px}
+      .toolbar button,.toolbar-more-summary,.close{padding:4px 6px}
+      .toolbar select{min-width:78px;padding:4px 6px}
+      .grid[data-layout="12"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))}
+      .grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
+    }
+    @media(max-width:620px){
+      .bar{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"description close" "toolbar toolbar";padding:6px 7px;gap:4px 7px}
+      .description{flex-wrap:nowrap;gap:3px 8px}
+      .description strong{font-size:14px}
+      .description small{font-size:9px}
+      .toolbar{width:100%;gap:4px;flex-wrap:nowrap;overflow-x:auto}
+      .toolbar-more-menu{right:auto;left:0}
+      .grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}
+      .grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}
+      .grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
+      .heading{padding:3px 5px;gap:4px}
+      .quality{font-size:9px}
+      .cell-indicator{font-size:8px}
+      .cell-tools{left:3px;right:3px;bottom:34px;padding:14px 4px 4px}
+      .cell-tool{padding:3px 5px;font-size:9px}
+      .tools-drawer{width:min(380px,96vw)}
+    }
+    @media(hover:none){
+      .cell-tools{visibility:visible;opacity:1;transform:none;pointer-events:auto}
+    }
+  `;  const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
   launcher.title = '从当前115目录已保存的本地索引中随机探索视频，支持智能筛选、收藏排除和方案管理';
   launcher.onclick = () => { void openPlayer(); };
