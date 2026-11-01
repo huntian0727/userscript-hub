@@ -28,9 +28,9 @@
     {
       "id": "115-multiview-indexed",
       "displayName": "115 多画面播放器 · 索引驱动四宫格",
-      "description": "从115已完成的本地递归索引中随机抽取最多4个带有效提取码的视频进行播放。当前为公开测试版。",
+      "description": "从115本地目录索引中随机抽取最多4个已保存且可播放的视频；索引未完成也可播放已保存部分。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "公开测试版",
+      "channel": "测试安装中心 · 持续更新",
       "enabled": true
     }
   ]

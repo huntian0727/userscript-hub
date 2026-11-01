@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.2.0
-// @description  从115已完成的本地目录索引中随机抽取最多4个视频进行多画面播放。公开测试版。
+// @version      0.2.1
+// @description  从115本地目录索引已保存的视频中随机抽取最多4个播放，支持索引未完成时播放已有记录。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -267,7 +267,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 4;
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
@@ -352,24 +352,49 @@
     return value !== null && /^\d+$/.test(value) ? value : null;
   }
 
+  function indexStatusLabel(scan) {
+    if (scan.status === 'complete' && scan.complete === true) return '已完成';
+    const labels = {
+      scanning: '扫描中',
+      paused: '已暂停',
+      interrupted: '已中断',
+      error: '读取异常（保留已保存部分）',
+      incomplete: '扫描结束（存在不完整项）'
+    };
+    return labels[String(scan.status || '')] || `未完成（${String(scan.status || '状态未知')}）`;
+  }
+
   async function collectVideos() {
     const cid = currentCid();
     if (cid === null) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
     const accountId = await resolveAccountId();
     const recursiveScan = await indexStore.getLatest(accountId, cid, true);
-    const scan = recursiveScan || await indexStore.getLatest(accountId, cid, false);
-    if (!scan) throw new Error('当前目录还没有本地索引。请先打开“目录索引验证”，完成当前目录扫描后再播放。');
-    if (scan.status !== 'complete' || scan.complete !== true) {
-      const stats = scan.stats || {};
-      throw new Error('当前目录索引尚未完整，不能把部分结果当作全部视频。已扫描目录：' +
-        Number(stats.directoriesScanned || 0) + '，待扫描目录：' +
-        (Array.isArray(scan.queue) ? scan.queue.length : 0) + '。请先继续读取，直到显示“索引完成：数据完整”。');
+    let scan = recursiveScan || await indexStore.getLatest(accountId, cid, false);
+    if (!scan) throw new Error('当前目录还没有本地索引。可以先启动“目录索引验证”；索引一旦保存出视频记录，就能边扫描边播放。');
+    const isPlayable = record => record.playable === true && /^[a-z0-9]{6,64}$/i.test(String(record.pickcode || ''));
+    let sampled = await indexStore.sampleVideos(scan.scanId, MAX_VIDEOS, isPlayable);
+
+    // 递归索引优先；若它暂时还没有可播放记录，允许回退到同账号、同目录的非递归索引。
+    // 不合并两个索引，避免根目录视频重复进入随机池。
+    if (!sampled.total && recursiveScan) {
+      const directScan = await indexStore.getLatest(accountId, cid, false);
+      if (directScan && directScan.scanId !== scan.scanId) {
+        const directSampled = await indexStore.sampleVideos(directScan.scanId, MAX_VIDEOS, isPlayable);
+        if (directSampled.total) {
+          scan = directScan;
+          sampled = directSampled;
+        }
+      }
     }
-    const sampled = await indexStore.sampleVideos(scan.scanId, MAX_VIDEOS, record =>
-      record.playable === true && /^[a-z0-9]{6,64}$/i.test(String(record.pickcode || ''))
-    );
-    if (!sampled.total) throw new Error('索引已完整，但没有找到带有效播放提取码的视频。');
-    return { items: sampled.items, total: sampled.total, scan };
+    if (!sampled.total) throw new Error('当前目录已保存的索引中还没有带有效播放提取码的视频。可以继续扫描；新保存的视频会自动进入可播放资源池。');
+    return {
+      items: sampled.items,
+      total: sampled.total,
+      scan,
+      statusLabel: indexStatusLabel(scan),
+      indexedVideoCount: Number(scan.stats && scan.stats.videos || 0),
+      isComplete: scan.status === 'complete' && scan.complete === true
+    };
   }
   function serverError(text) {
     try {
@@ -681,8 +706,11 @@
       panel.setAttribute('aria-label', '115索引多画面播放');
       const bar = element('header', 'bar');
       const description = element('div', 'description');
-      description.append(element('strong', '', '115 多画面播放'), element('small', '',
-        `索引版 v${VERSION} · ${indexed.scan.recursive ? '包含子文件夹' : '仅当前目录'} · ${indexed.total} 个可播放视频，本次播放 ${items.length} 个 · 默认静音`));
+      description.append(
+        element('strong', '', '115 多画面播放'),
+        element('small', '', `索引版 v${VERSION} · ${indexed.scan.recursive ? '包含子文件夹' : '仅当前目录'} · ${indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频'} · 默认静音`),
+        element('small', 'index-summary', `索引状态：${indexed.statusLabel} · 已索引视频记录 ${indexed.indexedVideoCount} 条 · 可播放候选 ${indexed.total} 个 · 本次播放 ${items.length} 个`)
+      );
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
       close.onclick = closePlayer;
@@ -756,7 +784,7 @@
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#080b10;color:#eee;display:flex;flex-direction:column;font-size:14px}
     .bar{display:flex;align-items:center;gap:16px;justify-content:space-between;flex-shrink:0;padding:12px 18px;background:#171c25;border-bottom:1px solid #303744}
-    .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}
+    .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
     .close{background:#303947;border:1px solid #536078;color:#fff;padding:7px 14px;border-radius:5px;white-space:nowrap}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;gap:3px;padding:3px}
     .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}
@@ -769,7 +797,7 @@
   `;
   const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
-  launcher.title = '从当前115目录已完成的本地索引中随机抽取最多4个视频';
+  launcher.title = '从当前115目录已保存的本地索引中随机抽取最多4个视频，索引未完成也可以播放已保存部分';
   launcher.onclick = () => { void openPlayer(); };
   shadow.append(style, launcher);
   document.documentElement.append(host);
