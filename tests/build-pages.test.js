@@ -5,11 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const {
   buildPages,
   readMetadata,
   withUpdateUrls,
-  assertNoEmbeddedSecrets
+  assertNoEmbeddedSecrets,
+  getPublishedAt
 } = require('../scripts/build-pages');
 
 function fixture() {
@@ -116,6 +118,51 @@ test('build rejects non-HTTPS Pages base URLs', () => {
   }
 });
 
+test('published timestamps come from the exact Git commit for each script version', () => {
+  const root = fixture();
+  const sourcePath = path.join(root, 'userscripts', 'sample.user.js');
+  try {
+    execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Userscript Hub Test'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'userscript-hub-test@example.invalid'], { cwd: root, stdio: 'ignore' });
+    execFileSync('git', ['add', 'registry.json', 'userscripts/sample.user.js', 'public'], { cwd: root, stdio: 'ignore' });
+    const firstDate = '2026-10-31T17:19:47Z';
+    const firstEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_DATE: firstDate,
+      GIT_COMMITTER_DATE: firstDate
+    });
+    execFileSync('git', ['commit', '-m', 'Publish sample source'], {
+      cwd: root,
+      env: firstEnv,
+      stdio: 'ignore'
+    });
+
+    const firstBuild = buildPages({ rootDir: root, baseUrl: 'https://example.github.io/repo' });
+    assert.equal(firstBuild.manifest.scripts[0].publishedAt, '2026-10-31T17:19:47.000Z');
+    assert.equal(firstBuild.manifest.scripts[0].history[0].publishedAt, null);
+
+    execFileSync('git', ['add', 'history/sample-script/1.0.0.user.js'], { cwd: root, stdio: 'ignore' });
+    const snapshotDate = '2026-10-31T18:20:30Z';
+    const snapshotEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_DATE: snapshotDate,
+      GIT_COMMITTER_DATE: snapshotDate
+    });
+    execFileSync('git', ['commit', '-m', 'Record immutable release snapshot'], {
+      cwd: root,
+      env: snapshotEnv,
+      stdio: 'ignore'
+    });
+
+    const secondBuild = buildPages({ rootDir: root, baseUrl: 'https://example.github.io/repo' });
+    assert.equal(secondBuild.manifest.scripts[0].publishedAt, '2026-10-31T17:19:47.000Z');
+    assert.equal(secondBuild.manifest.scripts[0].history[0].publishedAt, '2026-10-31T18:20:30.000Z');
+
+    fs.appendFileSync(sourcePath, '// local uncommitted edit');
+    assert.equal(getPublishedAt(root, sourcePath), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 test('published homepage uses relative assets and no local server addresses', () => {
   const root = fixture();
   try {

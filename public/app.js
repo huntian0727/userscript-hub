@@ -25,6 +25,35 @@ function formatBytes(value) {
   return (value / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
+function formatDateTime(value) {
+  if (!value) return '待发布（当前版本尚未提交）';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '发布时间待确认';
+  const local = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).format(date);
+  const offset = -date.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(offset);
+  const hours = String(Math.floor(absoluteOffset / 60)).padStart(2, '0');
+  const minutes = String(absoluteOffset % 60).padStart(2, '0');
+  return local + ' (UTC' + sign + hours + ':' + minutes + ')';
+}
+
+function publishedTime(value, className) {
+  const time = node('time', className, formatDateTime(value));
+  if (value && Number.isFinite(new Date(value).getTime())) {
+    time.dateTime = new Date(value).toISOString();
+  }
+  return time;
+}
+
 function createHistory(entry) {
   const details = node('details', 'history');
   details.append(node('summary', '', '历史版本（' + entry.history.length + '）'));
@@ -36,12 +65,13 @@ function createHistory(entry) {
   for (const version of entry.history) {
     const row = node('div', 'history-row');
     const label = node('span', '', 'v' + version.version);
+    const published = node('small', 'history-date', version.publishedAt ? formatDateTime(version.publishedAt) : '发布时间待确认');
     const size = node('small', '', formatBytes(version.sizeBytes));
     const link = node('a', 'history-link', '安装此版本');
     link.href = version.url;
     link.target = '_blank';
     link.rel = 'noopener';
-    row.append(label, size, link);
+    row.append(label, published, size, link);
     items.append(row);
   }
   details.append(items);
@@ -63,6 +93,9 @@ function createCard(entry) {
     node('span', 'ready', 'HTTPS 安装包已就绪')
   );
 
+  const publishedRow = node('div', 'published-row');
+  publishedRow.append(node('span', 'published-label', '更新时间'), publishedTime(entry.publishedAt, 'published-time'));
+
   const metadata = node('div', 'metadata');
   metadata.append(
     node('span', '', '安装包 ' + formatBytes(entry.sizeBytes)),
@@ -83,7 +116,7 @@ function createCard(entry) {
   downloadLine.append(node('small', '', '下载安装'), node('code', '', entry.downloadUrl));
   endpoints.append(updateLine, downloadLine);
 
-  card.append(head, description, versionRow, metadata, install, endpoints);
+  card.append(head, description, versionRow, publishedRow, metadata, install, endpoints);
   if (entry.history && entry.history.length) card.append(createHistory(entry));
   return card;
 }

@@ -103,3 +103,9 @@
 ## 10. 给新 AI 项目的指令
 
 请先访问 {{BASE_URL}}/llms.txt，阅读公开油猴脚本安装中心的接入规范，并读取 {{BASE_URL}}/api/integration.json 和 {{BASE_URL}}/api/manifest.json。后续如需将本项目脚本加入该平台，先核验脚本内容和公开范围，再按仓库白名单、版本、历史快照、测试和 GitHub Actions 部署流程执行。不要导入私人脚本或无关项目文件。
+
+## 发布时间字段
+
+- api/manifest.json 中每个当前脚本和历史版本均提供 publishedAt 字段（ISO 8601 UTC 时间），表示对应源文件或历史快照最后一次提交到 Git 的时间。
+- 若 publishedAt 为 null，表示文件尚未提交或无法确认发布时间；不得用站点构建时间冒充脚本发布时间。
+- 安装中心按访问者浏览器的本地时区展示更新时间，并同时标出 UTC 偏移。

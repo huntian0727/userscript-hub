@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const DEFAULT_BASE_URL = 'https://huntian0727.github.io/userscript-hub';
 const ROOT = path.resolve(__dirname, '..');
@@ -11,6 +12,34 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function getPublishedAt(rootDir, filePath) {
+  const relativePath = path.relative(rootDir, path.resolve(filePath)).split(path.sep).join('/');
+  if (!relativePath || relativePath === '..' || relativePath.startsWith('../') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+  try {
+    const status = execFileSync('git', [
+      'status', '--porcelain', '--untracked-files=all', '--', relativePath
+    ], {
+      cwd: rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (status) return null;
+
+    const committedAt = execFileSync('git', [
+      'log', '-1', '--format=%cI', '--', relativePath
+    ], {
+      cwd: rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    const date = new Date(committedAt);
+    return committedAt && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  } catch {
+    return null;
+  }
+}
 function copyDirectory(sourceDir, destinationDir) {
   fs.mkdirSync(destinationDir, { recursive: true });
   for (const name of fs.readdirSync(sourceDir)) {
@@ -103,7 +132,7 @@ function withUpdateUrls(source, id, baseUrl) {
   };
 }
 
-function readHistory(historyDir, id, baseUrl) {
+function readHistory(historyDir, id, baseUrl, rootDir) {
   const directory = path.join(historyDir, id);
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory)
@@ -116,6 +145,7 @@ function readHistory(historyDir, id, baseUrl) {
       const bytes = fs.readFileSync(filePath);
       return {
         version,
+        publishedAt: getPublishedAt(rootDir, filePath),
         url: baseUrl + '/history/' + id + '/' + encodeURIComponent(version) + '.user.js',
         sizeBytes: bytes.length,
         sha256: sha256(bytes)
@@ -185,7 +215,7 @@ function buildPages(options = {}) {
     const artifact = Buffer.from(served.content, 'utf8');
     const metaArtifact = Buffer.from(served.header + '\n', 'utf8');
     const snapshotPath = path.join(historyDir, item.id, served.metadata.version + '.user.js');
-    pending.push({ item, served, artifact, metaArtifact, snapshotPath });
+    pending.push({ item, sourcePath, publishedAt: getPublishedAt(rootDir, sourcePath), served, artifact, metaArtifact, snapshotPath });
   }
   for (const entry of pending) safeWriteSnapshot(rootDir, entry.snapshotPath, entry.artifact, checkHistory);
 
@@ -200,7 +230,7 @@ function buildPages(options = {}) {
   const defaultBranch = repository.defaultBranch || 'main';
 
   const scripts = pending.map(entry => {
-    const history = readHistory(historyDir, entry.item.id, baseUrl);
+    const history = readHistory(historyDir, entry.item.id, baseUrl, rootDir);
     return {
       id: entry.item.id,
       displayName: entry.item.displayName || entry.served.metadata.name,
@@ -209,6 +239,7 @@ function buildPages(options = {}) {
       version: entry.served.metadata.version,
       description: entry.item.description || entry.served.metadata.description,
       channel: entry.item.channel || '公开体验',
+      publishedAt: entry.publishedAt,
       sizeBytes: entry.artifact.length,
       sha256: sha256(entry.artifact),
       sourcePath: entry.item.source,
@@ -275,7 +306,8 @@ function buildPages(options = {}) {
       modifySourceViaHttp: false,
       triggerBuildViaHttp: false,
       installSilently: false,
-      requiresLocalNodeServer: false
+      requiresLocalNodeServer: false,
+      exposesReleaseTimestamps: true
     },
     workflow: [
       'Read /llms.txt, /ai-integration.md and /api/integration.json before integrating.',
@@ -399,7 +431,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildPages, readMetadata, withUpdateUrls, assertNoEmbeddedSecrets, resolveSource };
+module.exports = { buildPages, readMetadata, withUpdateUrls, assertNoEmbeddedSecrets, resolveSource, getPublishedAt };
 
 
 

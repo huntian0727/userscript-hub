@@ -113,6 +113,9 @@ h1 { font-size: 18px; margin: 4px 0 2px; letter-spacing: -.02em; }
 .version-row { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-top: 1px solid rgba(137,157,185,.13); border-bottom: 1px solid rgba(137,157,185,.13); }
 .version { font-size: 18px; letter-spacing: -.03em; }
 .ready { color: var(--green); font-size: 11px; }
+.published-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 11px; padding: 9px 10px; border: 1px solid rgba(137,157,185,.15); border-radius: 8px; background: rgba(8,16,27,.3); font-size: 11px; }
+.published-label { color: #8799b3; flex: 0 0 auto; }
+.published-time { color: #b9d1f3; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .metadata { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 7px; color: #8493a9; font-size: 10px; margin: 12px 0 15px; }
 .install-button { display: flex; justify-content: center; align-items: center; min-height: 42px; padding: 0 16px; border-radius: 8px; text-decoration: none; color: #fff; font-size: 13px; font-weight: 700; background: linear-gradient(135deg, #397eea, #2b61c2); box-shadow: 0 8px 22px rgba(43,98,196,.2); }
 .install-button:hover { filter: brightness(1.12); }
@@ -122,8 +125,9 @@ h1 { font-size: 18px; margin: 4px 0 2px; letter-spacing: -.02em; }
 .endpoint-line small { color: #8291a6; font-size: 10px; }
 .endpoint-line code { color: #a9c5ed; font-size: 10px; overflow-wrap: anywhere; }
 .history-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-.history-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; color: #b8c5d8; font-size: 11px; }
+.history-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; align-items: center; gap: 12px; color: #b8c5d8; font-size: 11px; }
 .history-row small { color: #7f8ea4; }
+.history-date { font-size: 10px; font-variant-numeric: tabular-nums; }
 .history-link { color: #8fb8ff; text-decoration: none; }
 .history-link:hover { text-decoration: underline; }
 .empty-history { color: var(--muted); font-size: 11px; }
@@ -150,6 +154,8 @@ footer { display: flex; justify-content: space-between; gap: 16px; padding: 25px
   .ai-resource-grid { grid-template-columns: 1fr; }
   .ai-resource { padding: 12px; }
   .script-grid, .info-grid { grid-template-columns: 1fr; }
+  .history-row { grid-template-columns: auto minmax(0,1fr); gap: 7px 10px; }
+  .history-date { overflow-wrap: anywhere; }
   .description { min-height: 0; }
   footer { flex-direction: column; }
 }
