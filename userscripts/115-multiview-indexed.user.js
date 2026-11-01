@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.8.4
+// @version      0.8.5
 // @description  115索引多画面播放器，支持主副屏布局、智能画幅、关键词筛选、排除管理和JSON备份恢复。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -947,7 +947,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.8.4';
+  const VERSION = '0.8.5';
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -3833,9 +3833,25 @@
       const moreSummary = element('summary', 'toolbar-more-summary', '更多');
       moreSummary.title = '智能画幅、播放结束行为和声音来源设置';
       const moreMenu = element('div', 'toolbar-more-menu');
+      moreMenu.hidden = true;
       moreMenu.append(session.smartAspectButton, session.endModeSelect,
         session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
-      moreDetails.append(moreSummary, moreMenu);
+      const positionMoreMenu = () => {
+        moreMenu.hidden = !moreDetails.open;
+        if (moreMenu.hidden) return;
+        const anchorRect = moreSummary.getBoundingClientRect();
+        const barRect = bar.getBoundingClientRect();
+        const availableWidth = panel.clientWidth;
+        const menuWidth = Math.min(360, Math.max(270, availableWidth * 0.88));
+        const maxLeft = Math.max(8, availableWidth - menuWidth - 8);
+        const left = Math.max(8, Math.min(anchorRect.left - barRect.left, maxLeft));
+        moreMenu.style.left = left + 'px';
+      };
+      moreDetails.addEventListener('toggle', positionMoreMenu);
+      toolbar.addEventListener('scroll', () => {
+        if (moreDetails.open) positionMoreMenu();
+      }, { passive: true });
+      moreDetails.append(moreSummary);
       session.moreDetails = moreDetails;
       toolbar.append(layoutGroup, session.swapAllButton, session.pauseAllButton,
         session.newRoundButton, session.toolsButton, session.resumeButton, session.roundStatus, moreDetails);
@@ -3843,7 +3859,7 @@
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
       close.onclick = closePlayer;
-      bar.append(description, toolbar, close);
+      bar.append(description, toolbar, close, moreMenu);
       panel.append(bar, grid, toolsLayer);
       shadow.append(panel);
       const updateToolsDrawerOffset = () => {
@@ -3854,12 +3870,13 @@
       if (typeof ResizeObserver === 'function') {
         session.layoutResizeObserver = new ResizeObserver(() => {
           updateToolsDrawerOffset();
+          if (session.moreDetails?.open) positionMoreMenu();
           if (!session.closed) applyLayoutPositions(session);
         });
         session.layoutResizeObserver.observe(grid);
         session.layoutResizeObserver.observe(bar);
       } else {
-        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (!session.closed) applyLayoutPositions(session); };
+        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (session.moreDetails?.open) positionMoreMenu(); if (!session.closed) applyLayoutPositions(session); };
         window.addEventListener('resize', session.layoutResizeHandler);
       }
       shadow.addEventListener('keydown', session.onKey, true);
@@ -3898,7 +3915,8 @@
     .toolbar-more-summary{display:inline-flex;align-items:center;justify-content:center;list-style:none;cursor:pointer;color:#dce7f7;background:#1a2635;border:1px solid #35465d;border-radius:7px;padding:4px 8px;font:inherit;font-size:10px;white-space:nowrap}
     .toolbar-more-summary::-webkit-details-marker{display:none}
     .toolbar-more[open]>.toolbar-more-summary{background:#244d8c;border-color:#5484d0}
-    .toolbar-more-menu{position:absolute;top:calc(100% + 7px);right:0;z-index:100;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:270px;max-width:min(88vw,360px);padding:12px;border:1px solid #35465d;border-radius:10px;background:#121b27;box-shadow:0 14px 40px #000b}
+    .toolbar-more-menu{position:absolute;top:calc(100% + 7px);left:0;right:auto;z-index:100;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:270px;max-width:min(88vw,360px);padding:12px;border:1px solid #35465d;border-radius:10px;background:#121b27;box-shadow:0 14px 40px #000b}
+    .toolbar-more-menu[hidden]{display:none!important}
     .toolbar-more-menu button,.toolbar-more-menu select{width:100%;min-width:0;max-width:none}
     .toolbar-more-menu select{font-size:11px}
     .toolbar-more-menu .dual-small-count-select[hidden]{display:none}

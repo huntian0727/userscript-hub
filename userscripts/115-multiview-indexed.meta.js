@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.8.4
+// @version      0.8.5
 // @description  115索引多画面播放器，支持主副屏布局、智能画幅、关键词筛选、排除管理和JSON备份恢复。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
