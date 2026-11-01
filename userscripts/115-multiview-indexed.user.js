@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.6.0
-// @description  115索引多画面播放器，支持最近目录、布局记忆、智能筛选、收藏列表和批量管理。
+// @version      0.7.0
+// @description  115索引多画面播放器，支持分级缓冲、隐藏窗口按需加载、最近目录和收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -718,7 +718,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.6.0';
+  const VERSION = '0.7.0';
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -1206,6 +1206,7 @@
 
   function disposeCell(cell) {
     clearTimeout(cell.timer);
+    cell.timer = null;
     cell.generation = (cell.generation || 0) + 1;
     if (cell.abort) {
       cell.abort.abort();
@@ -1276,6 +1277,19 @@
     }
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
   }
+  function armCellPlaybackWatchdog(session, cell) {
+    if (cell.timer || session.closed || cell.failed || cell.hasPlayed ||
+        cell.layoutPaused || cell.userPaused || session.globalPaused) return;
+    const generation = cell.generation;
+    cell.timer = setTimeout(() => {
+      cell.timer = null;
+      if (!cell.hasPlayed && generation === cell.generation && !cell.layoutPaused &&
+          !cell.userPaused && !session.globalPaused) {
+        failCell(session, cell, '45秒内未能开始播放，请检查网络、转码状态或油猴访问授权');
+      }
+    }, 45000);
+  }
+
   function failCell(session, cell, message) {
     if (session.closed || cell.failed) return;
     cell.failed = true;
@@ -1288,6 +1302,7 @@
 
   async function tryPlay(session, cell) {
     if (session.closed || cell.failed || session.globalPaused || cell.layoutPaused || cell.userPaused) return;
+    armCellPlaybackWatchdog(session, cell);
     const generation = cell.generation;
     try {
       await cell.video.play();
@@ -1302,14 +1317,26 @@
     }
   }
 
+  function getHlsBufferProfile(layoutCount) {
+    const count = Number(layoutCount) || 4;
+    if (count >= 9) {
+      return { maxBufferLength: 6, maxMaxBufferLength: 10, backBufferLength: 2, maxBufferSize: 6 * 1000 * 1000 };
+    }
+    if (count >= 6) {
+      return { maxBufferLength: 8, maxMaxBufferLength: 16, backBufferLength: 3, maxBufferSize: 8 * 1000 * 1000 };
+    }
+    return { maxBufferLength: 10, maxMaxBufferLength: 20, backBufferLength: 5, maxBufferSize: 12 * 1000 * 1000 };
+  }
+
   function startHls(session, cell, source, useGM = false) {
     if (session.closed || cell.failed || !cell.item) return;
     const generation = cell.generation;
     cell.hls?.destroy();
     const noRetry = { maxTimeToFirstByteMs: 15000, maxLoadTimeMs: 20000, timeoutRetry: null, errorRetry: null };
+    const hlsBufferProfile = getHlsBufferProfile(session.layoutCount);
     const hls = new Hls({
       enableWorker: false,
-      maxBufferLength: 10, maxMaxBufferLength: 20, backBufferLength: 5, maxBufferSize: 12 * 1000 * 1000,
+      ...hlsBufferProfile,
       manifestLoadPolicy: { default: { ...noRetry } },
       playlistLoadPolicy: { default: { ...noRetry } },
       fragLoadPolicy: { default: { ...noRetry } },
@@ -1350,11 +1377,7 @@
       const result = await requestText('https://115.com/api/video/m3u8/' + encodeURIComponent(item.pickcode) + '.m3u8', controller.signal);
       if (session.closed || generation !== cell.generation || cell.item !== item) return;
       const source = chooseSource(result.text, result.url);
-      cell.timer = setTimeout(() => {
-        if (!cell.hasPlayed && generation === cell.generation) {
-          failCell(session, cell, '45秒内未能开始播放，请检查网络、转码状态或油猴访问授权');
-        }
-      }, 45000);
+      armCellPlaybackWatchdog(session, cell);
       if (typeof Hls !== 'undefined' && Hls.isSupported()) {
         startHls(session, cell, source);
       } else if (cell.video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -2079,17 +2102,25 @@
         video.pause();
         return;
       }
-      if (!cell.layoutPaused) cell.userPaused = false;
+      if (!cell.layoutPaused) {
+        cell.userPaused = false;
+        armCellPlaybackWatchdog(session, cell);
+      }
       updateCellControls(session, cell);
     });
     video.addEventListener('pause', () => {
-      if (!session.closed && !session.globalPaused && !cell.layoutPaused) cell.userPaused = true;
+      if (!session.closed && !session.globalPaused && !cell.layoutPaused) {
+        cell.userPaused = true;
+        clearTimeout(cell.timer);
+        cell.timer = null;
+      }
       updateCellControls(session, cell);
     });
     video.addEventListener('playing', () => {
       if (session.closed || cell.failed) return;
       cell.hasPlayed = true;
       clearTimeout(cell.timer);
+      cell.timer = null;
       setStatus(cell, '');
       updateCellControls(session, cell);
     });
@@ -2122,6 +2153,13 @@
           cell.layoutPaused = true;
           if (!cell.video.paused) cell.video.pause();
           cell.hls?.stopLoad();
+        }
+        clearTimeout(cell.timer);
+        cell.timer = null;
+        if (!cell.hls && cell.abort) {
+          cell.abort.abort();
+          cell.abort = null;
+          cell.loadStarted = false;
         }
         return;
       }
@@ -2255,7 +2293,12 @@
       session.pauseAllButton.onclick = () => {
         session.globalPaused = !session.globalPaused;
         if (session.globalPaused) {
-          session.cells.forEach(cell => { if (cell) cell.video.pause(); });
+          session.cells.forEach(cell => {
+            if (!cell) return;
+            clearTimeout(cell.timer);
+            cell.timer = null;
+            cell.video.pause();
+          });
         } else {
           session.cells.forEach(cell => {
             if (cell && cell.index < session.layoutCount && !cell.layoutPaused && !cell.userPaused && !cell.failed) {

@@ -28,9 +28,9 @@
     {
       "id": "115-multiview-indexed",
       "displayName": "115 多画面播放器 · 索引驱动四宫格",
-      "description": "支持最近五个目录、布局与筛选记忆、跨已索引目录收藏列表和批量管理；保留2/4/6/9/12宫格、智能筛选、锁定与随机换片；索引未完成也可播放已保存部分。",
+      "description": "多宫格分级HLS缓冲（2/4格12MB、6格8MB、9/12格6MB）；隐藏窗口请求自动取消并在恢复时重载；保留最近目录、布局/筛选记忆、收藏管理、随机换片与索引部分可播。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · 最近目录与收藏管理版",
+      "channel": "统一测试安装中心 · 性能与稳定性优化版",
       "enabled": true
     }
   ]
