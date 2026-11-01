@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.5.0
-// @description  115索引多画面播放器，支持智能筛选、收藏排除、筛选方案与随机换片。
+// @version      0.6.0
+// @description  115索引多画面播放器，支持最近目录、布局记忆、智能筛选、收藏列表和批量管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -224,6 +224,68 @@
       return result;
     }
 
+
+    async function listScans(accountId) {
+      const owner = String(accountId || '').trim();
+      if (!owner) throw new Error('缺少账号标识，无法检索目录索引');
+      const db = await openDatabase();
+      const tx = db.transaction('scans', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('scans').getAll());
+      await done;
+      return items.filter(scan => String(scan.accountId) === owner)
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    }
+
+    // 仅在收藏列表打开时按收藏提取码检索已有本地索引；逐扫描游标读取，不把整库视频载入内存。
+    // 按扫描更新时间倒序，若同一提取码存在于多个索引，优先返回最近一次扫描中的记录。
+    async function findVideosByPickcodes(accountId, pickcodes) {
+      const wanted = new Set((Array.isArray(pickcodes) ? pickcodes : [])
+        .map(value => String(value || '').trim().toLowerCase())
+        .filter(value => /^[a-z0-9]{6,64}$/i.test(value)));
+      if (!wanted.size) return [];
+      const scans = await listScans(accountId);
+      const found = new Map();
+      for (const scan of scans) {
+        if (!wanted.size) break;
+        const db = await openDatabase();
+        const tx = db.transaction('records', 'readonly');
+        const done = transactionPromise(tx);
+        const matches = await new Promise((resolve, reject) => {
+          const current = [];
+          const request = tx.objectStore('records').index('byScanVideo')
+            .openCursor(only([String(scan.scanId), 1]));
+          request.onsuccess = () => {
+            try {
+              const cursor = request.result;
+              if (!cursor) {
+                resolve(current);
+                return;
+              }
+              const record = cursor.value;
+              const key = String(record && record.pickcode || '').trim().toLowerCase();
+              if (wanted.has(key)) {
+                current.push(record);
+                wanted.delete(key);
+              }
+              cursor.continue();
+            } catch (error) {
+              reject(error);
+              try { tx.abort(); } catch { /* 事务可能已经结束。 */ }
+            }
+          };
+          request.onerror = () => reject(request.error || new Error('检索收藏视频索引失败'));
+        });
+        await done;
+        for (const record of matches) {
+          found.set(String(record.pickcode).toLowerCase(), Object.assign({}, record, {
+            rootCid: String(scan.rootCid), recursive: scan.recursive === true, rootPath: String(scan.rootPath || '')
+          }));
+        }
+      }
+      return Array.from(found.values());
+    }
+
     async function deleteScan(scanId) {
       const db = await openDatabase();
       const tx = db.transaction(['scans', 'records'], 'readwrite');
@@ -255,6 +317,8 @@
       getVideos,
       getVideoSamples,
       sampleVideos,
+      listScans,
+      findVideosByPickcodes,
       deleteScan,
       close
     });
@@ -271,7 +335,7 @@
   'use strict';
 
   const DEFAULT_DB_NAME = '115-multiview-player-preferences';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
 
   function create115PlayerPreferenceStore(options = {}) {
     const indexedDBRef = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
@@ -326,6 +390,22 @@
           }
           if (!profiles.indexNames.contains('byAccount')) {
             profiles.createIndex('byAccount', 'accountId', { unique: false });
+          }
+
+          if (!db.objectStoreNames.contains('settings')) {
+            db.createObjectStore('settings', { keyPath: 'accountId' });
+          }
+
+          let recentDirectories;
+          if (db.objectStoreNames.contains('recentDirectories')) {
+            recentDirectories = request.transaction.objectStore('recentDirectories');
+          } else {
+            recentDirectories = db.createObjectStore('recentDirectories', {
+              keyPath: ['accountId', 'rootCid', 'recursiveKey']
+            });
+          }
+          if (!recentDirectories.indexNames.contains('byAccount')) {
+            recentDirectories.createIndex('byAccount', 'accountId', { unique: false });
           }
         };
         request.onsuccess = () => {
@@ -385,6 +465,10 @@
       });
       if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
       if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
+      if (patch.snapshot && next.favorite) {
+        const snapshot = normalizeVideoSnapshot(patch.snapshot);
+        if (snapshot) next.snapshot = snapshot;
+      }
       next.updatedAt = Date.now();
       if (!next.favorite && !next.excluded) store.delete([owner, code]);
       else store.put(next);
@@ -472,6 +556,138 @@
       return true;
     }
 
+
+    function normalizeLayoutCount(value) {
+      const count = Number(value);
+      return [2, 4, 6, 9, 12].includes(count) ? count : 4;
+    }
+
+    function normalizeVideoSnapshot(value) {
+      if (!value || typeof value !== 'object') return null;
+      const scanId = String(value.scanId || '').trim().slice(0, 120);
+      const id = String(value.id || '').trim().slice(0, 80);
+      if (!scanId || !id) return null;
+      const pathSegments = Array.isArray(value.pathSegments)
+        ? value.pathSegments.slice(0, 64).map(segment => ({
+          id: String(segment && segment.id || '').slice(0, 80),
+          parentId: segment && segment.parentId != null ? String(segment.parentId).slice(0, 80) : null,
+          name: String(segment && segment.name || '').trim().slice(0, 200)
+        })).filter(segment => segment.name)
+        : [];
+      const size = value.sizeBytes == null ? null : Number(value.sizeBytes);
+      return {
+        scanId,
+        id,
+        type: 'video',
+        rootCid: /^\d+$/.test(String(value.rootCid || '')) ? String(value.rootCid) : '',
+        recursive: value.recursive === true,
+        name: String(value.name || '').trim().slice(0, 400),
+        path: String(value.path || '').trim().slice(0, 1200),
+        pathSegments,
+        sizeBytes: size !== null && Number.isFinite(size) && size >= 0 ? size : null
+      };
+    }
+
+    async function listFavorites(accountId) {
+      const items = await listVideoPreferences(accountId);
+      return items.filter(item => item.favorite === true)
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    }
+
+    async function updateVideoPreferences(accountId, pickcodes, patch = {}) {
+      const owner = normalizeAccountId(accountId);
+      const codes = Array.from(new Set((Array.isArray(pickcodes) ? pickcodes : [])
+        .map(normalizePickcode)));
+      if (!codes.length) return 0;
+      if (typeof patch.favorite !== 'boolean' && typeof patch.excluded !== 'boolean') {
+        throw new Error('批量偏好更新至少需要指定收藏或排除状态');
+      }
+      const db = await openDatabase();
+      const tx = db.transaction('videos', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('videos');
+      for (const code of codes) {
+        const existing = await requestPromise(store.get([owner, code]));
+        const next = Object.assign({}, existing || {
+          accountId: owner, pickcode: code, favorite: false, excluded: false, createdAt: Date.now()
+        });
+        if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
+        if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
+        next.updatedAt = Date.now();
+        if (!next.favorite && !next.excluded) store.delete([owner, code]);
+        else store.put(next);
+      }
+      await done;
+      return codes.length;
+    }
+
+    async function getPlayerSettings(accountId) {
+      const owner = normalizeAccountId(accountId);
+      const db = await openDatabase();
+      const tx = db.transaction('settings', 'readonly');
+      const done = transactionPromise(tx);
+      const saved = await requestPromise(tx.objectStore('settings').get(owner));
+      await done;
+      return {
+        accountId: owner,
+        layoutCount: normalizeLayoutCount(saved && saved.layoutCount),
+        filters: normalizeFilters(saved && saved.filters),
+        updatedAt: Number(saved && saved.updatedAt || 0)
+      };
+    }
+
+    async function savePlayerSettings(accountId, settings = {}) {
+      const owner = normalizeAccountId(accountId);
+      const saved = {
+        accountId: owner,
+        layoutCount: normalizeLayoutCount(settings.layoutCount),
+        filters: normalizeFilters(settings.filters),
+        updatedAt: Date.now()
+      };
+      const db = await openDatabase();
+      const tx = db.transaction('settings', 'readwrite');
+      const done = transactionPromise(tx);
+      tx.objectStore('settings').put(saved);
+      await done;
+      return saved;
+    }
+
+    async function recordRecentDirectory(accountId, directory = {}) {
+      const owner = normalizeAccountId(accountId);
+      const rootCid = String(directory.rootCid || '').trim();
+      if (!/^\d+$/.test(rootCid)) throw new Error('最近目录缺少有效的目录ID');
+      const path = String(directory.path || '').trim().slice(0, 1200) ||
+        (rootCid === '0' ? '/网盘根目录' : '目录ID ' + rootCid);
+      const videoCount = Number(directory.videoCount);
+      const saved = {
+        accountId: owner,
+        rootCid,
+        recursive: directory.recursive === true,
+        recursiveKey: directory.recursive === true ? '1' : '0',
+        path,
+        videoCount: Number.isFinite(videoCount) ? Math.max(0, Math.floor(videoCount)) : 0,
+        scanId: String(directory.scanId || '').trim().slice(0, 120),
+        lastUsedAt: Date.now()
+      };
+      const db = await openDatabase();
+      const tx = db.transaction('recentDirectories', 'readwrite');
+      const done = transactionPromise(tx);
+      tx.objectStore('recentDirectories').put(saved);
+      await done;
+      return saved;
+    }
+
+    async function listRecentDirectories(accountId, limit = 5) {
+      const owner = normalizeAccountId(accountId);
+      const count = Math.max(1, Math.min(5, Math.floor(Number(limit) || 5)));
+      const db = await openDatabase();
+      const tx = db.transaction('recentDirectories', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('recentDirectories').index('byAccount').getAll(only(owner)));
+      await done;
+      return items.sort((a, b) => Number(b.lastUsedAt || 0) - Number(a.lastUsedAt || 0)).slice(0, count);
+    }
+
     function close() {
       if (!databasePromise) return;
       databasePromise.then(db => db.close()).catch(() => {});
@@ -480,8 +696,14 @@
 
     return Object.freeze({
       listVideoPreferences,
+      listFavorites,
       setVideoPreference,
+      updateVideoPreferences,
       clearExclusions,
+      getPlayerSettings,
+      savePlayerSettings,
+      recordRecentDirectory,
+      listRecentDirectories,
       listProfiles,
       saveProfile,
       deleteProfile,
@@ -496,8 +718,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.5.0';
-  const HOST_ID = 'local-115-multiview-indexed';  const MAX_VIDEOS = 12;
+  const VERSION = '0.6.0';
+  const HOST_ID = 'local-115-multiview-indexed';
+  const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
   const N115IndexStore = globalThis.N115IndexStore;
@@ -688,10 +911,35 @@
     return result;
   }
 
-  async function collectVideos(filters = DEFAULT_FILTERS) {
+  function resolveRootDirectoryPath(scan, records = []) {
+    const rootId = String(scan && scan.rootCid || '');
+    const direct = String(scan && scan.rootPath || '').trim();
+    if (direct && direct !== '/') return direct;
+    if (rootId === '0') return '/网盘根目录';
+    const scanSegments = Array.isArray(scan && scan.rootPathSegments) ? scan.rootPathSegments : [];
+    if (scanSegments.length) {
+      const names = scanSegments.map(segment =>
+        String(typeof segment === 'string' ? segment : segment && segment.name || '').trim()
+      ).filter(Boolean);
+      if (names.length) return '/' + names.join('/');
+    }
+    for (const record of records) {
+      const segments = Array.isArray(record && record.pathSegments) ? record.pathSegments : [];
+      const rootIndex = segments.findIndex(segment => String(segment && segment.id || '') === rootId);
+      if (rootIndex >= 0) {
+        const names = segments.slice(0, rootIndex + 1).map(segment => String(segment.name || '').trim()).filter(Boolean);
+        if (names.length) return '/' + names.join('/');
+      }
+    }
+    return '目录ID ' + (rootId || '未知');
+  }
+
+  async function collectVideos(filters) {
     const cid = currentCid();
     if (cid === null) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
     const accountId = await resolveAccountId();
+    const settings = await preferenceStore.getPlayerSettings(accountId);
+    const activeFilters = normalizeFilters(filters === undefined ? settings.filters : filters);
     const preferenceRecords = await preferenceStore.listVideoPreferences(accountId);
     const preferenceState = {
       favoritePickcodes: new Set(preferenceRecords.filter(item => item.favorite).map(item => item.pickcode)),
@@ -702,7 +950,7 @@
     let scan = recursiveScan || await indexStore.getLatest(accountId, cid, false);
     if (!scan) throw new Error('当前目录还没有本地索引。可以先启动“目录索引验证”；索引一旦保存出视频记录，就能边扫描边播放。');
     let sampled = await indexStore.sampleVideos(
-      scan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), filters, preferenceState)
+      scan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), activeFilters, preferenceState)
     );
 
     // 递归索引优先；若它暂时还没有符合当前筛选条件的可播放记录，允许回退到同账号、同目录的非递归索引。
@@ -711,7 +959,7 @@
       const directScan = await indexStore.getLatest(accountId, cid, false);
       if (directScan && directScan.scanId !== scan.scanId) {
         const directSampled = await indexStore.sampleVideos(
-          directScan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), filters, preferenceState)
+          directScan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), activeFilters, preferenceState)
         );
         if (directSampled.total) {
           scan = directScan;
@@ -719,6 +967,7 @@
         }
       }
     }
+    let pathSamples = sampled.items;
     if (!sampled.total) {
       const unfiltered = await indexStore.sampleVideos(
         scan.scanId, 1,
@@ -729,7 +978,17 @@
       if (!unfiltered.total) {
         throw new Error('当前目录已保存的索引中还没有带有效播放提取码的视频。可以继续扫描；新保存的视频会自动进入可播放资源池。');
       }
+      pathSamples = unfiltered.items;
     }
+    const rootPath = resolveRootDirectoryPath(scan, pathSamples);
+    await preferenceStore.recordRecentDirectory(accountId, {
+      rootCid: scan.rootCid,
+      recursive: scan.recursive,
+      path: rootPath,
+      videoCount: Number(scan.stats && scan.stats.videos || 0),
+      scanId: scan.scanId
+    });
+    const recentDirectories = await preferenceStore.listRecentDirectories(accountId, 5);
     return {
       items: sampled.items,
       total: sampled.total,
@@ -738,7 +997,10 @@
       preferenceState,
       preferenceRecords,
       profiles,
-      filters: normalizeFilters(filters),
+      settings,
+      recentDirectories,
+      rootPath,
+      filters: activeFilters,
       statusLabel: indexStatusLabel(scan),
       indexedVideoCount: Number(scan.stats && scan.stats.videos || 0),
       isComplete: scan.status === 'complete' && scan.complete === true
@@ -996,7 +1258,8 @@
   }
 
   function updateRoundControls(session) {
-    const remaining = session.availableItems.length;    if (session.roundStatus) {
+    const remaining = session.availableItems.length;
+    if (session.roundStatus) {
       const summary = '第' + session.roundNumber + '轮 · 候选池' + session.roundPoolSize + '个 · 剩余' + remaining +
         '个 · 收藏' + session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
       session.roundStatus.textContent = session.roundMessage ? summary + ' · ' + session.roundMessage : summary;
@@ -1275,11 +1538,21 @@
     }
     session.filters = normalized;
     writeFilterControls(session, normalized);
-    setFilterMessage(session, '筛选条件已更新；现有窗口保持播放，后续换片使用新条件');
+    let settingsSaved = true;
+    try {
+      await preferenceStore.savePlayerSettings(session.accountId, {
+        layoutCount: session.layoutCount, filters: normalized
+      });
+    } catch (error) {
+      settingsSaved = false;
+      setFilterMessage(session, '筛选已应用，但记忆保存失败：' + String(error?.message || error), true);
+    }
+    if (settingsSaved) {
+      setFilterMessage(session, '筛选条件已更新并记住；现有窗口保持播放，后续换片使用新条件');
+    }
     await startNewRound(session, message);
     return true;
   }
-
   function refreshProfileOptions(session, selectedId = '') {
     const select = session.filterInputs.profileSelect;
     select.replaceChildren();
@@ -1338,11 +1611,22 @@
     const key = itemKey(cell.item);
     const next = !session.preferenceState.favoritePickcodes.has(key);
     try {
-      await preferenceStore.setVideoPreference(session.accountId, key, { favorite: next });
+      const snapshot = next ? {
+        scanId: cell.item.scanId || session.scan.scanId,
+        id: cell.item.id,
+        rootCid: session.scan.rootCid,
+        recursive: session.scan.recursive,
+        name: cell.item.name,
+        path: cell.item.path,
+        pathSegments: cell.item.pathSegments,
+        sizeBytes: cell.item.sizeBytes
+      } : undefined;
+      await preferenceStore.setVideoPreference(session.accountId, key, { favorite: next, snapshot });
       if (next) session.preferenceState.favoritePickcodes.add(key);
       else session.preferenceState.favoritePickcodes.delete(key);
       session.roundMessage = next ? '已加入收藏' : '已取消收藏';
       updateRoundControls(session);
+      if (session.favoritePanel && !session.favoritePanel.hidden) void refreshFavoritesPanel(session);
       if (session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
     } catch (error) {
       setFilterMessage(session, '保存收藏状态失败：' + String(error?.message || error), true);
@@ -1467,6 +1751,259 @@
     return panel;
   }
 
+
+  function openRecentDirectory(directory) {
+    const rootCid = String(directory && directory.rootCid || '').trim();
+    if (!/^\d+$/.test(rootCid)) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('cid', rootCid);
+    if (!url.searchParams.has('mode')) url.searchParams.set('mode', 'wangpan');
+    window.location.assign(url.href);
+  }
+
+  function createRecentPanel(session) {
+    const panel = element('section', 'recent-panel');
+    panel.hidden = true;
+    panel.setAttribute('aria-label', '最近使用的目录');
+    const heading = element('div', 'recent-panel-heading');
+    heading.append(
+      element('strong', '', '最近使用的目录'),
+      element('small', '', '按当前115账号保存最近5个目录；点击打开可返回对应目录')
+    );
+    const list = element('div', 'recent-list');
+    if (!session.recentDirectories.length) {
+      list.append(element('p', 'panel-empty', '还没有最近目录记录。打开已建立索引的目录后会自动记住。'));
+    }
+    for (const directory of session.recentDirectories) {
+      const row = element('article', 'recent-row');
+      row.dataset.rootCid = String(directory.rootCid);
+      const details = element('div', 'recent-details');
+      const path = element('strong', 'recent-path', directory.path || ('目录ID ' + directory.rootCid));
+      path.title = path.textContent;
+      const mode = directory.recursive ? '包含子文件夹' : '仅当前目录';
+      const meta = element('small', 'recent-meta',
+        '视频 ' + Number(directory.videoCount || 0) + ' 个 · ' + mode + ' · ' +
+        (directory.lastUsedAt ? new Date(directory.lastUsedAt).toLocaleString() : '最近使用'));
+      details.append(path, meta);
+      const open = element('button', 'toolbar-button recent-open', '打开目录');
+      open.type = 'button';
+      open.onclick = () => openRecentDirectory(directory);
+      row.append(details, open);
+      list.append(row);
+    }
+    panel.append(heading, list);
+    return panel;
+  }
+
+  function setFavoriteMessage(session, message, isError = false) {
+    if (!session.favoriteMessage) return;
+    session.favoriteMessage.textContent = message;
+    session.favoriteMessage.classList.toggle('is-error', isError);
+  }
+
+  function updateFavoriteSelectionSummary(session) {
+    const count = session.favoriteSelected ? session.favoriteSelected.size : 0;
+    if (session.favoriteSelectionLabel) {
+      session.favoriteSelectionLabel.textContent = '已选择 ' + count + ' 条';
+    }
+  }
+
+  async function refreshFavoritesPanel(session) {
+    if (session.closed || !session.favoriteList) return;
+    setFavoriteMessage(session, '正在读取收藏列表…');
+    try {
+      const favorites = await preferenceStore.listFavorites(session.accountId);
+      const records = await indexStore.findVideosByPickcodes(
+        session.accountId, favorites.map(item => item.pickcode)
+      );
+      if (session.closed) return;
+      const byPickcode = new Map(records.map(item => [itemKey(item), item]));
+      session.favoriteEntries = favorites.map(preference => {
+        const resolved = byPickcode.get(String(preference.pickcode).toLowerCase()) || null;
+        const snapshot = preference.snapshot || null;
+        const item = resolved || (snapshot ? Object.assign({}, snapshot, {
+          pickcode: preference.pickcode, playable: true, isVideo: true
+        }) : null);
+        if (item && !item.pickcode) item.pickcode = preference.pickcode;
+        return { preference, item, resolved: Boolean(resolved) };
+      });
+      const activeCodes = new Set(favorites.map(item => item.pickcode));
+      for (const code of Array.from(session.favoriteSelected)) {
+        if (!activeCodes.has(code)) session.favoriteSelected.delete(code);
+      }
+      session.favoriteList.replaceChildren();
+      if (!session.favoriteEntries.length) {
+        session.favoriteList.append(element('p', 'panel-empty', '还没有收藏视频。可以在任意播放窗口点击“收藏”加入列表。'));
+      }
+      for (const entry of session.favoriteEntries) {
+        const preference = entry.preference;
+        const item = entry.item;
+        const row = element('article', 'favorite-row');
+        row.dataset.pickcode = preference.pickcode;
+        const checkbox = element('input', 'favorite-select');
+        checkbox.type = 'checkbox';
+        checkbox.checked = session.favoriteSelected.has(preference.pickcode);
+        checkbox.setAttribute('aria-label', '选择 ' + (item && item.name || preference.pickcode));
+        checkbox.onchange = () => {
+          if (checkbox.checked) session.favoriteSelected.add(preference.pickcode);
+          else session.favoriteSelected.delete(preference.pickcode);
+          updateFavoriteSelectionSummary(session);
+        };
+        const details = element('div', 'favorite-details');
+        const name = item && item.name || ('旧版收藏 ' + preference.pickcode);
+        const title = element('strong', 'favorite-name', name);
+        title.title = name;
+        const path = item && item.path || '旧收藏尚未定位到本地目录索引';
+        const size = item && Number.isFinite(Number(item.sizeBytes))
+          ? ' · ' + (Number(item.sizeBytes) / (1024 * 1024)).toFixed(1) + ' MB' : '';
+        const meta = element('small', 'favorite-meta', path + size +
+          (entry.resolved ? '' : ' · 旧收藏/索引未找到，仍可批量取消收藏'));
+        details.append(title, meta);
+        const actions = element('div', 'favorite-row-actions');
+        const play = element('button', 'toolbar-button favorite-play', '播放');
+        play.type = 'button';
+        play.disabled = !item || !item.pickcode;
+        play.onclick = () => playFavorite(session, item);
+        const locate = element('button', 'toolbar-button favorite-locate', '打开目录');
+        locate.type = 'button';
+        locate.disabled = !item || !item.rootCid;
+        locate.onclick = () => openRecentDirectory({
+          rootCid: item.rootCid,
+          recursive: item.recursive,
+          path: item.path,
+          videoCount: 0
+        });
+        const remove = element('button', 'toolbar-button favorite-remove', '取消收藏');
+        remove.type = 'button';
+        remove.onclick = async () => {
+          try {
+            await preferenceStore.setVideoPreference(session.accountId, preference.pickcode, { favorite: false });
+            session.preferenceState.favoritePickcodes.delete(preference.pickcode);
+            session.favoriteSelected.delete(preference.pickcode);
+            await refreshFavoritesPanel(session);
+            updateRoundControls(session);
+            if (session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
+          } catch (error) {
+            setFavoriteMessage(session, '取消收藏失败：' + String(error?.message || error), true);
+          }
+        };
+        actions.append(play, locate, remove);
+        row.append(checkbox, details, actions);
+        session.favoriteList.append(row);
+      }
+      updateFavoriteSelectionSummary(session);
+      setFavoriteMessage(session, '共 ' + session.favoriteEntries.length + ' 条收藏；可跨目录浏览和批量管理');
+    } catch (error) {
+      setFavoriteMessage(session, '读取收藏列表失败：' + String(error?.message || error), true);
+    }
+  }
+
+  function playFavorite(session, item) {
+    if (session.closed || !item || !item.pickcode) return;
+    const cell = session.cells.find(candidate =>
+      candidate && candidate.index < session.layoutCount && !candidate.locked
+    );
+    if (!cell) {
+      setFavoriteMessage(session, '当前所有可见窗口均已锁定，请先解锁一个窗口再播放收藏');
+      return;
+    }
+    const key = itemKey(item);
+    if (!key) return;
+    session.availableItems = session.availableItems.filter(candidate => itemKey(candidate) !== key);
+    session.usedPickcodes.add(key);
+    replaceCell(session, cell, Object.assign({}, item, { pickcode: key, playable: true, isVideo: true }));
+    session.roundMessage = '已从收藏列表播放：' + String(item.name || key);
+    updateRoundControls(session);
+  }
+
+  async function updateSelectedFavorites(session, patch, message) {
+    const codes = Array.from(session.favoriteSelected || []);
+    if (!codes.length) {
+      setFavoriteMessage(session, '请先勾选要批量处理的收藏视频');
+      return;
+    }
+    try {
+      await preferenceStore.updateVideoPreferences(session.accountId, codes, patch);
+      const preferences = await preferenceStore.listVideoPreferences(session.accountId);
+      session.preferenceState.favoritePickcodes.clear();
+      session.preferenceState.excludedPickcodes.clear();
+      for (const item of preferences) {
+        if (item.favorite) session.preferenceState.favoritePickcodes.add(item.pickcode);
+        if (item.excluded) session.preferenceState.excludedPickcodes.add(item.pickcode);
+      }
+      if (patch.excluded === true) {
+        const selected = new Set(codes);
+        session.availableItems = session.availableItems.filter(item => !selected.has(itemKey(item)));
+        for (const cell of session.cells) {
+          if (!cell || !cell.item || !selected.has(itemKey(cell.item)) || cell.locked) continue;
+          disposeCell(cell);
+          cell.item = null;
+          cell.failed = false;
+          cell.hasPlayed = false;
+          cell.loadStarted = false;
+          cell.name.textContent = (cell.index + 1) + '. 空窗口';
+          cell.name.title = '';
+          cell.quality.textContent = '';
+          setStatus(cell, '等待新一轮候选…');
+        }
+      }
+      session.favoriteSelected.clear();
+      await refreshFavoritesPanel(session);
+      updateRoundControls(session);
+      if (patch.excluded === true || patch.excluded === false || session.filters.favoritesOnly) {
+        await startNewRound(session, message);
+      } else {
+        session.roundMessage = message;
+        updateRoundControls(session);
+      }
+    } catch (error) {
+      setFavoriteMessage(session, '批量操作失败：' + String(error?.message || error), true);
+    }
+  }
+
+  function createFavoritesPanel(session) {
+    const panel = element('section', 'favorites-panel');
+    panel.hidden = true;
+    panel.setAttribute('aria-label', '收藏列表');
+    const heading = element('div', 'favorites-panel-heading');
+    heading.append(
+      element('strong', '', '收藏视频'),
+      element('small', '', '按当前115账号汇总所有已索引目录中的收藏')
+    );
+    const actions = element('div', 'favorites-actions');
+    const addAction = (label, handler, className = '') => {
+      const button = element('button', 'toolbar-button ' + className, label);
+      button.type = 'button';
+      button.onclick = handler;
+      actions.append(button);
+      return button;
+    };
+    addAction('全选/取消全选', () => {
+      const codes = session.favoriteEntries.map(entry => entry.preference.pickcode);
+      const allSelected = codes.length > 0 && codes.every(code => session.favoriteSelected.has(code));
+      session.favoriteSelected = allSelected ? new Set() : new Set(codes);
+      session.favoriteList.querySelectorAll('.favorite-select').forEach(checkbox => {
+        checkbox.checked = session.favoriteSelected.has(checkbox.closest('.favorite-row').dataset.pickcode);
+      });
+      updateFavoriteSelectionSummary(session);
+    });
+    session.favoriteSelectionLabel = element('small', 'favorite-selection-label', '已选择 0 条');
+    actions.append(session.favoriteSelectionLabel);
+    addAction('批量取消收藏', () => {
+      void updateSelectedFavorites(session, { favorite: false }, '已批量取消收藏');
+    });
+    addAction('批量排除', () => {
+      void updateSelectedFavorites(session, { excluded: true }, '已批量排除；锁定窗口保持播放');
+    });
+    addAction('批量取消排除', () => {
+      void updateSelectedFavorites(session, { excluded: false }, '已批量取消排除');
+    });
+    session.favoriteList = element('div', 'favorites-list');
+    session.favoriteMessage = element('small', 'favorite-message', '打开收藏列表后自动读取');
+    panel.append(heading, actions, session.favoriteList, session.favoriteMessage);
+    return panel;
+  }
+
   function createCell(session, index) {
     const item = collectNextItem(session);
     const slotId = 'slot-' + (index + 1);
@@ -1495,7 +2032,8 @@
       const button = element('button', 'cell-tool ' + className, label);
       button.type = 'button';
       button.disabled = !item;
-      button.onclick = handler;      tools.append(button);
+      button.onclick = handler;
+      tools.append(button);
       return button;
     };
 
@@ -1621,7 +2159,13 @@
     }
     if (session.mainSlotId && Number(session.mainSlotId.slice(5)) > count) session.mainSlotId = null;
     if (session.focusSlotId && Number(session.focusSlotId.slice(5)) > count) session.focusSlotId = null;
+    session.layoutButtons.forEach(button => button.classList.toggle('is-active', Number(button.dataset.layout) === count));
     applyCellVisibility(session);
+    void preferenceStore.savePlayerSettings(session.accountId, {
+      layoutCount: count, filters: session.filters
+    }).catch(error => {
+      if (!session.closed) setFilterMessage(session, '布局已切换，但记忆保存失败：' + String(error?.message || error), true);
+    });
   }
 
   function closePlayer() {
@@ -1663,13 +2207,17 @@
       const session = {
         panel, grid, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
         preferenceState: indexed.preferenceState, profiles: indexed.profiles, filters: indexed.filters,
+        settings: indexed.settings, recentDirectories: indexed.recentDirectories,
+        favoriteSelected: new Set(), favoriteEntries: [],
         cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
         roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         abort: new AbortController(), closed: false, globalPaused: false,
-        layoutCount: 4, mainSlotId: null, focusSlotId: null,
+        layoutCount: indexed.settings.layoutCount, mainSlotId: null, focusSlotId: null,
         layoutButtons: [], pauseAllButton: null, muteAllButton: null,
         roundStatus: null, swapAllButton: null, newRoundButton: null,
         filterToggleButton: null, filterPanel: null, filterInputs: null, filterMessage: null,
+        recentButton: null, recentPanel: null, favoritesButton: null, favoritePanel: null,
+        favoriteList: null, favoriteMessage: null, favoriteSelectionLabel: null,
         onKey: event => {
           if (event.key === 'Escape') {
             event.stopPropagation();
@@ -1685,6 +2233,10 @@
 
       const filterPanel = createFilterPanel(session);
       session.filterPanel = filterPanel;
+      const recentPanel = createRecentPanel(session);
+      session.recentPanel = recentPanel;
+      const favoritePanel = createFavoritesPanel(session);
+      session.favoritePanel = favoritePanel;
       const toolbar = element('nav', 'toolbar');
       toolbar.setAttribute('role', 'toolbar');
       toolbar.setAttribute('aria-label', '多画面布局与播放控制');
@@ -1726,8 +2278,35 @@
       session.filterToggleButton.setAttribute('aria-expanded', 'false');
       session.filterToggleButton.onclick = () => {
         filterPanel.hidden = !filterPanel.hidden;
+        recentPanel.hidden = true;
+        favoritePanel.hidden = true;
         session.filterToggleButton.setAttribute('aria-expanded', String(!filterPanel.hidden));
+        session.recentButton.setAttribute('aria-expanded', 'false');
+        session.favoritesButton.setAttribute('aria-expanded', 'false');
         if (!filterPanel.hidden) session.filterInputs.keyword.focus();
+      };
+      session.recentButton = element('button', 'toolbar-button', '最近目录');
+      session.recentButton.type = 'button';
+      session.recentButton.setAttribute('aria-expanded', 'false');
+      session.recentButton.onclick = () => {
+        recentPanel.hidden = !recentPanel.hidden;
+        filterPanel.hidden = true;
+        favoritePanel.hidden = true;
+        session.recentButton.setAttribute('aria-expanded', String(!recentPanel.hidden));
+        session.filterToggleButton.setAttribute('aria-expanded', 'false');
+        session.favoritesButton.setAttribute('aria-expanded', 'false');
+      };
+      session.favoritesButton = element('button', 'toolbar-button', '收藏列表');
+      session.favoritesButton.type = 'button';
+      session.favoritesButton.setAttribute('aria-expanded', 'false');
+      session.favoritesButton.onclick = () => {
+        favoritePanel.hidden = !favoritePanel.hidden;
+        filterPanel.hidden = true;
+        recentPanel.hidden = true;
+        session.favoritesButton.setAttribute('aria-expanded', String(!favoritePanel.hidden));
+        session.filterToggleButton.setAttribute('aria-expanded', 'false');
+        session.recentButton.setAttribute('aria-expanded', 'false');
+        if (!favoritePanel.hidden) void refreshFavoritesPanel(session);
       };
       if (!items.length) {
         filterPanel.hidden = false;
@@ -1740,19 +2319,19 @@
       session.newRoundButton.type = 'button';
       session.newRoundButton.onclick = () => { void startNewRound(session); };
       session.roundStatus = element('small', 'round-status', '第1轮 · 候选池' + items.length + '个 · 剩余' + items.length + '个');
-      toolbar.append(layoutGroup, session.filterToggleButton, session.swapAllButton, session.newRoundButton, session.roundStatus,
-        session.pauseAllButton, session.muteAllButton);
+      toolbar.append(layoutGroup, session.filterToggleButton, session.recentButton, session.favoritesButton,
+        session.swapAllButton, session.newRoundButton, session.roundStatus, session.pauseAllButton, session.muteAllButton);
 
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
       close.onclick = closePlayer;
       bar.append(description, toolbar, close);
-      panel.append(bar, filterPanel, grid);
+      panel.append(bar, filterPanel, recentPanel, favoritePanel, grid);
       shadow.append(panel);
       active = session;
       document.addEventListener('keydown', session.onKey, true);
       close.focus();
-      applyLayout(session, 4);
+      applyLayout(session, indexed.settings.layoutCount);
     } catch (error) {
       alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
     } finally {
@@ -1778,6 +2357,20 @@
     .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;min-width:220px;flex:1}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
     .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.layout-group{display:flex;gap:4px;padding:3px;border:1px solid #394456;border-radius:7px;background:#101722}.round-status{font-size:11px;color:#aab5c7;white-space:nowrap}
     .filter-panel{display:flex;flex-direction:column;gap:8px;flex-shrink:0;padding:10px 14px;background:#101722;border-bottom:1px solid #303744}.filter-panel[hidden]{display:none}
+    .recent-panel,.favorites-panel{display:flex;flex-direction:column;gap:8px;flex-shrink:0;max-height:260px;overflow:auto;padding:10px 14px;background:#101722;border-bottom:1px solid #303744}
+    .recent-panel[hidden],.favorites-panel[hidden]{display:none}
+    .recent-panel-heading,.favorites-panel-heading{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+    .recent-panel-heading small,.favorites-panel-heading small{font-size:11px;color:#aab5c7}
+    .recent-list,.favorites-list{display:flex;flex-direction:column;gap:6px;min-width:0}
+    .recent-row,.favorite-row{display:flex;align-items:center;gap:9px;min-width:0;padding:7px 9px;border:1px solid #303d50;border-radius:6px;background:#0b111a}
+    .recent-details,.favorite-details{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
+    .recent-path,.favorite-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+    .recent-meta,.favorite-meta,.favorite-message,.favorite-selection-label{font-size:11px;color:#aab5c7;overflow-wrap:anywhere}
+    .favorites-actions,.favorite-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .favorite-select{flex-shrink:0;accent-color:#4f8df5}
+    .favorite-message.is-error{color:#ff9c9c}
+    .panel-empty{margin:0;padding:8px;color:#aab5c7;font-size:12px}
+
     .filter-fields{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.filter-field{display:flex;flex-direction:column;gap:4px;min-width:0;color:#aab5c7;font-size:11px}
     .filter-field input,.filter-schemes input,.filter-schemes select{width:100%;min-width:0;padding:7px 8px;border:1px solid #46566e;border-radius:5px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
     .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}.filter-check input{accent-color:#4f8df5}
