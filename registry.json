@@ -27,10 +27,10 @@
     },
     {
       "id": "115-multiview-indexed",
-      "displayName": "115 多画面播放器 · 索引驱动四宫格",
-      "description": "多宫格分级HLS缓冲（2/4格12MB、6格8MB、9/12格6MB）；隐藏窗口请求自动取消并在恢复时重载；保留最近目录、布局/筛选记忆、收藏管理、随机换片与索引部分可播。",
+      "displayName": "115 多画面播放器 · 索引驱动多宫格",
+      "description": "多种主副屏布局与智能画幅；包含/排除关键词、自定义换片数量、排除列表恢复、播完控制、快捷键和JSON备份恢复；保留索引部分可播与HLS分级缓冲。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · 性能与稳定性优化版",
+      "channel": "统一测试安装中心 · v0.8.0独立版功能对齐",
       "enabled": true
     }
   ]
