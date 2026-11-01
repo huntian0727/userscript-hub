@@ -28,9 +28,9 @@
     {
       "id": "115-multiview-indexed",
       "displayName": "115 多画面播放器 · 索引驱动四宫格",
-      "description": "支持2/4/6/9/12宫格、全部换一批、单格换片、锁定保护、本轮去重和开启新一轮；索引未完成也可播放已保存部分。",
+      "description": "支持2/4/6/9/12宫格、关键词/文件夹/文件大小筛选、收藏与排除、筛选方案、随机换片和本轮去重；索引未完成也可播放已保存部分。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · 随机探索版",
+      "channel": "统一测试安装中心 · 智能筛选版",
       "enabled": true
     }
   ]

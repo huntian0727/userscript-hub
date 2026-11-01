@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.4.0
-// @description  115索引多画面播放器，支持2/4/6/9/12宫格、锁定保护、随机换片与本轮去重。
+// @version      0.5.0
+// @description  115索引多画面播放器，支持智能筛选、收藏排除、筛选方案与随机换片。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -263,18 +263,248 @@
   return Object.freeze({ create115IndexStore, DEFAULT_DB_NAME });
 });
 
+(function attach115PlayerPreferenceStore(root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.N115PlayerPreferenceStore = api;
+})(typeof globalThis === 'object' ? globalThis : this, function create115PlayerPreferenceStoreModule() {
+  'use strict';
+
+  const DEFAULT_DB_NAME = '115-multiview-player-preferences';
+  const DB_VERSION = 1;
+
+  function create115PlayerPreferenceStore(options = {}) {
+    const indexedDBRef = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
+    const keyRangeRef = options.IDBKeyRange || (typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : null);
+    const dbName = String(options.dbName || DEFAULT_DB_NAME);
+    let databasePromise = null;
+
+    function requestPromise(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('本地偏好数据库请求失败'));
+      });
+    }
+
+    function transactionPromise(transaction) {
+      return new Promise((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error || new Error('本地偏好数据库事务已中止'));
+        transaction.onerror = () => reject(transaction.error || new Error('本地偏好数据库事务失败'));
+      });
+    }
+
+    function openDatabase() {
+      if (!indexedDBRef) return Promise.reject(new Error('当前浏览器不支持IndexedDB，无法保存播放器偏好'));
+      if (databasePromise) return databasePromise;
+      databasePromise = new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = indexedDBRef.open(dbName, DB_VERSION);
+        } catch (error) {
+          databasePromise = null;
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          let videos;
+          if (db.objectStoreNames.contains('videos')) {
+            videos = request.transaction.objectStore('videos');
+          } else {
+            videos = db.createObjectStore('videos', { keyPath: ['accountId', 'pickcode'] });
+          }
+          if (!videos.indexNames.contains('byAccount')) {
+            videos.createIndex('byAccount', 'accountId', { unique: false });
+          }
+
+          let profiles;
+          if (db.objectStoreNames.contains('profiles')) {
+            profiles = request.transaction.objectStore('profiles');
+          } else {
+            profiles = db.createObjectStore('profiles', { keyPath: ['accountId', 'profileId'] });
+          }
+          if (!profiles.indexNames.contains('byAccount')) {
+            profiles.createIndex('byAccount', 'accountId', { unique: false });
+          }
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          db.onversionchange = () => db.close();
+          resolve(db);
+        };
+        request.onerror = () => {
+          databasePromise = null;
+          reject(request.error || new Error('无法打开播放器偏好数据库'));
+        };
+        request.onblocked = () => {
+          databasePromise = null;
+          reject(new Error('播放器偏好数据库升级被其他页面阻止，请关闭其他115页面后重试'));
+        };
+      });
+      return databasePromise;
+    }
+
+    function only(value) {
+      if (!keyRangeRef) throw new Error('当前浏览器不支持IndexedDB范围查询');
+      return keyRangeRef.only(value);
+    }
+
+    function normalizeAccountId(value) {
+      const accountId = String(value || '').trim();
+      if (!accountId) throw new Error('缺少115账号标识，无法隔离保存播放器偏好');
+      return accountId;
+    }
+
+    function normalizePickcode(value) {
+      const pickcode = String(value || '').trim().toLowerCase();
+      if (!/^[a-z0-9]{6,64}$/i.test(pickcode)) throw new Error('无效的视频提取码');
+      return pickcode;
+    }
+
+    async function listVideoPreferences(accountId) {
+      const owner = normalizeAccountId(accountId);
+      const db = await openDatabase();
+      const tx = db.transaction('videos', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('videos').index('byAccount').getAll(only(owner)));
+      await done;
+      return items;
+    }
+
+    async function setVideoPreference(accountId, pickcode, patch = {}) {
+      const owner = normalizeAccountId(accountId);
+      const code = normalizePickcode(pickcode);
+      const db = await openDatabase();
+      const tx = db.transaction('videos', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('videos');
+      const existing = await requestPromise(store.get([owner, code]));
+      const next = Object.assign({}, existing || {
+        accountId: owner, pickcode: code, favorite: false, excluded: false, createdAt: Date.now()
+      });
+      if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
+      if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
+      next.updatedAt = Date.now();
+      if (!next.favorite && !next.excluded) store.delete([owner, code]);
+      else store.put(next);
+      await done;
+      return next;
+    }
+
+    async function clearExclusions(accountId) {
+      const owner = normalizeAccountId(accountId);
+      const db = await openDatabase();
+      const tx = db.transaction('videos', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('videos');
+      const request = store.index('byAccount').openCursor(only(owner));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const value = cursor.value;
+        if (value.excluded) {
+          value.excluded = false;
+          value.updatedAt = Date.now();
+          if (value.favorite) cursor.update(value);
+          else cursor.delete();
+        }
+        cursor.continue();
+      };
+      await done;
+      return true;
+    }
+
+    function normalizeFilters(value = {}) {
+      return {
+        keyword: String(value.keyword || '').trim(),
+        folderPath: String(value.folderPath || '').trim(),
+        minSizeMB: value.minSizeMB === '' || value.minSizeMB == null ? '' : String(value.minSizeMB),
+        maxSizeMB: value.maxSizeMB === '' || value.maxSizeMB == null ? '' : String(value.maxSizeMB),
+        favoritesOnly: value.favoritesOnly === true
+      };
+    }
+
+    async function listProfiles(accountId) {
+      const owner = normalizeAccountId(accountId);
+      const db = await openDatabase();
+      const tx = db.transaction('profiles', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('profiles').index('byAccount').getAll(only(owner)));
+      await done;
+      return items.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    }
+
+    async function saveProfile(accountId, profile = {}) {
+      const owner = normalizeAccountId(accountId);
+      const profileId = String(profile.profileId || '').trim();
+      const name = String(profile.name || '').trim();
+      if (!/^[a-z0-9_-]{4,80}$/i.test(profileId)) throw new Error('筛选方案ID无效');
+      if (!name || name.length > 40) throw new Error('方案名称不能为空且不能超过40个字符');
+      const db = await openDatabase();
+      const tx = db.transaction('profiles', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('profiles');
+      const existing = await requestPromise(store.get([owner, profileId]));
+      const now = Date.now();
+      const saved = {
+        accountId: owner,
+        profileId,
+        name,
+        filters: normalizeFilters(profile.filters),
+        createdAt: existing ? existing.createdAt : now,
+        updatedAt: now
+      };
+      store.put(saved);
+      await done;
+      return saved;
+    }
+
+    async function deleteProfile(accountId, profileId) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(profileId || '').trim();
+      if (!id) return false;
+      const db = await openDatabase();
+      const tx = db.transaction('profiles', 'readwrite');
+      const done = transactionPromise(tx);
+      tx.objectStore('profiles').delete([owner, id]);
+      await done;
+      return true;
+    }
+
+    function close() {
+      if (!databasePromise) return;
+      databasePromise.then(db => db.close()).catch(() => {});
+      databasePromise = null;
+    }
+
+    return Object.freeze({
+      listVideoPreferences,
+      setVideoPreference,
+      clearExclusions,
+      listProfiles,
+      saveProfile,
+      deleteProfile,
+      close
+    });
+  }
+
+  return Object.freeze({ create115PlayerPreferenceStore, DEFAULT_DB_NAME });
+});
+
 /* global Hls, GM_xmlhttpRequest */
 (() => {
   'use strict';
 
-  const VERSION = '0.4.0';
-  const HOST_ID = 'local-115-multiview-indexed';
-  const MAX_VIDEOS = 12;
+  const VERSION = '0.5.0';
+  const HOST_ID = 'local-115-multiview-indexed';  const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
   const N115IndexStore = globalThis.N115IndexStore;
-  if (!N115IndexStore) return;
+  const N115PlayerPreferenceStore = globalThis.N115PlayerPreferenceStore;
+  if (!N115IndexStore || !N115PlayerPreferenceStore) return;
   const indexStore = N115IndexStore.create115IndexStore();
+  const preferenceStore = N115PlayerPreferenceStore.create115PlayerPreferenceStore();
   let active = null;
   let opening = false;
 
@@ -364,17 +594,86 @@
     };
     return labels[String(scan.status || '')] || `未完成（${String(scan.status || '状态未知')}）`;
   }
+  const DEFAULT_FILTERS = Object.freeze({
+    keyword: '',
+    folderPath: '',
+    minSizeMB: '',
+    maxSizeMB: '',
+    favoritesOnly: false
+  });
 
-  function itemKey(item) {
-    return String(item && item.pickcode || '').trim().toLowerCase();
+  function normalizeFilters(value = {}) {
+    return {
+      keyword: String(value.keyword || '').trim(),
+      folderPath: String(value.folderPath || '').trim().replace(/\\/g, '/'),
+      minSizeMB: value.minSizeMB === '' || value.minSizeMB == null ? '' : String(value.minSizeMB),
+      maxSizeMB: value.maxSizeMB === '' || value.maxSizeMB == null ? '' : String(value.maxSizeMB),
+      favoritesOnly: value.favoritesOnly === true
+    };
   }
 
-  function createPlayablePredicate(excludedPickcodes = new Set()) {
+  function validateFilters(filters) {
+    const min = filters.minSizeMB === '' ? null : Number(filters.minSizeMB);
+    const max = filters.maxSizeMB === '' ? null : Number(filters.maxSizeMB);
+    if (min !== null && (!Number.isFinite(min) || min < 0)) return '最小文件大小必须是大于等于0的数字';
+    if (max !== null && (!Number.isFinite(max) || max < 0)) return '最大文件大小必须是大于等于0的数字';
+    if (min !== null && max !== null && max < min) return '最大文件大小不能小于最小文件大小';
+    return '';
+  }
+
+  function recordFolderNames(record) {
+    if (Array.isArray(record?.pathSegments)) {
+      return record.pathSegments.map(segment =>
+        String(typeof segment === 'string' ? segment : segment?.name || '').trim()
+      ).filter(Boolean);
+    }
+    const path = String(record?.path || '');
+    return path.split('/').filter(Boolean).slice(0, -1);
+  }
+
+  function matchesFilters(record, filters, favoritePickcodes) {
+    const keyword = String(filters.keyword || '').trim().toLocaleLowerCase();
+    const folderNames = recordFolderNames(record);
+    const folderPath = folderNames.join('/').toLocaleLowerCase();
+    if (keyword) {
+      const haystack = [record.name || '', folderNames.join(' '), record.path || '']
+        .join(' ').toLocaleLowerCase();
+      if (!keyword.split(/\s+/).filter(Boolean).every(token => haystack.includes(token))) return false;
+    }
+
+    const folderQuery = String(filters.folderPath || '').trim().replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '').toLocaleLowerCase();
+    if (folderQuery) {
+      if (folderQuery.includes('/')) {
+        if (folderPath !== folderQuery && !folderPath.startsWith(folderQuery + '/')) return false;
+      } else if (!folderNames.some(name => name.toLocaleLowerCase().includes(folderQuery))) {
+        return false;
+      }
+    }
+
+    const min = filters.minSizeMB === '' ? null : Number(filters.minSizeMB);
+    const max = filters.maxSizeMB === '' ? null : Number(filters.maxSizeMB);
+    if (min !== null || max !== null) {
+      const sizeBytes = Number(record.sizeBytes);
+      if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return false;
+      if (min !== null && sizeBytes < min * 1024 * 1024) return false;
+      if (max !== null && sizeBytes > max * 1024 * 1024) return false;
+    }
+
+    if (filters.favoritesOnly && !favoritePickcodes.has(itemKey(record))) return false;
+    return true;
+  }
+
+  function createPlayablePredicate(excludedPickcodes = new Set(), filters = DEFAULT_FILTERS, preferences = {}) {
     const seen = new Set(Array.from(excludedPickcodes, value => String(value).toLowerCase()));
+    const favoritePickcodes = preferences.favoritePickcodes || new Set();
+    const excludedPreferences = preferences.excludedPickcodes || new Set();
     return record => {
       const pickcode = String(record && record.pickcode || '').trim();
       const key = pickcode.toLowerCase();
-      if (record?.playable !== true || !/^[a-z0-9]{6,64}$/i.test(pickcode) || seen.has(key)) return false;
+      if (record?.playable !== true || !/^[a-z0-9]{6,64}$/i.test(pickcode) ||
+          seen.has(key) || excludedPreferences.has(key)) return false;
+      if (!matchesFilters(record, filters, favoritePickcodes)) return false;
       seen.add(key);
       return true;
     };
@@ -389,38 +688,62 @@
     return result;
   }
 
-  async function collectVideos() {
+  async function collectVideos(filters = DEFAULT_FILTERS) {
     const cid = currentCid();
     if (cid === null) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
     const accountId = await resolveAccountId();
+    const preferenceRecords = await preferenceStore.listVideoPreferences(accountId);
+    const preferenceState = {
+      favoritePickcodes: new Set(preferenceRecords.filter(item => item.favorite).map(item => item.pickcode)),
+      excludedPickcodes: new Set(preferenceRecords.filter(item => item.excluded).map(item => item.pickcode))
+    };
+    const profiles = await preferenceStore.listProfiles(accountId);
     const recursiveScan = await indexStore.getLatest(accountId, cid, true);
     let scan = recursiveScan || await indexStore.getLatest(accountId, cid, false);
     if (!scan) throw new Error('当前目录还没有本地索引。可以先启动“目录索引验证”；索引一旦保存出视频记录，就能边扫描边播放。');
-    let sampled = await indexStore.sampleVideos(scan.scanId, MAX_CANDIDATES, createPlayablePredicate());
+    let sampled = await indexStore.sampleVideos(
+      scan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), filters, preferenceState)
+    );
 
-    // 递归索引优先；若它暂时还没有可播放记录，允许回退到同账号、同目录的非递归索引。
+    // 递归索引优先；若它暂时还没有符合当前筛选条件的可播放记录，允许回退到同账号、同目录的非递归索引。
     // 不合并两个索引，避免根目录视频重复进入随机池。
     if (!sampled.total && recursiveScan) {
       const directScan = await indexStore.getLatest(accountId, cid, false);
       if (directScan && directScan.scanId !== scan.scanId) {
-        const directSampled = await indexStore.sampleVideos(directScan.scanId, MAX_CANDIDATES, createPlayablePredicate());
+        const directSampled = await indexStore.sampleVideos(
+          directScan.scanId, MAX_CANDIDATES, createPlayablePredicate(new Set(), filters, preferenceState)
+        );
         if (directSampled.total) {
           scan = directScan;
           sampled = directSampled;
         }
       }
     }
-    if (!sampled.total) throw new Error('当前目录已保存的索引中还没有带有效播放提取码的视频。可以继续扫描；新保存的视频会自动进入可播放资源池。');
+    if (!sampled.total) {
+      const unfiltered = await indexStore.sampleVideos(
+        scan.scanId, 1,
+        createPlayablePredicate(new Set(), DEFAULT_FILTERS, {
+          favoritePickcodes: new Set(), excludedPickcodes: new Set()
+        })
+      );
+      if (!unfiltered.total) {
+        throw new Error('当前目录已保存的索引中还没有带有效播放提取码的视频。可以继续扫描；新保存的视频会自动进入可播放资源池。');
+      }
+    }
     return {
       items: sampled.items,
       total: sampled.total,
       scan,
+      accountId,
+      preferenceState,
+      preferenceRecords,
+      profiles,
+      filters: normalizeFilters(filters),
       statusLabel: indexStatusLabel(scan),
       indexedVideoCount: Number(scan.stats && scan.stats.videos || 0),
       isComplete: scan.status === 'complete' && scan.complete === true
     };
   }
-
   function serverError(text) {
     try {
       const data = JSON.parse(text);
@@ -639,11 +962,26 @@
     if (cell.mainButton) cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '还原主屏' : '主屏';
     if (cell.focusButton) cell.focusButton.textContent = session.focusSlotId === cell.slotId ? '退出放大' : '放大';
     if (cell.lockButton) cell.lockButton.textContent = cell.locked ? '已锁定' : '锁定';
+    const key = cell.item ? itemKey(cell.item) : '';
+    if (cell.favoriteButton) {
+      const favorite = key && session.preferenceState.favoritePickcodes.has(key);
+      cell.favoriteButton.textContent = favorite ? '★ 已收藏' : '☆ 收藏';
+      cell.favoriteButton.setAttribute('aria-pressed', String(Boolean(favorite)));
+      cell.favoriteButton.disabled = !cell.item;
+    }
+    if (cell.excludeButton) {
+      const excluded = key && session.preferenceState.excludedPickcodes.has(key);
+      cell.excludeButton.textContent = excluded ? '已排除' : '排除';
+      cell.excludeButton.setAttribute('aria-pressed', String(Boolean(excluded)));
+      cell.excludeButton.disabled = !cell.item;
+    }
     if (cell.nextButton) {
       cell.nextButton.textContent = cell.locked ? '已锁定' : '换片';
       cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || !session.availableItems.length;
     }
     cell.box.classList.toggle('is-locked', cell.locked);
+    cell.box.classList.toggle('is-favorite', Boolean(key && session.preferenceState.favoritePickcodes.has(key)));
+    cell.box.classList.toggle('is-excluded', Boolean(key && session.preferenceState.excludedPickcodes.has(key)));
   }
 
   function updateGlobalControls(session) {
@@ -658,9 +996,9 @@
   }
 
   function updateRoundControls(session) {
-    const remaining = session.availableItems.length;
-    if (session.roundStatus) {
-      const summary = '第' + session.roundNumber + '轮 · 候选池' + session.roundPoolSize + '个 · 剩余' + remaining + '个';
+    const remaining = session.availableItems.length;    if (session.roundStatus) {
+      const summary = '第' + session.roundNumber + '轮 · 候选池' + session.roundPoolSize + '个 · 剩余' + remaining +
+        '个 · 收藏' + session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
       session.roundStatus.textContent = session.roundMessage ? summary + ' · ' + session.roundMessage : summary;
     }
     if (session.swapAllButton) {
@@ -697,7 +1035,8 @@
         setStatus(cell, '浏览器阻止自动播放，请点击视频下方的播放按钮');
       } else if (error.name !== 'AbortError') {
         failCell(session, cell, '浏览器无法开始播放，请确认该视频在115原播放器中可以正常播放');
-      }    }
+      }
+    }
   }
 
   function startHls(session, cell, source, useGM = false) {
@@ -773,16 +1112,6 @@
     return String(item && item.pickcode || '').trim().toLowerCase();
   }
 
-  function createPlayablePredicate(excludedPickcodes = new Set()) {
-    const seen = new Set(Array.from(excludedPickcodes, value => String(value).toLowerCase()));
-    return record => {
-      const pickcode = String(record && record.pickcode || '').trim();
-      const key = pickcode.toLowerCase();
-      if (record?.playable !== true || !/^[a-z0-9]{6,64}$/i.test(pickcode) || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    };
-  }
 
   function shuffleItems(items) {
     const result = items.slice();
@@ -872,20 +1201,22 @@
     updateRoundControls(session);
   }
 
-  async function startNewRound(session) {
+  async function startNewRound(session, message = '') {
     if (session.closed || session.roundRefreshing) return;
     session.roundRefreshing = true;
-    session.roundMessage = '正在从已保存索引抽取新一轮候选…';
+    session.roundMessage = '正在按当前筛选条件抽取新一轮候选…';
     updateRoundControls(session);
     const activePickcodes = new Set(session.cells.filter(cell => cell && cell.item).map(cell => itemKey(cell.item)));
     try {
       let sampled = await indexStore.sampleVideos(
-        session.scan.scanId, MAX_CANDIDATES, createPlayablePredicate(activePickcodes)
+        session.scan.scanId, MAX_CANDIDATES,
+        createPlayablePredicate(activePickcodes, session.filters, session.preferenceState)
       );
       let candidates = sampled.items;
       if (!sampled.total) {
         sampled = await indexStore.sampleVideos(
-          session.scan.scanId, MAX_CANDIDATES, createPlayablePredicate()
+          session.scan.scanId, MAX_CANDIDATES,
+          createPlayablePredicate(new Set(), session.filters, session.preferenceState)
         );
         candidates = sampled.items.filter(item => !activePickcodes.has(itemKey(item)));
       }
@@ -895,8 +1226,8 @@
       session.availableItems = shuffleItems(candidates);
       session.roundPoolSize = session.availableItems.length;
       session.roundMessage = session.availableItems.length
-        ? '新一轮已开始'
-        : '当前索引没有其他可换视频';
+        ? (message || '新一轮已开始')
+        : (message ? message + ' · 当前筛选下没有其他可换视频' : '当前筛选下没有其他可换视频');
       for (const cell of session.cells) {
         if (!cell || cell.index >= session.layoutCount || cell.item) continue;
         const item = collectNextItem(session);
@@ -908,6 +1239,232 @@
       session.roundRefreshing = false;
       if (!session.closed) updateRoundControls(session);
     }
+  }
+
+  function writeFilterControls(session, filters) {
+    const normalized = normalizeFilters(filters);
+    session.filterInputs.keyword.value = normalized.keyword;
+    session.filterInputs.folderPath.value = normalized.folderPath;
+    session.filterInputs.minSizeMB.value = normalized.minSizeMB;
+    session.filterInputs.maxSizeMB.value = normalized.maxSizeMB;
+    session.filterInputs.favoritesOnly.checked = normalized.favoritesOnly;
+  }
+
+  function readFilterControls(session) {
+    return normalizeFilters({
+      keyword: session.filterInputs.keyword.value,
+      folderPath: session.filterInputs.folderPath.value,
+      minSizeMB: session.filterInputs.minSizeMB.value,
+      maxSizeMB: session.filterInputs.maxSizeMB.value,
+      favoritesOnly: session.filterInputs.favoritesOnly.checked
+    });
+  }
+
+  function setFilterMessage(session, message, isError = false) {
+    if (!session.filterMessage) return;
+    session.filterMessage.textContent = message;
+    session.filterMessage.classList.toggle('is-error', isError);
+  }
+
+  async function applyCurrentFilters(session, filters = readFilterControls(session), message = '筛选已应用') {
+    const normalized = normalizeFilters(filters);
+    const validation = validateFilters(normalized);
+    if (validation) {
+      setFilterMessage(session, validation, true);
+      return false;
+    }
+    session.filters = normalized;
+    writeFilterControls(session, normalized);
+    setFilterMessage(session, '筛选条件已更新；现有窗口保持播放，后续换片使用新条件');
+    await startNewRound(session, message);
+    return true;
+  }
+
+  function refreshProfileOptions(session, selectedId = '') {
+    const select = session.filterInputs.profileSelect;
+    select.replaceChildren();
+    const placeholder = element('option', '', '选择已保存方案');
+    placeholder.value = '';
+    select.append(placeholder);
+    for (const profile of session.profiles) {
+      const option = element('option', '', profile.name);
+      option.value = profile.profileId;
+      select.append(option);
+    }
+    select.value = selectedId;
+  }
+
+  async function saveFilterProfile(session) {
+    const name = session.filterInputs.profileName.value.trim();
+    if (!name) {
+      setFilterMessage(session, '请先填写筛选方案名称', true);
+      return;
+    }
+    const selectedId = session.filterInputs.profileSelect.value;
+    const profileId = selectedId || ('profile-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8));
+    try {
+      const saved = await preferenceStore.saveProfile(session.accountId, {
+        profileId,
+        name,
+        filters: readFilterControls(session)
+      });
+      session.profiles = await preferenceStore.listProfiles(session.accountId);
+      refreshProfileOptions(session, saved.profileId);
+      setFilterMessage(session, '已保存方案「' + saved.name + '」');
+    } catch (error) {
+      setFilterMessage(session, '保存方案失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function deleteSelectedProfile(session) {
+    const profileId = session.filterInputs.profileSelect.value;
+    if (!profileId) {
+      setFilterMessage(session, '请先选择要删除的方案', true);
+      return;
+    }
+    try {
+      await preferenceStore.deleteProfile(session.accountId, profileId);
+      session.profiles = await preferenceStore.listProfiles(session.accountId);
+      refreshProfileOptions(session);
+      session.filterInputs.profileName.value = '';
+      setFilterMessage(session, '已删除筛选方案');
+    } catch (error) {
+      setFilterMessage(session, '删除方案失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function toggleFavorite(session, cell) {
+    if (session.closed || !cell.item) return;
+    const key = itemKey(cell.item);
+    const next = !session.preferenceState.favoritePickcodes.has(key);
+    try {
+      await preferenceStore.setVideoPreference(session.accountId, key, { favorite: next });
+      if (next) session.preferenceState.favoritePickcodes.add(key);
+      else session.preferenceState.favoritePickcodes.delete(key);
+      session.roundMessage = next ? '已加入收藏' : '已取消收藏';
+      updateRoundControls(session);
+      if (session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
+    } catch (error) {
+      setFilterMessage(session, '保存收藏状态失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function toggleExcluded(session, cell) {
+    if (session.closed || !cell.item) return;
+    const key = itemKey(cell.item);
+    const next = !session.preferenceState.excludedPickcodes.has(key);
+    try {
+      await preferenceStore.setVideoPreference(session.accountId, key, { excluded: next });
+      if (next) {
+        session.preferenceState.excludedPickcodes.add(key);
+        session.availableItems = session.availableItems.filter(item => itemKey(item) !== key);
+        session.roundPoolSize = Math.max(0, session.roundPoolSize - 1);
+        if (!cell.locked) {
+          const replacement = collectNextItem(session);
+          if (replacement) {
+            replaceCell(session, cell, replacement);
+            session.roundMessage = '已排除该视频并自动换片';
+          } else {
+            session.roundMessage = '已排除该视频；当前没有其他候选，窗口暂时保留';
+          }
+        } else {
+          session.roundMessage = '已排除；锁定窗口保持当前播放，解锁后可换片';
+        }
+      } else {
+        session.preferenceState.excludedPickcodes.delete(key);
+        session.roundMessage = '已取消排除；该视频将在后续新一轮重新参与筛选';
+      }
+      updateRoundControls(session);
+    } catch (error) {
+      setFilterMessage(session, '保存排除状态失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function clearAllExclusions(session) {
+    try {
+      await preferenceStore.clearExclusions(session.accountId);
+      session.preferenceState.excludedPickcodes.clear();
+      setFilterMessage(session, '已清空当前账号的排除列表');
+      await startNewRound(session, '排除列表已清空');
+    } catch (error) {
+      setFilterMessage(session, '清空排除列表失败：' + String(error?.message || error), true);
+    }
+  }
+
+  function createFilterPanel(session) {
+    const panel = element('section', 'filter-panel');
+    panel.hidden = true;
+    panel.setAttribute('aria-label', '智能筛选与偏好管理');
+    const fields = element('div', 'filter-fields');
+    const addField = (labelText, className, type, placeholder) => {
+      const label = element('label', 'filter-field');
+      const caption = element('span', '', labelText);
+      const input = element('input', className);
+      input.type = type;
+      input.placeholder = placeholder || '';
+      input.setAttribute('aria-label', labelText);
+      label.append(caption, input);
+      fields.append(label);
+      return input;
+    };
+    session.filterInputs = {
+      keyword: addField('关键词', 'filter-keyword', 'search', '视频名或文件夹名，多个词用空格分隔'),
+      folderPath: addField('文件夹路径', 'filter-folder', 'text', '例如：科幻/星际（包含其子文件夹）'),
+      minSizeMB: addField('最小大小（MB）', 'filter-min-size', 'number', '不限'),
+      maxSizeMB: addField('最大大小（MB）', 'filter-max-size', 'number', '不限')
+    };
+    session.filterInputs.minSizeMB.min = '0';
+    session.filterInputs.minSizeMB.step = '0.1';
+    session.filterInputs.maxSizeMB.min = '0';
+    session.filterInputs.maxSizeMB.step = '0.1';
+
+    const favoriteLabel = element('label', 'filter-check');
+    session.filterInputs.favoritesOnly = element('input', 'filter-favorites-only');
+    session.filterInputs.favoritesOnly.type = 'checkbox';
+    favoriteLabel.append(session.filterInputs.favoritesOnly, element('span', '', '仅显示收藏'));
+
+    const schemeRow = element('div', 'filter-schemes');
+    session.filterInputs.profileSelect = element('select', 'filter-profile-select');
+    session.filterInputs.profileSelect.setAttribute('aria-label', '已保存的筛选方案');
+    session.filterInputs.profileName = element('input', 'filter-profile-name');
+    session.filterInputs.profileName.type = 'text';
+    session.filterInputs.profileName.maxLength = 40;
+    session.filterInputs.profileName.placeholder = '输入方案名称';
+    session.filterInputs.profileName.setAttribute('aria-label', '筛选方案名称');
+    schemeRow.append(session.filterInputs.profileSelect, session.filterInputs.profileName);
+
+    const actions = element('div', 'filter-actions');
+    const addAction = (className, label, handler) => {
+      const button = element('button', className, label);
+      button.type = 'button';
+      button.onclick = handler;
+      actions.append(button);
+      return button;
+    };
+    addAction('filter-apply', '应用筛选', () => { void applyCurrentFilters(session); });
+    addAction('filter-reset', '清空筛选', () => {
+      writeFilterControls(session, DEFAULT_FILTERS);
+      session.filterInputs.profileSelect.value = '';
+      session.filterInputs.profileName.value = '';
+      void applyCurrentFilters(session, DEFAULT_FILTERS, '已清空筛选');
+    });
+    addAction('filter-save-profile', '保存方案', () => { void saveFilterProfile(session); });
+    addAction('filter-delete-profile', '删除方案', () => { void deleteSelectedProfile(session); });
+    addAction('filter-clear-exclusions', '清空排除列表', () => { void clearAllExclusions(session); });
+
+    session.filterInputs.profileSelect.onchange = () => {
+      const profile = session.profiles.find(item => item.profileId === session.filterInputs.profileSelect.value);
+      if (!profile) return;
+      session.filterInputs.profileName.value = profile.name;
+      writeFilterControls(session, profile.filters);
+      void applyCurrentFilters(session, profile.filters, '已载入方案「' + profile.name + '」');
+    };
+
+    session.filterMessage = element('small', 'filter-message');
+    panel.append(fields, favoriteLabel, schemeRow, actions, session.filterMessage);
+    refreshProfileOptions(session);
+    writeFilterControls(session, session.filters);
+    return panel;
   }
 
   function createCell(session, index) {
@@ -938,8 +1495,7 @@
       const button = element('button', 'cell-tool ' + className, label);
       button.type = 'button';
       button.disabled = !item;
-      button.onclick = handler;
-      tools.append(button);
+      button.onclick = handler;      tools.append(button);
       return button;
     };
 
@@ -959,6 +1515,8 @@
       updateGlobalControls(session);
     });
     cell.nextButton = makeTool('cell-next', '换片', () => swapCell(session, cell));
+    cell.favoriteButton = makeTool('cell-favorite', '☆ 收藏', () => { void toggleFavorite(session, cell); });
+    cell.excludeButton = makeTool('cell-exclude', '排除', () => { void toggleExcluded(session, cell); });
     cell.mainButton = makeTool('cell-main', '主屏', () => {
       session.mainSlotId = session.mainSlotId === slotId ? null : slotId;
       applyCellVisibility(session);
@@ -1103,13 +1661,15 @@
 
       const grid = element('div', 'grid');
       const session = {
-        panel, grid, scan: indexed.scan, candidateTotal: indexed.total,
+        panel, grid, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
+        preferenceState: indexed.preferenceState, profiles: indexed.profiles, filters: indexed.filters,
         cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
         roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         abort: new AbortController(), closed: false, globalPaused: false,
         layoutCount: 4, mainSlotId: null, focusSlotId: null,
         layoutButtons: [], pauseAllButton: null, muteAllButton: null,
         roundStatus: null, swapAllButton: null, newRoundButton: null,
+        filterToggleButton: null, filterPanel: null, filterInputs: null, filterMessage: null,
         onKey: event => {
           if (event.key === 'Escape') {
             event.stopPropagation();
@@ -1123,6 +1683,8 @@
         }
       };
 
+      const filterPanel = createFilterPanel(session);
+      session.filterPanel = filterPanel;
       const toolbar = element('nav', 'toolbar');
       toolbar.setAttribute('role', 'toolbar');
       toolbar.setAttribute('aria-label', '多画面布局与播放控制');
@@ -1159,6 +1721,18 @@
         playable.forEach(cell => { cell.video.muted = nextMuted; updateCellControls(session, cell); });
         updateGlobalControls(session);
       };
+      session.filterToggleButton = element('button', 'toolbar-button', '智能筛选');
+      session.filterToggleButton.type = 'button';
+      session.filterToggleButton.setAttribute('aria-expanded', 'false');
+      session.filterToggleButton.onclick = () => {
+        filterPanel.hidden = !filterPanel.hidden;
+        session.filterToggleButton.setAttribute('aria-expanded', String(!filterPanel.hidden));
+        if (!filterPanel.hidden) session.filterInputs.keyword.focus();
+      };
+      if (!items.length) {
+        filterPanel.hidden = false;
+        session.filterToggleButton.setAttribute('aria-expanded', 'true');
+      }
       session.swapAllButton = element('button', 'toolbar-button', '全部换一批');
       session.swapAllButton.type = 'button';
       session.swapAllButton.onclick = () => swapAllUnlocked(session);
@@ -1166,14 +1740,14 @@
       session.newRoundButton.type = 'button';
       session.newRoundButton.onclick = () => { void startNewRound(session); };
       session.roundStatus = element('small', 'round-status', '第1轮 · 候选池' + items.length + '个 · 剩余' + items.length + '个');
-      toolbar.append(layoutGroup, session.swapAllButton, session.newRoundButton, session.roundStatus,
+      toolbar.append(layoutGroup, session.filterToggleButton, session.swapAllButton, session.newRoundButton, session.roundStatus,
         session.pauseAllButton, session.muteAllButton);
 
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
       close.onclick = closePlayer;
       bar.append(description, toolbar, close);
-      panel.append(bar, grid);
+      panel.append(bar, filterPanel, grid);
       shadow.append(panel);
       active = session;
       document.addEventListener('keydown', session.onKey, true);
@@ -1203,6 +1777,12 @@
     .bar{display:flex;align-items:center;gap:10px 16px;justify-content:space-between;flex-shrink:0;flex-wrap:wrap;padding:10px 14px;background:#171c25;border-bottom:1px solid #303744}
     .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;min-width:220px;flex:1}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
     .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.layout-group{display:flex;gap:4px;padding:3px;border:1px solid #394456;border-radius:7px;background:#101722}.round-status{font-size:11px;color:#aab5c7;white-space:nowrap}
+    .filter-panel{display:flex;flex-direction:column;gap:8px;flex-shrink:0;padding:10px 14px;background:#101722;border-bottom:1px solid #303744}.filter-panel[hidden]{display:none}
+    .filter-fields{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}.filter-field{display:flex;flex-direction:column;gap:4px;min-width:0;color:#aab5c7;font-size:11px}
+    .filter-field input,.filter-schemes input,.filter-schemes select{width:100%;min-width:0;padding:7px 8px;border:1px solid #46566e;border-radius:5px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
+    .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}.filter-check input{accent-color:#4f8df5}
+    .filter-schemes{display:flex;gap:7px;flex-wrap:wrap}.filter-profile-select{max-width:220px}.filter-profile-name{max-width:220px}
+    .filter-actions{display:flex;gap:6px;flex-wrap:wrap}.filter-message{min-height:14px;color:#aab5c7;font-size:11px}.filter-message.is-error{color:#ff9c9c}
     .toolbar button,.cell-tool{font:inherit;color:#eaf0fb;background:#283447;border:1px solid #4b5d78;border-radius:5px;padding:6px 9px;font-size:12px;white-space:nowrap}
     .toolbar button:hover,.cell-tool:hover{background:#38527b}.toolbar .is-active{background:#245dd6;border-color:#77a0f5}.toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}.toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:2px}
     .toolbar-button{background:#303947!important}.close{background:#303947;border:1px solid #536078;color:#fff;padding:7px 14px;border-radius:5px;white-space:nowrap}
@@ -1215,19 +1795,20 @@
     .grid.has-main{grid-template-columns:minmax(0,2fr) minmax(180px,1fr);grid-template-rows:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(0,1fr)}
     .grid.has-main .cell:not(.is-main){grid-column:2}.grid.has-main .cell.is-main{grid-column:1;grid-row:1 / span 2}
     .grid.has-focus{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}.grid.has-focus .cell.is-focused{grid-column:1;grid-row:1}
-    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}.cell[hidden]{display:none!important}.cell.is-locked .heading{border-left:3px solid #e3b341}
+    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}.cell[hidden]{display:none!important}.cell.is-locked .heading{border-left:3px solid #e3b341}.cell.is-favorite .cell-favorite{color:#f6d66e;border-color:#9b7b2b}.cell.is-excluded .cell-exclude{color:#ffaaaa;border-color:#9e5555}
     .heading{display:flex;gap:6px;flex-shrink:0;align-items:center;flex-wrap:wrap;min-height:30px;padding:5px 7px;background:#141923;font-size:12px}
     .name{flex:1;min-width:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.quality{color:#a2b7d5;font-size:11px;white-space:nowrap}.cell-tools{display:flex;gap:3px;flex-wrap:wrap}.cell-tool{padding:3px 5px;font-size:10px}.cell-tool:disabled{opacity:.35;cursor:not-allowed}
     video{display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
     @media(max-width:1000px){.grid[data-layout="12"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}}
-    @media(max-width:620px){.bar{padding:8px;gap:7px}.description{min-width:0}.toolbar{width:100%}.grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.heading{padding:3px;gap:3px}.cell-tool{padding:2px 4px}}
+    @media(max-width:900px){.filter-fields{grid-template-columns:repeat(2,minmax(120px,1fr))}}
+    @media(max-width:620px){.bar{padding:8px;gap:7px}.description{min-width:0}.toolbar{width:100%}.filter-panel{padding:8px}.filter-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.filter-schemes>*{max-width:none;flex:1 1 140px}.grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.heading{padding:3px;gap:3px}.cell-tool{padding:2px 4px}}
     .status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:10px 14px;line-height:1.7;
       background:#151b25ee;border-radius:6px;color:#d7e0ef;text-align:center;font-size:13px;pointer-events:none;overflow-wrap:anywhere}
     .status[hidden]{display:none}
   `;
   const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
-  launcher.title = '从当前115目录已保存的本地索引中随机抽取视频，支持锁定窗口、单格换片、全部换一批和本轮去重';
+  launcher.title = '从当前115目录已保存的本地索引中随机探索视频，支持智能筛选、收藏排除和方案管理';
   launcher.onclick = () => { void openPlayer(); };
   shadow.append(style, launcher);
   document.documentElement.append(host);
