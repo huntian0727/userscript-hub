@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.3.0
-// @description  115索引多画面播放器，支持2/4/6/9/12宫格、独立窗口控制与布局切换保留播放状态。
+// @version      0.4.0
+// @description  115索引多画面播放器，支持2/4/6/9/12宫格、锁定保护、随机换片与本轮去重。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -267,9 +267,10 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
+  const MAX_CANDIDATES = 100;
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
   const N115IndexStore = globalThis.N115IndexStore;
   if (!N115IndexStore) return;
@@ -364,6 +365,30 @@
     return labels[String(scan.status || '')] || `未完成（${String(scan.status || '状态未知')}）`;
   }
 
+  function itemKey(item) {
+    return String(item && item.pickcode || '').trim().toLowerCase();
+  }
+
+  function createPlayablePredicate(excludedPickcodes = new Set()) {
+    const seen = new Set(Array.from(excludedPickcodes, value => String(value).toLowerCase()));
+    return record => {
+      const pickcode = String(record && record.pickcode || '').trim();
+      const key = pickcode.toLowerCase();
+      if (record?.playable !== true || !/^[a-z0-9]{6,64}$/i.test(pickcode) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    };
+  }
+
+  function shuffleItems(items) {
+    const result = items.slice();
+    for (let index = result.length - 1; index > 0; index--) {
+      const other = Math.floor(Math.random() * (index + 1));
+      [result[index], result[other]] = [result[other], result[index]];
+    }
+    return result;
+  }
+
   async function collectVideos() {
     const cid = currentCid();
     if (cid === null) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
@@ -371,15 +396,14 @@
     const recursiveScan = await indexStore.getLatest(accountId, cid, true);
     let scan = recursiveScan || await indexStore.getLatest(accountId, cid, false);
     if (!scan) throw new Error('当前目录还没有本地索引。可以先启动“目录索引验证”；索引一旦保存出视频记录，就能边扫描边播放。');
-    const isPlayable = record => record.playable === true && /^[a-z0-9]{6,64}$/i.test(String(record.pickcode || ''));
-    let sampled = await indexStore.sampleVideos(scan.scanId, MAX_VIDEOS, isPlayable);
+    let sampled = await indexStore.sampleVideos(scan.scanId, MAX_CANDIDATES, createPlayablePredicate());
 
     // 递归索引优先；若它暂时还没有可播放记录，允许回退到同账号、同目录的非递归索引。
     // 不合并两个索引，避免根目录视频重复进入随机池。
     if (!sampled.total && recursiveScan) {
       const directScan = await indexStore.getLatest(accountId, cid, false);
       if (directScan && directScan.scanId !== scan.scanId) {
-        const directSampled = await indexStore.sampleVideos(directScan.scanId, MAX_VIDEOS, isPlayable);
+        const directSampled = await indexStore.sampleVideos(directScan.scanId, MAX_CANDIDATES, createPlayablePredicate());
         if (directSampled.total) {
           scan = directScan;
           sampled = directSampled;
@@ -396,6 +420,7 @@
       isComplete: scan.status === 'complete' && scan.complete === true
     };
   }
+
   function serverError(text) {
     try {
       const data = JSON.parse(text);
@@ -614,6 +639,10 @@
     if (cell.mainButton) cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '还原主屏' : '主屏';
     if (cell.focusButton) cell.focusButton.textContent = session.focusSlotId === cell.slotId ? '退出放大' : '放大';
     if (cell.lockButton) cell.lockButton.textContent = cell.locked ? '已锁定' : '锁定';
+    if (cell.nextButton) {
+      cell.nextButton.textContent = cell.locked ? '已锁定' : '换片';
+      cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || !session.availableItems.length;
+    }
     cell.box.classList.toggle('is-locked', cell.locked);
   }
 
@@ -628,6 +657,24 @@
     }
   }
 
+  function updateRoundControls(session) {
+    const remaining = session.availableItems.length;
+    if (session.roundStatus) {
+      const summary = '第' + session.roundNumber + '轮 · 候选池' + session.roundPoolSize + '个 · 剩余' + remaining + '个';
+      session.roundStatus.textContent = session.roundMessage ? summary + ' · ' + session.roundMessage : summary;
+    }
+    if (session.swapAllButton) {
+      const hasTarget = session.cells.some(cell =>
+        cell && cell.index < session.layoutCount && cell.item && !cell.locked
+      );
+      session.swapAllButton.disabled = session.closed || session.roundRefreshing || !remaining || !hasTarget;
+    }
+    if (session.newRoundButton) {
+      session.newRoundButton.disabled = session.closed || session.roundRefreshing;
+      session.newRoundButton.textContent = session.roundRefreshing ? '正在抽取…' : '开启新一轮';
+    }
+    session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
+  }
   function failCell(session, cell, message) {
     if (session.closed || cell.failed) return;
     cell.failed = true;
@@ -650,8 +697,7 @@
         setStatus(cell, '浏览器阻止自动播放，请点击视频下方的播放按钮');
       } else if (error.name !== 'AbortError') {
         failCell(session, cell, '浏览器无法开始播放，请确认该视频在115原播放器中可以正常播放');
-      }
-    }
+      }    }
   }
 
   function startHls(session, cell, source, useGM = false) {
@@ -723,8 +769,149 @@
       if (cell.abort === controller) cell.abort = null;
     }
   }
+  function itemKey(item) {
+    return String(item && item.pickcode || '').trim().toLowerCase();
+  }
+
+  function createPlayablePredicate(excludedPickcodes = new Set()) {
+    const seen = new Set(Array.from(excludedPickcodes, value => String(value).toLowerCase()));
+    return record => {
+      const pickcode = String(record && record.pickcode || '').trim();
+      const key = pickcode.toLowerCase();
+      if (record?.playable !== true || !/^[a-z0-9]{6,64}$/i.test(pickcode) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    };
+  }
+
+  function shuffleItems(items) {
+    const result = items.slice();
+    for (let index = result.length - 1; index > 0; index--) {
+      const other = Math.floor(Math.random() * (index + 1));
+      [result[index], result[other]] = [result[other], result[index]];
+    }
+    return result;
+  }
+
+  function collectNextItem(session) {
+    while (session.availableItems.length) {
+      const item = session.availableItems.shift();
+      const key = itemKey(item);
+      if (!key || session.usedPickcodes.has(key)) continue;
+      session.usedPickcodes.add(key);
+      return item;
+    }
+    return null;
+  }
+
+  function isCellVisible(session, cell) {
+    return cell.index < session.layoutCount && (!session.focusSlotId || session.focusSlotId === cell.slotId);
+  }
+
+  function replaceCell(session, cell, item) {
+    if (session.closed || !item) return false;
+    disposeCell(cell);
+    cell.item = item;
+    cell.failed = false;
+    cell.hasPlayed = false;
+    cell.loadStarted = false;
+    cell.userPaused = false;
+    cell.timer = null;
+    cell.quality.textContent = '';
+    cell.name.textContent = (cell.index + 1) + '. ' + item.name;
+    cell.name.title = item.name || '';
+    const visible = isCellVisible(session, cell);
+    cell.layoutPaused = !visible;
+    setStatus(cell, visible ? '正在获取播放地址…' : '等待窗口显示后加载…');
+    if (visible) {
+      cell.loadStarted = true;
+      void loadCell(session, cell, item);
+    }
+    updateCellControls(session, cell);
+    updateRoundControls(session);
+    return true;
+  }
+
+  function swapCell(session, cell) {
+    if (session.closed || session.roundRefreshing) return;
+    if (cell.locked) {
+      session.roundMessage = '该窗口已锁定，请先解锁再换片';
+      updateRoundControls(session);
+      return;
+    }
+    const item = collectNextItem(session);
+    if (!item) {
+      session.roundMessage = '本轮候选已用完，请开启新一轮';
+      updateRoundControls(session);
+      return;
+    }
+    session.roundMessage = '';
+    replaceCell(session, cell, item);
+  }
+
+  function swapAllUnlocked(session) {
+    if (session.closed || session.roundRefreshing) return;
+    const targets = session.cells.filter(cell =>
+      cell && cell.index < session.layoutCount && cell.item && !cell.locked
+    );
+    if (!targets.length) {
+      session.roundMessage = '当前布局没有可换片的未锁定窗口';
+      updateRoundControls(session);
+      return;
+    }
+    let replaced = 0;
+    for (const cell of targets) {
+      const item = collectNextItem(session);
+      if (!item) break;
+      replaceCell(session, cell, item);
+      replaced++;
+    }
+    session.roundMessage = replaced < targets.length
+      ? '候选不足，已替换 ' + replaced + '/' + targets.length + ' 格'
+      : '已替换 ' + replaced + ' 格';
+    updateRoundControls(session);
+  }
+
+  async function startNewRound(session) {
+    if (session.closed || session.roundRefreshing) return;
+    session.roundRefreshing = true;
+    session.roundMessage = '正在从已保存索引抽取新一轮候选…';
+    updateRoundControls(session);
+    const activePickcodes = new Set(session.cells.filter(cell => cell && cell.item).map(cell => itemKey(cell.item)));
+    try {
+      let sampled = await indexStore.sampleVideos(
+        session.scan.scanId, MAX_CANDIDATES, createPlayablePredicate(activePickcodes)
+      );
+      let candidates = sampled.items;
+      if (!sampled.total) {
+        sampled = await indexStore.sampleVideos(
+          session.scan.scanId, MAX_CANDIDATES, createPlayablePredicate()
+        );
+        candidates = sampled.items.filter(item => !activePickcodes.has(itemKey(item)));
+      }
+      if (session.closed) return;
+      session.roundNumber++;
+      session.usedPickcodes = activePickcodes;
+      session.availableItems = shuffleItems(candidates);
+      session.roundPoolSize = session.availableItems.length;
+      session.roundMessage = session.availableItems.length
+        ? '新一轮已开始'
+        : '当前索引没有其他可换视频';
+      for (const cell of session.cells) {
+        if (!cell || cell.index >= session.layoutCount || cell.item) continue;
+        const item = collectNextItem(session);
+        if (item) replaceCell(session, cell, item);
+      }
+    } catch (error) {
+      if (!session.closed) session.roundMessage = '新一轮抽取失败：' + String(error?.message || error).slice(0, 90);
+    } finally {
+      session.roundRefreshing = false;
+      if (!session.closed) updateRoundControls(session);
+    }
+  }
+
   function createCell(session, index) {
-    const item = session.items[index] || null;
+    const item = collectNextItem(session);
     const slotId = 'slot-' + (index + 1);
     const box = element('article', 'cell');
     box.dataset.slotId = slotId;
@@ -739,7 +926,7 @@
     video.muted = true;
     video.playsInline = true;
     video.preload = 'metadata';
-    const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个');
+    const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个 · 本轮候选已用完，请开启新一轮');
     const cell = {
       index, slotId, item, box, video, status, quality, name,
       hls: null, timer: null, abort: null, generation: 0,
@@ -771,6 +958,7 @@
       updateCellControls(session, cell);
       updateGlobalControls(session);
     });
+    cell.nextButton = makeTool('cell-next', '换片', () => swapCell(session, cell));
     cell.mainButton = makeTool('cell-main', '主屏', () => {
       session.mainSlotId = session.mainSlotId === slotId ? null : slotId;
       applyCellVisibility(session);
@@ -782,6 +970,7 @@
     cell.lockButton = makeTool('cell-lock', '锁定', () => {
       cell.locked = !cell.locked;
       updateCellControls(session, cell);
+      updateRoundControls(session);
     });
 
     heading.append(name, quality, tools);
@@ -819,7 +1008,6 @@
     updateCellControls(session, cell);
     return cell;
   }
-
   function applyCellVisibility(session) {
     session.grid.classList.toggle('has-main', Boolean(session.mainSlotId));
     session.grid.classList.toggle('has-focus', Boolean(session.focusSlotId));
@@ -851,6 +1039,7 @@
       }
       if (cell.item && !cell.loadStarted && !cell.failed) {
         cell.loadStarted = true;
+        setStatus(cell, '正在获取播放地址…');
         void loadCell(session, cell, cell.item);
       }
       updateCellControls(session, cell);
@@ -862,6 +1051,7 @@
       button.setAttribute('aria-pressed', String(selected));
     });
     updateGlobalControls(session);
+    updateRoundControls(session);
   }
 
   function applyLayout(session, value) {
@@ -913,10 +1103,13 @@
 
       const grid = element('div', 'grid');
       const session = {
-        panel, grid, items, cells: Array(MAX_VIDEOS).fill(null),
+        panel, grid, scan: indexed.scan, candidateTotal: indexed.total,
+        cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
+        roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         abort: new AbortController(), closed: false, globalPaused: false,
         layoutCount: 4, mainSlotId: null, focusSlotId: null,
         layoutButtons: [], pauseAllButton: null, muteAllButton: null,
+        roundStatus: null, swapAllButton: null, newRoundButton: null,
         onKey: event => {
           if (event.key === 'Escape') {
             event.stopPropagation();
@@ -966,7 +1159,15 @@
         playable.forEach(cell => { cell.video.muted = nextMuted; updateCellControls(session, cell); });
         updateGlobalControls(session);
       };
-      toolbar.append(layoutGroup, session.pauseAllButton, session.muteAllButton);
+      session.swapAllButton = element('button', 'toolbar-button', '全部换一批');
+      session.swapAllButton.type = 'button';
+      session.swapAllButton.onclick = () => swapAllUnlocked(session);
+      session.newRoundButton = element('button', 'toolbar-button', '开启新一轮');
+      session.newRoundButton.type = 'button';
+      session.newRoundButton.onclick = () => { void startNewRound(session); };
+      session.roundStatus = element('small', 'round-status', '第1轮 · 候选池' + items.length + '个 · 剩余' + items.length + '个');
+      toolbar.append(layoutGroup, session.swapAllButton, session.newRoundButton, session.roundStatus,
+        session.pauseAllButton, session.muteAllButton);
 
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
@@ -1001,9 +1202,9 @@
     .panel{pointer-events:auto;position:absolute;inset:0;background:#080b10;color:#eee;display:flex;flex-direction:column;font-size:14px}
     .bar{display:flex;align-items:center;gap:10px 16px;justify-content:space-between;flex-shrink:0;flex-wrap:wrap;padding:10px 14px;background:#171c25;border-bottom:1px solid #303744}
     .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;min-width:220px;flex:1}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
-    .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.layout-group{display:flex;gap:4px;padding:3px;border:1px solid #394456;border-radius:7px;background:#101722}
+    .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.layout-group{display:flex;gap:4px;padding:3px;border:1px solid #394456;border-radius:7px;background:#101722}.round-status{font-size:11px;color:#aab5c7;white-space:nowrap}
     .toolbar button,.cell-tool{font:inherit;color:#eaf0fb;background:#283447;border:1px solid #4b5d78;border-radius:5px;padding:6px 9px;font-size:12px;white-space:nowrap}
-    .toolbar button:hover,.cell-tool:hover{background:#38527b}.toolbar .is-active{background:#245dd6;border-color:#77a0f5}.toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:2px}
+    .toolbar button:hover,.cell-tool:hover{background:#38527b}.toolbar .is-active{background:#245dd6;border-color:#77a0f5}.toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}.toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:2px}
     .toolbar-button{background:#303947!important}.close{background:#303947;border:1px solid #536078;color:#fff;padding:7px 14px;border-radius:5px;white-space:nowrap}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;min-width:0;gap:3px;padding:3px;overflow:auto}
     .grid[data-layout="2"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(1,minmax(0,1fr))}
@@ -1026,7 +1227,7 @@
   `;
   const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
-  launcher.title = '从当前115目录已保存的本地索引中随机抽取最多4个视频，索引未完成也可以播放已保存部分';
+  launcher.title = '从当前115目录已保存的本地索引中随机抽取视频，支持锁定窗口、单格换片、全部换一批和本轮去重';
   launcher.onclick = () => { void openPlayer(); };
   shadow.append(style, launcher);
   document.documentElement.append(host);
