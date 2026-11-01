@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.2.1
-// @description  从115本地目录索引已保存的视频中随机抽取最多4个播放，支持索引未完成时播放已有记录。
+// @version      0.3.0
+// @description  115索引多画面播放器，支持2/4/6/9/12宫格、独立窗口控制与布局切换保留播放状态。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -267,9 +267,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.1';
+  const VERSION = '0.3.0';
   const HOST_ID = 'local-115-multiview-indexed';
-  const MAX_VIDEOS = 4;
+  const MAX_VIDEOS = 12;
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
   const N115IndexStore = globalThis.N115IndexStore;
   if (!N115IndexStore) return;
@@ -596,11 +596,36 @@
 
   function disposeCell(cell) {
     clearTimeout(cell.timer);
+    cell.generation = (cell.generation || 0) + 1;
+    if (cell.abort) {
+      cell.abort.abort();
+      cell.abort = null;
+    }
     cell.hls?.destroy();
     cell.hls = null;
     cell.video.pause();
     cell.video.removeAttribute('src');
     cell.video.load();
+  }
+
+  function updateCellControls(session, cell) {
+    if (cell.pauseButton) cell.pauseButton.textContent = cell.video.paused ? '播放' : '暂停';
+    if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '取消静音' : '静音';
+    if (cell.mainButton) cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '还原主屏' : '主屏';
+    if (cell.focusButton) cell.focusButton.textContent = session.focusSlotId === cell.slotId ? '退出放大' : '放大';
+    if (cell.lockButton) cell.lockButton.textContent = cell.locked ? '已锁定' : '锁定';
+    cell.box.classList.toggle('is-locked', cell.locked);
+  }
+
+  function updateGlobalControls(session) {
+    if (session.pauseAllButton) {
+      session.pauseAllButton.textContent = session.globalPaused ? '全部继续' : '全部暂停';
+    }
+    if (session.muteAllButton) {
+      const playable = session.cells.filter(cell => cell && cell.item);
+      const allMuted = playable.length === 0 || playable.every(cell => cell.video.muted);
+      session.muteAllButton.textContent = allMuted ? '全部取消静音' : '全部静音';
+    }
   }
 
   function failCell(session, cell, message) {
@@ -609,13 +634,18 @@
     disposeCell(cell);
     setStatus(cell, message);
     cell.quality.textContent = '加载失败';
-    console.warn(`[115多画面 ${VERSION}] 第${cell.index + 1}格：${message}`);
+    updateCellControls(session, cell);
+    console.warn('[115多画面 ' + VERSION + '] ' + cell.slotId + '：' + message);
   }
 
   async function tryPlay(session, cell) {
-    try { await cell.video.play(); }
-    catch (error) {
-      if (session.closed || cell.failed) return;
+    if (session.closed || cell.failed || session.globalPaused || cell.layoutPaused || cell.userPaused) return;
+    const generation = cell.generation;
+    try {
+      await cell.video.play();
+      if (generation === cell.generation) updateCellControls(session, cell);
+    } catch (error) {
+      if (session.closed || cell.failed || generation !== cell.generation) return;
       if (error.name === 'NotAllowedError') {
         setStatus(cell, '浏览器阻止自动播放，请点击视频下方的播放按钮');
       } else if (error.name !== 'AbortError') {
@@ -625,7 +655,8 @@
   }
 
   function startHls(session, cell, source, useGM = false) {
-    if (session.closed || cell.failed) return;
+    if (session.closed || cell.failed || !cell.item) return;
+    const generation = cell.generation;
     cell.hls?.destroy();
     const noRetry = { maxTimeToFirstByteMs: 15000, maxLoadTimeMs: 20000, timeoutRetry: null, errorRetry: null };
     const hls = new Hls({
@@ -638,13 +669,15 @@
       ...(useGM ? { loader: createGMLoader(Hls) } : { xhrSetup: xhr => { xhr.withCredentials = true; } })
     });
     cell.hls = hls;
-    cell.quality.textContent = `${source.label} · ${useGM ? '油猴加载' : '浏览器加载'}`;
+    cell.quality.textContent = source.label + ' · ' + (useGM ? '油猴加载' : '浏览器加载');
     setStatus(cell, useGM ? '正在尝试油猴加载播放流…' : '正在加载播放流…');
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (!session.closed && cell.hls === hls) void tryPlay(session, cell);
+      if (session.closed || cell.generation !== generation || cell.hls !== hls) return;
+      if (cell.layoutPaused) hls.stopLoad();
+      else void tryPlay(session, cell);
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (!data.fatal || session.closed || cell.hls !== hls || cell.failed) return;
+      if (!data.fatal || session.closed || cell.generation !== generation || cell.hls !== hls || cell.failed) return;
       const code = data.response?.code;
       if (!useGM && data.type === Hls.ErrorTypes.NETWORK_ERROR && code !== 401) {
         // 仅回退一次；不反复刷新签名地址，不无限重试。
@@ -652,33 +685,195 @@
         return;
       }
       const reason = data.error?.message || data.reason || '';
-      failCell(session, cell, `播放失败：${data.details || data.type}${code ? `（HTTP ${code}）` : ''}` +
-        `${reason ? `；${reason.slice(0, 150)}` : ''}。请确认原播放器可播放，并检查油猴访问授权。`);
+      failCell(session, cell, '播放失败：' + (data.details || data.type) + (code ? '（HTTP ' + code + '）' : '') +
+        (reason ? '；' + reason.slice(0, 150) : '') + '。请确认原播放器可播放，并检查油猴访问授权。');
     });
     hls.attachMedia(cell.video);
     hls.loadSource(source.url);
   }
 
   async function loadCell(session, cell, item) {
+    const generation = cell.generation;
+    const controller = new AbortController();
+    cell.abort = controller;
+    const abortOnClose = () => controller.abort();
+    session.abort.signal.addEventListener('abort', abortOnClose, { once: true });
     try {
-      const result = await requestText(`https://115.com/api/video/m3u8/${encodeURIComponent(item.pickcode)}.m3u8`, session.abort.signal);
-      if (session.closed) return;
+      const result = await requestText('https://115.com/api/video/m3u8/' + encodeURIComponent(item.pickcode) + '.m3u8', controller.signal);
+      if (session.closed || generation !== cell.generation || cell.item !== item) return;
       const source = chooseSource(result.text, result.url);
       cell.timer = setTimeout(() => {
-        if (!cell.hasPlayed) failCell(session, cell, '45秒内未能开始播放，请检查网络、转码状态或油猴访问授权');
+        if (!cell.hasPlayed && generation === cell.generation) {
+          failCell(session, cell, '45秒内未能开始播放，请检查网络、转码状态或油猴访问授权');
+        }
       }, 45000);
       if (typeof Hls !== 'undefined' && Hls.isSupported()) {
         startHls(session, cell, source);
       } else if (cell.video.canPlayType('application/vnd.apple.mpegurl')) {
-        cell.quality.textContent = `${source.label} · 浏览器原生HLS`;
+        cell.quality.textContent = source.label + ' · 浏览器原生HLS';
         cell.video.src = source.url;
         void tryPlay(session, cell);
       } else {
         failCell(session, cell, 'HLS.js未加载或浏览器不支持，请检查脚本依赖，并使用新版Chrome或Edge');
       }
     } catch (error) {
-      if (error.name !== 'AbortError') failCell(session, cell, error.message);
+      if (error.name !== 'AbortError' && generation === cell.generation) failCell(session, cell, error.message);
+    } finally {
+      session.abort.signal.removeEventListener('abort', abortOnClose);
+      if (cell.abort === controller) cell.abort = null;
     }
+  }
+  function createCell(session, index) {
+    const item = session.items[index] || null;
+    const slotId = 'slot-' + (index + 1);
+    const box = element('article', 'cell');
+    box.dataset.slotId = slotId;
+    box.dataset.slotIndex = String(index);
+    const heading = element('div', 'heading');
+    const name = element('span', 'name', item ? (index + 1) + '. ' + item.name : (index + 1) + '. 空窗口');
+    name.title = item?.name || '';
+    const quality = element('span', 'quality');
+    const tools = element('div', 'cell-tools');
+    const video = element('video');
+    video.controls = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个');
+    const cell = {
+      index, slotId, item, box, video, status, quality, name,
+      hls: null, timer: null, abort: null, generation: 0,
+      failed: false, hasPlayed: false, loadStarted: false,
+      userPaused: false, layoutPaused: false, locked: false
+    };
+
+    const makeTool = (className, label, handler) => {
+      const button = element('button', 'cell-tool ' + className, label);
+      button.type = 'button';
+      button.disabled = !item;
+      button.onclick = handler;
+      tools.append(button);
+      return button;
+    };
+
+    cell.pauseButton = makeTool('cell-pause', '暂停', () => {
+      if (video.paused) {
+        cell.userPaused = false;
+        void tryPlay(session, cell);
+      } else {
+        cell.userPaused = true;
+        video.pause();
+      }
+      updateCellControls(session, cell);
+    });
+    cell.muteButton = makeTool('cell-mute', '取消静音', () => {
+      video.muted = !video.muted;
+      updateCellControls(session, cell);
+      updateGlobalControls(session);
+    });
+    cell.mainButton = makeTool('cell-main', '主屏', () => {
+      session.mainSlotId = session.mainSlotId === slotId ? null : slotId;
+      applyCellVisibility(session);
+    });
+    cell.focusButton = makeTool('cell-focus', '放大', () => {
+      session.focusSlotId = session.focusSlotId === slotId ? null : slotId;
+      applyCellVisibility(session);
+    });
+    cell.lockButton = makeTool('cell-lock', '锁定', () => {
+      cell.locked = !cell.locked;
+      updateCellControls(session, cell);
+    });
+
+    heading.append(name, quality, tools);
+    box.append(heading, video, status);
+    session.grid.append(box);
+    session.cells[index] = cell;
+
+    video.addEventListener('play', () => {
+      if (session.globalPaused && !cell.layoutPaused) {
+        video.pause();
+        return;
+      }
+      if (!cell.layoutPaused) cell.userPaused = false;
+      updateCellControls(session, cell);
+    });
+    video.addEventListener('pause', () => {
+      if (!session.closed && !session.globalPaused && !cell.layoutPaused) cell.userPaused = true;
+      updateCellControls(session, cell);
+    });
+    video.addEventListener('playing', () => {
+      if (session.closed || cell.failed) return;
+      cell.hasPlayed = true;
+      clearTimeout(cell.timer);
+      setStatus(cell, '');
+      updateCellControls(session, cell);
+    });
+    video.addEventListener('waiting', () => {
+      if (!session.closed && !cell.failed) setStatus(cell, '正在缓冲…');
+    });
+    video.addEventListener('error', () => {
+      if (!session.closed && !cell.failed && !cell.hls && video.getAttribute('src')) {
+        failCell(session, cell, '浏览器播放失败（媒体错误 ' + (video.error?.code || '未知') + '）');
+      }
+    });
+    updateCellControls(session, cell);
+    return cell;
+  }
+
+  function applyCellVisibility(session) {
+    session.grid.classList.toggle('has-main', Boolean(session.mainSlotId));
+    session.grid.classList.toggle('has-focus', Boolean(session.focusSlotId));
+    session.grid.dataset.layout = String(session.layoutCount);
+
+    session.cells.forEach(cell => {
+      if (!cell) return;
+      const visible = cell.index < session.layoutCount &&
+        (!session.focusSlotId || session.focusSlotId === cell.slotId);
+      cell.box.hidden = !visible;
+      cell.box.classList.toggle('is-main', session.mainSlotId === cell.slotId);
+      cell.box.classList.toggle('is-focused', session.focusSlotId === cell.slotId);
+
+      if (!visible) {
+        if (!cell.layoutPaused) {
+          cell.layoutPaused = true;
+          if (!cell.video.paused) cell.video.pause();
+          cell.hls?.stopLoad();
+        }
+        return;
+      }
+
+      if (cell.layoutPaused) {
+        cell.layoutPaused = false;
+        cell.hls?.startLoad();
+        if (cell.item && cell.loadStarted && !cell.userPaused && !session.globalPaused && !cell.failed) {
+          void tryPlay(session, cell);
+        }
+      }
+      if (cell.item && !cell.loadStarted && !cell.failed) {
+        cell.loadStarted = true;
+        void loadCell(session, cell, cell.item);
+      }
+      updateCellControls(session, cell);
+    });
+
+    session.layoutButtons.forEach(button => {
+      const selected = Number(button.dataset.layout) === session.layoutCount;
+      button.classList.toggle('is-active', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+    updateGlobalControls(session);
+  }
+
+  function applyLayout(session, value) {
+    const count = Number(value);
+    if (![2, 4, 6, 9, 12].includes(count)) return;
+    session.layoutCount = count;
+    for (let index = 0; index < count; index++) {
+      if (!session.cells[index]) createCell(session, index);
+    }
+    if (session.mainSlotId && Number(session.mainSlotId.slice(5)) > count) session.mainSlotId = null;
+    if (session.focusSlotId && Number(session.focusSlotId.slice(5)) > count) session.focusSlotId = null;
+    applyCellVisibility(session);
   }
 
   function closePlayer() {
@@ -687,7 +882,7 @@
     session.closed = true;
     active = null;
     session.abort.abort();
-    session.cells.forEach(disposeCell);
+    session.cells.forEach(cell => { if (cell) disposeCell(cell); });
     session.panel.remove();
     document.removeEventListener('keydown', session.onKey, true);
     launcher.focus();
@@ -708,67 +903,88 @@
       const description = element('div', 'description');
       description.append(
         element('strong', '', '115 多画面播放'),
-        element('small', '', `索引版 v${VERSION} · ${indexed.scan.recursive ? '包含子文件夹' : '仅当前目录'} · ${indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频'} · 默认静音`),
-        element('small', 'index-summary', `索引状态：${indexed.statusLabel} · 已索引视频记录 ${indexed.indexedVideoCount} 条 · 可播放候选 ${indexed.total} 个 · 本次播放 ${items.length} 个`)
+        element('small', '', '索引版 v' + VERSION + ' · ' +
+          (indexed.scan.recursive ? '包含子文件夹' : '仅当前目录') + ' · ' +
+          (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') + ' · 默认静音'),
+        element('small', 'index-summary', '索引状态：' + indexed.statusLabel +
+          ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
+          indexed.total + ' 个 · 本次抽样 ' + items.length + ' 个')
       );
-      const close = element('button', 'close', '关闭 ✕');
-      close.type = 'button';
-      close.onclick = closePlayer;
-      bar.append(description, close);
+
       const grid = element('div', 'grid');
-      const session = { panel, cells: [], abort: new AbortController(), closed: false,
+      const session = {
+        panel, grid, items, cells: Array(MAX_VIDEOS).fill(null),
+        abort: new AbortController(), closed: false, globalPaused: false,
+        layoutCount: 4, mainSlotId: null, focusSlotId: null,
+        layoutButtons: [], pauseAllButton: null, muteAllButton: null,
         onKey: event => {
-          if (event.key === 'Escape') { event.stopPropagation(); closePlayer(); }
+          if (event.key === 'Escape') {
+            event.stopPropagation();
+            if (session.focusSlotId) {
+              session.focusSlotId = null;
+              applyCellVisibility(session);
+            } else {
+              closePlayer();
+            }
+          }
         }
       };
-      active = session;
-      for (let index = 0; index < MAX_VIDEOS; index++) {
-        const box = element('article', 'cell');
-        const heading = element('div', 'heading');
-        const name = element('span', 'name', items[index] ? `${index + 1}. ${items[index].name}` : `${index + 1}. 空窗口`);
-        name.title = items[index]?.name || '';
-        const quality = element('span', 'quality');
-        heading.append(name, quality);
-        const video = element('video');
-        video.controls = true;
-        video.muted = true;
-        video.playsInline = true;
-        video.preload = 'metadata';
-        const status = element('div', 'status', items[index] ? '正在获取播放地址…' : '可播放视频不足4个');
-        const cell = { index, video, status, quality, hls: null, timer: null, failed: false, hasPlayed: false };
-        if (items[index]) {
-          session.cells.push(cell);
-          video.addEventListener('playing', () => {
-            if (session.closed || cell.failed) return;
-            cell.hasPlayed = true;
-            clearTimeout(cell.timer);
-            setStatus(cell, '');
-          });
-          video.addEventListener('waiting', () => {
-            if (!session.closed && !cell.failed) setStatus(cell, '正在缓冲…');
-          });
-          video.addEventListener('error', () => {
-            if (!session.closed && !cell.failed && !cell.hls && video.getAttribute('src')) {
-              failCell(session, cell, `浏览器播放失败（媒体错误 ${video.error?.code || '未知'}）`);
+
+      const toolbar = element('nav', 'toolbar');
+      toolbar.setAttribute('role', 'toolbar');
+      toolbar.setAttribute('aria-label', '多画面布局与播放控制');
+      const layoutGroup = element('div', 'layout-group');
+      [2, 4, 6, 9, 12].forEach(count => {
+        const button = element('button', 'layout-button', count + '格');
+        button.type = 'button';
+        button.dataset.layout = String(count);
+        button.setAttribute('aria-label', count + '格布局');
+        button.onclick = () => applyLayout(session, count);
+        session.layoutButtons.push(button);
+        layoutGroup.append(button);
+      });
+      session.pauseAllButton = element('button', 'toolbar-button', '全部暂停');
+      session.pauseAllButton.type = 'button';
+      session.pauseAllButton.onclick = () => {
+        session.globalPaused = !session.globalPaused;
+        if (session.globalPaused) {
+          session.cells.forEach(cell => { if (cell) cell.video.pause(); });
+        } else {
+          session.cells.forEach(cell => {
+            if (cell && cell.index < session.layoutCount && !cell.layoutPaused && !cell.userPaused && !cell.failed) {
+              void tryPlay(session, cell);
             }
           });
         }
-        box.append(heading, video, status);
-        grid.append(box);
-      }
+        updateGlobalControls(session);
+      };
+      session.muteAllButton = element('button', 'toolbar-button', '全部取消静音');
+      session.muteAllButton.type = 'button';
+      session.muteAllButton.onclick = () => {
+        const playable = session.cells.filter(cell => cell && cell.item);
+        const nextMuted = !playable.every(cell => cell.video.muted);
+        playable.forEach(cell => { cell.video.muted = nextMuted; updateCellControls(session, cell); });
+        updateGlobalControls(session);
+      };
+      toolbar.append(layoutGroup, session.pauseAllButton, session.muteAllButton);
+
+      const close = element('button', 'close', '关闭 ✕');
+      close.type = 'button';
+      close.onclick = closePlayer;
+      bar.append(description, toolbar, close);
       panel.append(bar, grid);
       shadow.append(panel);
+      active = session;
       document.addEventListener('keydown', session.onKey, true);
       close.focus();
-      session.cells.forEach((cell, index) => { void loadCell(session, cell, items[index]); });
+      applyLayout(session, 4);
     } catch (error) {
       alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
     } finally {
       opening = false;
       launcher.disabled = false;
     }
-  }
-  if (window.top !== window.self || document.getElementById(HOST_ID)) return;
+  }  if (window.top !== window.self || document.getElementById(HOST_ID)) return;
   const host = element('div');
   host.id = HOST_ID;
   // 不受网页或其他脚本对div设置的隐藏/定位样式影响。
@@ -783,14 +999,27 @@
       color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#080b10;color:#eee;display:flex;flex-direction:column;font-size:14px}
-    .bar{display:flex;align-items:center;gap:16px;justify-content:space-between;flex-shrink:0;padding:12px 18px;background:#171c25;border-bottom:1px solid #303744}
-    .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
-    .close{background:#303947;border:1px solid #536078;color:#fff;padding:7px 14px;border-radius:5px;white-space:nowrap}
-    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;gap:3px;padding:3px}
-    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}
-    .heading{display:flex;gap:10px;flex-shrink:0;align-items:center;min-height:30px;padding:6px 10px;background:#141923;font-size:12px}
-    .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.quality{color:#a2b7d5;font-size:11px;white-space:nowrap}
+    .bar{display:flex;align-items:center;gap:10px 16px;justify-content:space-between;flex-shrink:0;flex-wrap:wrap;padding:10px 14px;background:#171c25;border-bottom:1px solid #303744}
+    .description{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;min-width:220px;flex:1}.description strong{font-size:17px}.description small{font-size:12px;color:#aab5c7}.description .index-summary{color:#d6e1f2}
+    .toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.layout-group{display:flex;gap:4px;padding:3px;border:1px solid #394456;border-radius:7px;background:#101722}
+    .toolbar button,.cell-tool{font:inherit;color:#eaf0fb;background:#283447;border:1px solid #4b5d78;border-radius:5px;padding:6px 9px;font-size:12px;white-space:nowrap}
+    .toolbar button:hover,.cell-tool:hover{background:#38527b}.toolbar .is-active{background:#245dd6;border-color:#77a0f5}.toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:2px}
+    .toolbar-button{background:#303947!important}.close{background:#303947;border:1px solid #536078;color:#fff;padding:7px 14px;border-radius:5px;white-space:nowrap}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));flex:1;min-height:0;min-width:0;gap:3px;padding:3px;overflow:auto}
+    .grid[data-layout="2"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(1,minmax(0,1fr))}
+    .grid[data-layout="4"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
+    .grid[data-layout="6"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
+    .grid[data-layout="9"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
+    .grid[data-layout="12"]{grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
+    .grid.has-main{grid-template-columns:minmax(0,2fr) minmax(180px,1fr);grid-template-rows:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(0,1fr)}
+    .grid.has-main .cell:not(.is-main){grid-column:2}.grid.has-main .cell.is-main{grid-column:1;grid-row:1 / span 2}
+    .grid.has-focus{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}.grid.has-focus .cell.is-focused{grid-column:1;grid-row:1}
+    .cell{min-width:0;min-height:0;position:relative;background:#000;overflow:hidden;display:flex;flex-direction:column}.cell[hidden]{display:none!important}.cell.is-locked .heading{border-left:3px solid #e3b341}
+    .heading{display:flex;gap:6px;flex-shrink:0;align-items:center;flex-wrap:wrap;min-height:30px;padding:5px 7px;background:#141923;font-size:12px}
+    .name{flex:1;min-width:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.quality{color:#a2b7d5;font-size:11px;white-space:nowrap}.cell-tools{display:flex;gap:3px;flex-wrap:wrap}.cell-tool{padding:3px 5px;font-size:10px}.cell-tool:disabled{opacity:.35;cursor:not-allowed}
     video{display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
+    @media(max-width:1000px){.grid[data-layout="12"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}}
+    @media(max-width:620px){.bar{padding:8px;gap:7px}.description{min-width:0}.toolbar{width:100%}.grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}.grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}.grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}.heading{padding:3px;gap:3px}.cell-tool{padding:2px 4px}}
     .status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:10px 14px;line-height:1.7;
       background:#151b25ee;border-radius:6px;color:#d7e0ef;text-align:center;font-size:13px;pointer-events:none;overflow-wrap:anywhere}
     .status[hidden]{display:none}
