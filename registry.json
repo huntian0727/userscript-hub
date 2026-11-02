@@ -30,7 +30,7 @@
       "displayName": "115 多画面播放器 · 目录索引一体化",
       "description": "目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化；复用历史索引，已保存视频可直接播放。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · v0.9.0目录索引一体化测试版",
+      "channel": "统一测试安装中心 · v0.9.1目录索引一体化完整修正版",
       "enabled": true
     }
   ]
