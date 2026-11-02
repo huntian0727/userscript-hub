@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         115多画面播放器（目录索引一体化）
+// @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.1
+// @version      0.9.2
 // @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1686,7 +1686,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.9.1';
+  const VERSION = '0.9.2';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2084,7 +2084,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.1';
+  const VERSION = '0.9.2';
   const UI_AUTO_HIDE_MS = 2000;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
