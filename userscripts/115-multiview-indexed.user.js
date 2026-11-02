@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.5
-// @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
+// @version      0.9.6
+// @description  115目录扫描、断点续扫、智能画幅多宫格播放，支持单击暂停、双击全屏、循环播放与自动换片。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1686,7 +1686,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.9.4';
+  const VERSION = '0.9.6';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2072,10 +2072,15 @@
     if (controller) controller.abort();
   });
 
+  function setLauncherVisible(visible) {
+    launcher.hidden = visible !== true;
+  }
+
   globalThis.N115IndexManagerUI = Object.freeze({
     open: openPanel,
     close: closePanel,
-    isOpen: () => !overlay.hidden
+    isOpen: () => !overlay.hidden,
+    setLauncherVisible
   });
 
 })();
@@ -2084,8 +2089,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.5';
-  const UI_AUTO_HIDE_MS = 2000;
+  const VERSION = '0.9.6';
+  const CELL_HEADING_AUTO_HIDE_MS = 1000;
+  const TOOLBAR_AUTO_HIDE_MS = 2000;
   const TOOLBAR_REVEAL_ZONE_PX = 56;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
@@ -2606,7 +2612,7 @@
       if (cell.lastPointerType !== 'touch' && cell.heading?.matches(':hover')) return;
       if (cell.box.matches(':focus-visible')) return;
       cell.box.classList.remove('heading-visible');
-    }, UI_AUTO_HIDE_MS);
+    }, CELL_HEADING_AUTO_HIDE_MS);
   }
 
   function revealCellHeading(cell, pointerType = 'mouse') {
@@ -2626,7 +2632,7 @@
       const mouseHovering = session.lastPointerType !== 'touch' && Boolean(bar?.matches(':hover'));
       if (session.closed || session.moreDetails?.open || keyboardFocused || mouseHovering) return;
       session.panel.classList.remove('chrome-visible');
-    }, UI_AUTO_HIDE_MS);
+    }, TOOLBAR_AUTO_HIDE_MS);
   }
 
   function revealToolbar(session, schedule = true, pointerType = 'mouse') {
@@ -2757,6 +2763,30 @@
       session.muteAllButton.textContent = hasSource ? '全部静音' : '恢复声音';
       session.muteAllButton.disabled = !session.cells.some(cell => cell && cell.index < session.layoutCount);
     }
+  }
+
+  function updatePlaybackModeControls(session) {
+    const looping = session.videoEndMode === 'loop';
+    if (session.loopModeButton) {
+      session.loopModeButton.classList.toggle('is-active', looping);
+      session.loopModeButton.setAttribute('aria-pressed', String(looping));
+    }
+    if (session.autoNextButton) {
+      session.autoNextButton.classList.toggle('is-active', !looping);
+      session.autoNextButton.setAttribute('aria-pressed', String(!looping));
+    }
+  }
+
+  function setPlaybackEndMode(session, mode) {
+    if (!session || session.closed) return;
+    session.videoEndMode = mode === 'next' ? 'next' : 'loop';
+    session.cells.forEach(cell => {
+      if (cell) cell.video.loop = session.videoEndMode === 'loop';
+    });
+    updatePlaybackModeControls(session);
+    void saveSessionSettings(session).catch(error => {
+      setFilterMessage(session, '播放结束设置保存失败：' + String(error?.message || error), true);
+    });
   }
 
   function updateAudioSourceOptions(session) {
@@ -2980,6 +3010,29 @@
         failCell(session, cell, '浏览器无法开始播放，请确认该视频在115原播放器中可以正常播放');
       }
     }
+  }
+
+  function toggleCellPlayback(session, cell) {
+    if (!session || session.closed || !cell || !cell.item || cell.failed) return;
+    if (!cell.hasPlayed && cell.video.readyState === 0) return;
+    session.selectedSlotId = cell.slotId;
+    if (cell.video.paused) {
+      if (session.globalPaused) {
+        session.globalPaused = false;
+        session.cells.forEach(other => {
+          if (other && other !== cell && other.index < session.layoutCount) other.userPaused = true;
+        });
+        updateGlobalControls(session);
+      }
+      cell.userPaused = false;
+      void tryPlay(session, cell);
+    } else {
+      cell.userPaused = true;
+      clearTimeout(cell.timer);
+      cell.timer = null;
+      cell.video.pause();
+    }
+    updateCellControls(session, cell);
   }
 
   function getHlsBufferProfile(layoutCount) {
@@ -3663,7 +3716,7 @@
       session.dualSmallCount = settings.dualSmallCount;
       session.audioSourceIndex = settings.audioSourceIndex;
       if (session.audioSourceIndex >= 0) session.lastAudioSourceIndex = session.audioSourceIndex;
-      if (session.endModeSelect) session.endModeSelect.value = settings.videoEndMode;
+      updatePlaybackModeControls(session);
       if (session.dualSmallCountSelect) session.dualSmallCountSelect.value = String(settings.dualSmallCount);
       if (session.smartAspectButton) {
         session.smartAspectButton.textContent = settings.smartAspectMode ? '智能画幅：开' : '智能画幅：关';
@@ -4358,6 +4411,13 @@
     video.addEventListener('click', () => {
       session.selectedSlotId = slotId;
       updateCellControls(session, cell);
+      toggleCellPlayback(session, cell);
+    });
+    video.addEventListener('dblclick', event => {
+      event.preventDefault();
+      session.selectedSlotId = slotId;
+      updateCellControls(session, cell);
+      toggleCellFullscreen(session, cell);
     });
     video.addEventListener('focus', () => {
       session.selectedSlotId = slotId;
@@ -5191,7 +5251,7 @@
       session.smartAspectButton.classList.toggle('is-active', Boolean(session.smartAspectMode));
       session.smartAspectButton.setAttribute('aria-pressed', String(session.smartAspectMode));
     }
-    if (session.endModeSelect) session.endModeSelect.value = session.videoEndMode;
+    updatePlaybackModeControls(session);
     updateGlobalControls(session);
     updateRoundControls(session);
   }
@@ -5322,6 +5382,7 @@
     session.abort.abort();
     session.cells.forEach(cell => { if (cell) disposeCell(cell); });
     session.panel.remove();
+    globalThis.N115IndexManagerUI?.setLauncherVisible?.(true);
     shadow.removeEventListener('keydown', session.onKey, true);
     launcher.focus();
   }
@@ -5375,7 +5436,8 @@
         toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
         toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
         mainSlotId: null, secondaryMainSlotId: null, focusSlotId: null, selectedSlotId: 'slot-1',
-        layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, smartAspectButton: null, endModeSelect: null,
+        layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, smartAspectButton: null,
+        playbackModeGroup: null, loopModeButton: null, autoNextButton: null,
         audioSourceSelect: null, pauseAllButton: null, muteAllButton: null,
         roundStatus: null, swapAllButton: null, newRoundButton: null,
         filterToggleButton: null, filterPanel: null, filterInputs: null, filterMessage: null,
@@ -5521,20 +5583,20 @@
         if (session.moreDetails) session.moreDetails.open = false;
         void saveSessionSettings(session).catch(error => setFilterMessage(session, '智能画幅设置保存失败：' + String(error?.message || error), true));
       };
-      session.endModeSelect = element('select', 'end-mode-select');
-      session.endModeSelect.setAttribute('aria-label', '播放结束行为');
-      [['loop', '播完循环'], ['next', '播完下一部']].forEach(([value, label]) => {
-        const option = element('option', '', label);
-        option.value = value;
-        session.endModeSelect.append(option);
-      });
-      session.endModeSelect.value = session.videoEndMode;
-      session.endModeSelect.onchange = () => {
-        session.videoEndMode = session.endModeSelect.value === 'next' ? 'next' : 'loop';
-        session.cells.forEach(cell => { if (cell) cell.video.loop = session.videoEndMode === 'loop'; });
-        if (session.moreDetails) session.moreDetails.open = false;
-        void saveSessionSettings(session).catch(error => setFilterMessage(session, '播放结束设置保存失败：' + String(error?.message || error), true));
-      };
+      const playbackModeGroup = element('div', 'playback-mode-group');
+      playbackModeGroup.setAttribute('role', 'group');
+      playbackModeGroup.setAttribute('aria-label', '播放结束方式');
+      session.loopModeButton = element('button', 'toolbar-button playback-mode-button', '循环播放');
+      session.loopModeButton.type = 'button';
+      session.loopModeButton.title = '当前视频播放结束后，从头循环播放';
+      session.loopModeButton.onclick = () => setPlaybackEndMode(session, 'loop');
+      session.autoNextButton = element('button', 'toolbar-button playback-mode-button', '自动换片');
+      session.autoNextButton.type = 'button';
+      session.autoNextButton.title = '当前视频播放结束后，自动切换到下一条视频';
+      session.autoNextButton.onclick = () => setPlaybackEndMode(session, 'next');
+      playbackModeGroup.append(session.loopModeButton, session.autoNextButton);
+      session.playbackModeGroup = playbackModeGroup;
+      updatePlaybackModeControls(session);
       layoutGroup.append(session.layoutModeSelect);
       session.pauseAllButton = element('button', 'toolbar-button', '全部暂停');
       session.pauseAllButton.type = 'button';
@@ -5549,9 +5611,9 @@
           });
         } else {
           session.cells.forEach(cell => {
-            if (cell && cell.index < session.layoutCount && !cell.layoutPaused && !cell.userPaused && !cell.failed) {
-              void tryPlay(session, cell);
-            }
+            if (!cell || cell.index >= session.layoutCount || cell.layoutPaused || cell.failed) return;
+            cell.userPaused = false;
+            void tryPlay(session, cell);
           });
         }
         updateGlobalControls(session);
@@ -5608,24 +5670,14 @@
         if (!toolsLayer.hidden) closeToolsDrawer(session);
         else setToolsDrawerTab(session, session.activeToolTab || 'filter', false);
       };
-      session.indexManagerButton = element('button', 'toolbar-button', '目录索引');
-      session.indexManagerButton.type = 'button';
-      session.indexManagerButton.title = '打开目录索引管理；扫描过程中已保存的视频可立即用于播放';
-      session.indexManagerButton.onclick = () => {
-        if (session.moreDetails) session.moreDetails.open = false;
-        const managerUI = globalThis.N115IndexManagerUI;
-        if (managerUI && typeof managerUI.open === 'function') managerUI.open(session.indexManagerButton);
-        else window.alert('目录索引管理模块未加载，请重新安装一体化脚本。');
-      };
       session.roundStatus = element('small', 'round-status', '第1轮 · 剩余' + items.length + '/' + items.length);
       const moreDetails = element('details', 'toolbar-more');
       moreDetails.setAttribute('aria-label', '更多播放设置');
       const moreSummary = element('summary', 'toolbar-more-summary', '更多');
-      moreSummary.title = '播放结束行为和声音来源设置';
+      moreSummary.title = '双主屏小窗口数量和声音来源设置';
       const moreMenu = element('div', 'toolbar-more-menu');
       moreMenu.hidden = true;
-      moreMenu.append(session.endModeSelect,
-        session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
+      moreMenu.append(session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
       const positionMoreMenu = () => {
         moreMenu.hidden = !moreDetails.open;
         if (moreMenu.hidden) return;
@@ -5648,8 +5700,9 @@
       moreDetails.append(moreSummary);
       session.moreDetails = moreDetails;
       // 智能画幅是高频布局控制，必须常驻顶栏前段；不能放回“更多”菜单。
-      toolbar.append(session.smartAspectButton, layoutGroup, session.swapAllButton, session.pauseAllButton,
-        session.newRoundButton, session.toolsButton, session.indexManagerButton, session.resumeButton, session.roundStatus, moreDetails);
+      toolbar.append(session.smartAspectButton, layoutGroup, session.playbackModeGroup,
+        session.swapAllButton, session.pauseAllButton, session.newRoundButton, session.toolsButton,
+        session.resumeButton, session.roundStatus, moreDetails);
 
       const close = element('button', 'close', '关闭 ✕');
       close.type = 'button';
@@ -5660,6 +5713,7 @@
       const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
+      globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
       const isToolbarRevealZone = event => {
         const panelTop = panel.getBoundingClientRect().top;
         const revealHeight = Math.max(TOOLBAR_REVEAL_ZONE_PX, Math.min(96, bar.offsetHeight + 10));
@@ -5763,6 +5817,9 @@
     .toolbar .smart-aspect-toggle{flex-shrink:0;min-width:88px;font-weight:700;letter-spacing:.1px}
     .toolbar .smart-aspect-toggle[aria-pressed="true"]{background:#214f96!important;border-color:#6ea4fa;color:#fff;box-shadow:inset 0 0 0 1px #ffffff16}
     .toolbar .smart-aspect-toggle[aria-pressed="false"]{background:#273343!important;border-color:#65758b;color:#edf3ff}
+    .playback-mode-group{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid #35465d;border-radius:8px;background:#0d141e;flex-shrink:0}
+    .playback-mode-group .playback-mode-button{padding:4px 7px}
+    .toolbar .playback-mode-button[aria-pressed="true"]{background:#214f96!important;border-color:#6ea4fa;color:#fff;box-shadow:inset 0 0 0 1px #ffffff16}
     .toolbar select{max-width:150px;min-width:88px;padding:6px 8px;border:1px solid #35465d;border-radius:7px;background:#121b27;color:#dce7f7;font:inherit;font-size:11px}
     .grid.main-layout{grid-auto-flow:row;grid-auto-rows:minmax(0,1fr)}
     .grid.main2-layout,.grid.main5-layout,.grid.dual-main-layout{align-content:stretch}
