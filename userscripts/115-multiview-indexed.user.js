@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.8.5
-// @description  115索引多画面播放器，支持主副屏布局、智能画幅、关键词筛选、排除管理和JSON备份恢复。
+// @version      0.8.7
+// @description  115索引多画面播放器，支持悬浮自隐藏工具栏/文件名、每格播放进度、智能画幅、主副屏和索引筛选。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -947,7 +947,8 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.8.5';
+  const VERSION = '0.8.7';
+  const UI_AUTO_HIDE_MS = 2000;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -1444,10 +1445,54 @@
     cell.status.hidden = !text;
   }
 
+  function scheduleCellHeadingHide(cell) {
+    if (!cell || !cell.box) return;
+    clearTimeout(cell.headingHideTimer);
+    cell.headingHideTimer = setTimeout(() => {
+      cell.headingHideTimer = null;
+      if (!cell.box.isConnected) return;
+      if (cell.lastPointerType !== 'touch' && cell.heading?.matches(':hover')) return;
+      if (cell.box.matches(':focus-visible')) return;
+      cell.box.classList.remove('heading-visible');
+    }, UI_AUTO_HIDE_MS);
+  }
+
+  function revealCellHeading(cell, pointerType = 'mouse') {
+    if (!cell || !cell.box || !cell.box.isConnected) return;
+    cell.lastPointerType = pointerType || 'mouse';
+    cell.box.classList.add('heading-visible');
+    scheduleCellHeadingHide(cell);
+  }
+
+  function scheduleToolbarHide(session) {
+    if (!session || session.closed || !session.panel) return;
+    clearTimeout(session.toolbarHideTimer);
+    session.toolbarHideTimer = setTimeout(() => {
+      session.toolbarHideTimer = null;
+      const bar = session.bar;
+      const keyboardFocused = Boolean(bar?.querySelector(':focus-visible'));
+      const mouseHovering = session.lastPointerType !== 'touch' && Boolean(bar?.matches(':hover'));
+      if (session.closed || session.moreDetails?.open || keyboardFocused || mouseHovering) return;
+      session.panel.classList.remove('chrome-visible');
+    }, UI_AUTO_HIDE_MS);
+  }
+
+  function revealToolbar(session, schedule = true, pointerType = 'mouse') {
+    if (!session || session.closed || !session.panel) return;
+    session.lastPointerType = pointerType || 'mouse';
+    session.panel.classList.add('chrome-visible');
+    clearTimeout(session.toolbarHideTimer);
+    session.toolbarHideTimer = null;
+    if (schedule) scheduleToolbarHide(session);
+  }
+
   function disposeCell(cell) {
     clearTimeout(cell.timer);
     clearTimeout(cell.retryTimer);
     clearTimeout(cell.skipTimer);
+    clearTimeout(cell.headingHideTimer);
+    cell.headingHideTimer = null;
+    cell.box?.classList.remove('heading-visible');
     cell.timer = null;
     cell.retryTimer = null;
     cell.skipTimer = null;
@@ -1461,6 +1506,34 @@
     cell.video.pause();
     cell.video.removeAttribute('src');
     cell.video.load();
+    updateCellProgress(cell);
+  }
+
+  function formatPlaybackTime(value) {
+    if (!Number.isFinite(value) || value < 0) return '--:--';
+    const totalSeconds = Math.floor(value);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = part => String(part).padStart(2, '0');
+    return hours ? hours + ':' + pad(minutes) + ':' + pad(seconds) : minutes + ':' + pad(seconds);
+  }
+
+  function updateCellProgress(cell) {
+    if (!cell || !cell.video) return;
+    const currentTime = Number(cell.video.currentTime);
+    const duration = Number(cell.video.duration);
+    const safeCurrentTime = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
+    const hasDuration = Number.isFinite(duration) && duration > 0;
+    if (cell.progressInput) {
+      cell.progressInput.max = hasDuration ? String(duration) : '0';
+      cell.progressInput.disabled = !cell.item || !hasDuration || cell.failed;
+      if (!cell.progressInput.matches(':active')) {
+        cell.progressInput.value = hasDuration ? String(Math.min(safeCurrentTime, duration)) : '0';
+      }
+    }
+    if (cell.currentTimeLabel) cell.currentTimeLabel.textContent = formatPlaybackTime(safeCurrentTime);
+    if (cell.durationLabel) cell.durationLabel.textContent = hasDuration ? formatPlaybackTime(duration) : '--:--';
   }
 
   function updateCellControls(session, cell) {
@@ -1519,6 +1592,7 @@
     cell.box.classList.toggle('is-main', isMain);
     cell.box.classList.toggle('is-main-a', session.mainSlotId === cell.slotId && session.layoutMode === 'mainDual');
     cell.box.classList.toggle('is-main-b', session.secondaryMainSlotId === cell.slotId && session.layoutMode === 'mainDual');
+    updateCellProgress(cell);
   }
 
   function updateGlobalControls(session) {
@@ -1642,6 +1716,7 @@
         setStatus(other, '等待完成115验证后继续取流');
       });
       setStatus(cell, message + '。完成验证或重新登录后，点击“验证后继续取流”');
+      revealCellHeading(cell, 'programmatic');
       cell.quality.textContent = '等待验证';
       updateRoundControls(session);
       console.warn('[115多画面 ' + VERSION + '] ' + cell.slotId + '：' + message);
@@ -1653,6 +1728,7 @@
       cell.loadStarted = false;
       disposeCell(cell);
       setStatus(cell, message);
+      revealCellHeading(cell, 'programmatic');
       cell.quality.textContent = '需要人工处理';
       session.roundMessage = '有窗口需要检查浏览器播放权限或脚本访问授权';
       updateRoundControls(session);
@@ -1665,6 +1741,7 @@
       cell.loadStarted = false;
       disposeCell(cell);
       setStatus(cell, message + '。等待完成115验证后继续取流');
+      revealCellHeading(cell, 'programmatic');
       cell.quality.textContent = '等待验证';
       updateRoundControls(session);
       return;
@@ -1678,6 +1755,7 @@
       cell.userPaused = false;
       disposeCell(cell);
       setStatus(cell, '播放异常，正在进行最后一次重试…');
+      revealCellHeading(cell, 'programmatic');
       cell.quality.textContent = '重试 1/1';
       const retryItem = failedItem;
       cell.retryTimer = setTimeout(() => {
@@ -1694,6 +1772,7 @@
     cell.loadStarted = false;
     disposeCell(cell);
     setStatus(cell, message + '。该视频已在本轮跳过，不会加入永久排除列表');
+    revealCellHeading(cell, 'programmatic');
     cell.quality.textContent = '本轮失败并跳过';
     const failedKey = itemKey(failedItem);
     if (failedKey && !session.failedPickcodes.has(failedKey)) {
@@ -1877,6 +1956,7 @@
     cell.quality.textContent = '';
     cell.name.textContent = (cell.index + 1) + '. ' + item.name;
     cell.name.title = item.name || '';
+    revealCellHeading(cell, 'programmatic');
     const visible = isCellVisible(session, cell);
     cell.layoutPaused = !visible;
     setStatus(cell, visible ? '正在获取播放地址…' : '等待窗口显示后加载…');
@@ -2997,8 +3077,20 @@
     tools.setAttribute('aria-label', '视频窗口操作');
     const primaryTools = element('div', 'cell-primary-tools');
     const secondaryTools = element('div', 'cell-secondary-tools');
+    const progressRow = element('div', 'cell-progress-row');
+    const currentTimeLabel = element('span', 'cell-time cell-time-current', '0:00');
+    const progressInput = element('input', 'cell-progress');
+    progressInput.type = 'range';
+    progressInput.min = '0';
+    progressInput.max = '0';
+    progressInput.step = '0.1';
+    progressInput.value = '0';
+    progressInput.disabled = !item;
+    progressInput.setAttribute('aria-label', '播放进度');
+    const durationLabel = element('span', 'cell-time cell-time-duration', '--:--');
+    progressRow.append(currentTimeLabel, progressInput, durationLabel);
     const video = element('video');
-    video.controls = true;
+    video.controls = false;
     video.tabIndex = 0;
     video.muted = true;
     video.loop = session.videoEndMode === 'loop';
@@ -3006,13 +3098,22 @@
     video.preload = 'metadata';
     const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个 · 本轮候选已用完，请开启新一轮');
     const cell = {
-      index, slotId, layoutSlot: index, item, box, video, status, quality, name,
+      index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
+      progressInput, currentTimeLabel, durationLabel,
       hls: null, timer: null, abort: null, generation: 0,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false,
       aspectRatio: DEFAULT_ASPECT_RATIO, retryCount: 0, authBlocked: false
     };
+
+    progressInput.addEventListener('change', () => {
+      const duration = Number(video.duration);
+      const target = Number(progressInput.value);
+      if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(target)) return;
+      video.currentTime = Math.max(0, Math.min(duration, target));
+      updateCellProgress(cell);
+    });
 
     const makeTool = (className, label, handler, target = primaryTools) => {
       const button = element('button', 'cell-tool ' + className, label);
@@ -3060,10 +3161,17 @@
     }, secondaryTools);
 
     heading.append(name, quality, indicators);
-    tools.append(primaryTools, secondaryTools);
+    tools.append(progressRow, primaryTools, secondaryTools);
     box.append(heading, video, tools, status);
     session.grid.append(box);
     session.cells[index] = cell;
+    revealCellHeading(cell, 'programmatic');
+    box.addEventListener('pointerenter', event => revealCellHeading(cell, event.pointerType));
+    box.addEventListener('pointermove', event => revealCellHeading(cell, event.pointerType), { passive: true });
+    box.addEventListener('pointerdown', event => revealCellHeading(cell, event.pointerType));
+    box.addEventListener('pointerleave', () => scheduleCellHeadingHide(cell));
+    box.addEventListener('focusin', () => revealCellHeading(cell, 'keyboard'));
+    box.addEventListener('focusout', () => scheduleCellHeadingHide(cell));
     box.addEventListener('click', event => {
       if (event.target instanceof Element && event.target.closest('button')) return;
       session.selectedSlotId = slotId;
@@ -3082,7 +3190,12 @@
       session.selectedSlotId = slotId;
       updateCellControls(session, cell);
     });
+    video.addEventListener('timeupdate', () => updateCellProgress(cell));
+    video.addEventListener('durationchange', () => updateCellProgress(cell));
+    video.addEventListener('seeked', () => updateCellProgress(cell));
+    video.addEventListener('emptied', () => updateCellProgress(cell));
     video.addEventListener('loadedmetadata', () => {
+      updateCellProgress(cell);
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         cell.aspectRatio = video.videoWidth / video.videoHeight;
         applyLayoutPositions(session);
@@ -3191,14 +3304,10 @@
     const gapY = parseFloat(computed.rowGap) || 3;
     const availableWidth = Math.max(1, (session.grid.clientWidth || window.innerWidth) - paddingX);
     const availableHeight = Math.max(1, (session.grid.clientHeight || window.innerHeight) - paddingY);
-    const headingHeight = Math.max(30, ...visibleCells.map(cell => {
-      const heading = cell.box && cell.box.querySelector('.heading');
-      return heading ? heading.getBoundingClientRect().height : 30;
-    }));
     const widthLimit = Math.max(1, (availableWidth - gapX * (columns - 1)) / columns);
-    const heightLimit = Math.max(1, (availableHeight - gapY * (rows - 1)) / rows - headingHeight);
+    const heightLimit = Math.max(1, (availableHeight - gapY * (rows - 1)) / rows);
     const cellWidth = Math.max(1, Math.min(widthLimit, heightLimit * targetAspect));
-    const cellHeight = cellWidth / targetAspect + headingHeight;
+    const cellHeight = cellWidth / targetAspect;
 
     session.grid.style.columnGap = gapX + 'px';
     session.grid.style.rowGap = gapY + 'px';
@@ -3539,6 +3648,8 @@
     if (!session) return;
     if (session.focusSlotId) restoreFocusedCell(session, true);
     session.closed = true;
+    clearTimeout(session.toolbarHideTimer);
+    session.toolbarHideTimer = null;
     session.layoutResizeObserver?.disconnect();
     if (session.layoutResizeHandler) window.removeEventListener('resize', session.layoutResizeHandler);
     active = null;
@@ -3560,6 +3671,7 @@
       panel.setAttribute('role', 'dialog');
       panel.setAttribute('aria-modal', 'true');
       panel.setAttribute('aria-label', '115索引多画面播放');
+      panel.tabIndex = -1;
       const bar = element('header', 'bar');
       const description = element('div', 'description');
       const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
@@ -3593,6 +3705,7 @@
         lastAudioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) && indexed.settings.audioSourceIndex >= 0 ? indexed.settings.audioSourceIndex : 0,
         fullscreenAudioBackup: null, fullscreenExitAt: 0,
         layoutResizeObserver: null, layoutResizeHandler: null, moreDetails: null,
+        bar, toolbarHideTimer: null, lastPointerType: 'programmatic',
         toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
         toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
         mainSlotId: null, secondaryMainSlotId: null, focusSlotId: null, selectedSlotId: 'slot-1',
@@ -3604,6 +3717,7 @@
         excludedButton: null, excludedPanel: null, excludedList: null, excludedMessage: null, excludedEntries: [],
         favoriteList: null, favoriteMessage: null, favoriteSelectionLabel: null,
         onKey: event => {
+          if (event.key === 'Tab') revealToolbar(session, false, 'keyboard');
           const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
           const formEditing = eventPath.some(target => target instanceof Element && target.matches('input,textarea,select,[contenteditable="true"]'));
           const buttonFocused = eventPath.some(target => target instanceof Element && target.matches('button'));
@@ -3847,7 +3961,11 @@
         const left = Math.max(8, Math.min(anchorRect.left - barRect.left, maxLeft));
         moreMenu.style.left = left + 'px';
       };
-      moreDetails.addEventListener('toggle', positionMoreMenu);
+      moreDetails.addEventListener('toggle', () => {
+        positionMoreMenu();
+        if (moreDetails.open) revealToolbar(session, false, 'mouse');
+        else scheduleToolbarHide(session);
+      });
       toolbar.addEventListener('scroll', () => {
         if (moreDetails.open) positionMoreMenu();
       }, { passive: true });
@@ -3862,11 +3980,30 @@
       bar.append(description, toolbar, close, moreMenu);
       panel.append(bar, grid, toolsLayer);
       shadow.append(panel);
-      const updateToolsDrawerOffset = () => {
-        toolsLayer.style.top = Math.max(0, bar.getBoundingClientRect().height) + 'px';
-      };
+      const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
+      panel.addEventListener('pointermove', event => {
+        const overBar = bar.contains(event.target);
+        revealToolbar(session, event.pointerType === 'touch' || !overBar, event.pointerType);
+      }, { passive: true });
+      panel.addEventListener('pointerdown', event => {
+        const overBar = bar.contains(event.target);
+        revealToolbar(session, event.pointerType === 'touch' || !overBar, event.pointerType);
+      }, { passive: true });
+      panel.addEventListener('pointerleave', () => scheduleToolbarHide(session), { passive: true });
+      bar.addEventListener('pointerenter', event => revealToolbar(session, false, event.pointerType));
+      bar.addEventListener('pointerleave', () => scheduleToolbarHide(session));
+      bar.addEventListener('focusin', () => {
+        if (bar.querySelector(':focus-visible')) bar.classList.add('keyboard-focus');
+        revealToolbar(session, true, 'keyboard');
+      });
+      bar.addEventListener('focusout', () => {
+        window.setTimeout(() => {
+          if (!bar.querySelector(':focus-visible')) bar.classList.remove('keyboard-focus');
+          scheduleToolbarHide(session);
+        }, 0);
+      });
       if (typeof ResizeObserver === 'function') {
         session.layoutResizeObserver = new ResizeObserver(() => {
           updateToolsDrawerOffset();
@@ -3880,8 +4017,9 @@
         window.addEventListener('resize', session.layoutResizeHandler);
       }
       shadow.addEventListener('keydown', session.onKey, true);
-      close.focus();
       applyLayout(session, indexed.settings.layoutCount, indexed.settings.layoutMode || 'grid');
+      panel.focus({ preventScroll: true });
+      revealToolbar(session, true, 'programmatic');
     } catch (error) {
       alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
     } finally {
@@ -3903,7 +4041,8 @@
       color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
-    .bar{position:relative;z-index:20;display:grid;grid-template-columns:minmax(210px,.95fr) minmax(0,2fr) auto;grid-template-areas:"description toolbar close";align-items:center;gap:5px 9px;flex-shrink:0;padding:4px 10px;background:#111720;border-bottom:1px solid #273243;box-shadow:0 5px 18px #0003}
+    .bar{position:absolute;top:0;left:0;right:0;z-index:20;display:grid;grid-template-columns:minmax(210px,.95fr) minmax(0,2fr) auto;grid-template-areas:"description toolbar close";align-items:center;gap:5px 9px;padding:4px 10px;background:#111720ed;border-bottom:1px solid #273243;box-shadow:0 5px 18px #0005;opacity:0;visibility:hidden;transform:translateY(calc(-100% - 4px));pointer-events:none;transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s}
+    .panel.chrome-visible .bar,.bar.keyboard-focus{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;transition-delay:0s}
     .description{grid-area:description;display:flex;flex-wrap:nowrap;align-items:center;gap:4px 9px;min-width:0;overflow:hidden}
     .description strong{font-size:15px;font-weight:700;letter-spacing:.1px;white-space:nowrap;flex-shrink:0}
     .description small{font-size:10px;color:#8e9db2;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -3950,7 +4089,8 @@
     .cell.fullscreen-fallback{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:2147483000!important}
     .cell.is-locked .heading{border-left:2px solid #d8ad52}
     .cell.is-favorite .cell-indicator-favorite{color:#f5d98c;background:#4c3b1c}
-    .heading{position:relative;z-index:6;display:flex;gap:7px;flex-shrink:0;align-items:center;flex-wrap:nowrap;min-height:29px;height:29px;padding:4px 8px;background:#111923;font-size:11px;border-bottom:1px solid #1d2a39}
+    .heading{position:absolute;top:0;left:0;right:0;z-index:6;display:flex;gap:7px;align-items:center;flex-wrap:nowrap;min-height:29px;height:29px;padding:4px 8px;background:#111923eF;font-size:11px;border-bottom:1px solid #1d2a39;opacity:0;visibility:hidden;transform:translateY(-6px);pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility 0s linear .16s}
+    .cell.heading-visible .heading{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;transition-delay:0s}
     .name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#dbe4f1;font-size:11px}
     .quality{color:#8ea8c9;font-size:10px;white-space:nowrap;flex-shrink:0}
     .cell-indicators{display:flex;align-items:center;gap:3px;flex-shrink:0}
@@ -3961,8 +4101,13 @@
     .cell-indicator-favorite{background:#493819;color:#f5d98c}
     .cell-indicator-sound{background:#16443c;color:#9ce0ce}
     video{position:relative;z-index:1;display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
-    .cell-tools{position:absolute;z-index:5;left:7px;right:7px;bottom:40px;display:flex;flex-direction:column;gap:5px;padding:18px 7px 7px;border:1px solid #ffffff12;border-radius:8px;background:linear-gradient(180deg,transparent 0%,#05080ee8 38%);opacity:0;visibility:hidden;transform:translateY(7px);transition:opacity .16s ease,transform .16s ease,visibility .16s;pointer-events:none}
+    .cell-tools{position:absolute;z-index:5;left:7px;right:7px;bottom:7px;display:flex;flex-direction:column;gap:5px;padding:12px 7px 7px;border:1px solid #ffffff12;border-radius:8px;background:linear-gradient(180deg,transparent 0%,#05080ef2 34%);opacity:0;visibility:hidden;transform:translateY(7px);transition:opacity .16s ease,transform .16s ease,visibility .16s;pointer-events:none}
     .cell:hover .cell-tools,.cell:focus-within .cell-tools{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto}
+    .cell-progress-row{display:flex;align-items:center;gap:6px;min-width:0;padding:0 2px}
+    .cell-time{flex:0 0 auto;min-width:32px;color:#d8e4f5;font-size:9px;font-variant-numeric:tabular-nums;text-align:center;white-space:nowrap}
+    .cell-progress{flex:1;min-width:24px;width:100%;height:16px;margin:0;accent-color:#6da5ff;cursor:pointer}
+    .cell-progress:disabled{opacity:.4;cursor:not-allowed}
+    .cell-progress:focus-visible{outline:2px solid #8db7ff;outline-offset:2px;border-radius:4px}
     .cell-primary-tools,.cell-secondary-tools{display:flex;align-items:center;justify-content:flex-start;gap:4px;flex-wrap:wrap}
     .cell-secondary-tools{padding-top:4px;border-top:1px solid #ffffff20}
     .cell-tool{padding:4px 7px;font-size:10px;line-height:1.2;background:#172436eF;border-color:#50627b}
@@ -4042,7 +4187,10 @@
       .heading{padding:3px 5px;gap:4px}
       .quality{font-size:9px}
       .cell-indicator{font-size:8px}
-      .cell-tools{left:3px;right:3px;bottom:34px;padding:14px 4px 4px}
+      .cell-tools{left:3px;right:3px;bottom:4px;padding:10px 4px 4px}
+      .cell-progress-row{gap:3px}
+      .cell-time{min-width:26px;font-size:8px}
+      .cell-progress{min-width:16px}
       .cell-tool{padding:3px 5px;font-size:9px}
       .tools-drawer{width:min(380px,96vw)}
     }
