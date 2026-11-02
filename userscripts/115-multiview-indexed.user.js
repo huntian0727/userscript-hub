@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.2
+// @version      0.9.3
 // @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -3666,6 +3666,7 @@
       if (session.dualSmallCountSelect) session.dualSmallCountSelect.value = String(settings.dualSmallCount);
       if (session.smartAspectButton) {
         session.smartAspectButton.textContent = settings.smartAspectMode ? '智能画幅：开' : '智能画幅：关';
+        session.smartAspectButton.classList.toggle('is-active', Boolean(settings.smartAspectMode));
         session.smartAspectButton.setAttribute('aria-pressed', String(settings.smartAspectMode));
       }
       session.cells.forEach(cell => {
@@ -4700,6 +4701,7 @@
     }
     if (session.smartAspectButton) {
       session.smartAspectButton.textContent = session.smartAspectMode ? '智能画幅：开' : '智能画幅：关';
+      session.smartAspectButton.classList.toggle('is-active', Boolean(session.smartAspectMode));
       session.smartAspectButton.setAttribute('aria-pressed', String(session.smartAspectMode));
     }
     if (session.endModeSelect) session.endModeSelect.value = session.videoEndMode;
@@ -5019,8 +5021,9 @@
         applyLayout(session, 2 + Number(session.dualSmallCountSelect.value), 'mainDual');
         if (session.moreDetails) session.moreDetails.open = false;
       };
-      session.smartAspectButton = element('button', 'toolbar-button', session.smartAspectMode ? '智能画幅：开' : '智能画幅：关');
+      session.smartAspectButton = element('button', 'toolbar-button smart-aspect-toggle', session.smartAspectMode ? '智能画幅：开' : '智能画幅：关');
       session.smartAspectButton.type = 'button';
+      session.smartAspectButton.classList.toggle('is-active', Boolean(session.smartAspectMode));
       session.smartAspectButton.setAttribute('aria-pressed', String(session.smartAspectMode));
       session.smartAspectButton.title = '根据已解码视频画幅和可用屏幕空间，自动调整宫格行列与窗口尺寸';
       session.smartAspectButton.onclick = () => {
@@ -5129,10 +5132,10 @@
       const moreDetails = element('details', 'toolbar-more');
       moreDetails.setAttribute('aria-label', '更多播放设置');
       const moreSummary = element('summary', 'toolbar-more-summary', '更多');
-      moreSummary.title = '智能画幅、播放结束行为和声音来源设置';
+      moreSummary.title = '播放结束行为和声音来源设置';
       const moreMenu = element('div', 'toolbar-more-menu');
       moreMenu.hidden = true;
-      moreMenu.append(session.smartAspectButton, session.endModeSelect,
+      moreMenu.append(session.endModeSelect,
         session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
       const positionMoreMenu = () => {
         moreMenu.hidden = !moreDetails.open;
@@ -5155,7 +5158,8 @@
       }, { passive: true });
       moreDetails.append(moreSummary);
       session.moreDetails = moreDetails;
-      toolbar.append(layoutGroup, session.swapAllButton, session.pauseAllButton,
+      // 智能画幅是高频布局控制，必须常驻顶栏前段；不能放回“更多”菜单。
+      toolbar.append(session.smartAspectButton, layoutGroup, session.swapAllButton, session.pauseAllButton,
         session.newRoundButton, session.toolsButton, session.indexManagerButton, session.resumeButton, session.roundStatus, moreDetails);
 
       const close = element('button', 'close', '关闭 ✕');
@@ -5250,6 +5254,9 @@
     .toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}
     .toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible,.drawer-tab:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
     .toolbar-button{background:#1a2635!important}
+    .toolbar .smart-aspect-toggle{flex-shrink:0;min-width:88px;font-weight:700;letter-spacing:.1px}
+    .toolbar .smart-aspect-toggle[aria-pressed="true"]{background:#214f96!important;border-color:#6ea4fa;color:#fff;box-shadow:inset 0 0 0 1px #ffffff16}
+    .toolbar .smart-aspect-toggle[aria-pressed="false"]{background:#273343!important;border-color:#65758b;color:#edf3ff}
     .toolbar select{max-width:150px;min-width:88px;padding:6px 8px;border:1px solid #35465d;border-radius:7px;background:#121b27;color:#dce7f7;font:inherit;font-size:11px}
     .grid.main-layout{grid-auto-flow:row;grid-auto-rows:minmax(0,1fr)}
     .grid.main2-layout,.grid.main5-layout,.grid.dual-main-layout{align-content:stretch}
