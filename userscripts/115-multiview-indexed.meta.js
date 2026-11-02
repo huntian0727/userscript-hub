@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         115多画面播放器（索引版）
+// @name         115多画面播放器（目录索引一体化）
 // @namespace    local.115.multiview
-// @version      0.8.7
-// @description  115索引多画面播放器，支持悬浮自隐藏工具栏/文件名、每格播放进度、智能画幅、主副屏和索引筛选。
+// @version      0.9.0
+// @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
