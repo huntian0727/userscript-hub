@@ -28,9 +28,9 @@
     {
       "id": "115-multiview-indexed",
       "displayName": "115 多画面播放器 · 目录索引一体化",
-      "description": "目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化；智能画幅常驻顶栏，按视频比例与播放器尺寸自适应。",
+      "description": "目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化；智能画幅按每个视频独立比例动态分行，适配横竖屏、方形、超宽屏及主副屏组合。",
       "source": "userscripts/115-multiview-indexed.user.js",
-      "channel": "统一测试安装中心 · v0.9.3智能画幅修复版",
+      "channel": "统一测试安装中心 · v0.9.4智能画幅增强版",
       "enabled": true
     }
   ]

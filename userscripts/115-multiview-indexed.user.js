@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.3
+// @version      0.9.4
 // @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1686,7 +1686,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.9.2';
+  const VERSION = '0.9.4';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2084,7 +2084,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.2';
+  const VERSION = '0.9.4';
   const UI_AUTO_HIDE_MS = 2000;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
@@ -4374,7 +4374,7 @@
       updateCellProgress(cell);
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         cell.aspectRatio = video.videoWidth / video.videoHeight;
-        applyLayoutPositions(session);
+        scheduleLayoutReflow(session, 120);
       }
     });
     video.addEventListener('ended', () => {
@@ -4459,6 +4459,208 @@
     return [first, total - first];
   }
 
+  const ASPECT_GRID_TRACKS = 240;
+
+  function scheduleLayoutReflow(session, delay = 90) {
+    if (!session || session.closed) return;
+    clearTimeout(session.layoutReflowTimer);
+    session.layoutReflowTimer = window.setTimeout(() => {
+      session.layoutReflowTimer = null;
+      if (session.closed) return;
+      if (typeof requestAnimationFrame === 'function') {
+        if (session.layoutReflowFrame) cancelAnimationFrame(session.layoutReflowFrame);
+        session.layoutReflowFrame = requestAnimationFrame(() => {
+          session.layoutReflowFrame = 0;
+          if (!session.closed) applyLayoutPositions(session);
+        });
+      } else {
+        applyLayoutPositions(session);
+      }
+    }, delay);
+  }
+
+  function classifyAspectRatio(value) {
+    const ratio = Number(value) || DEFAULT_ASPECT_RATIO;
+    if (ratio < 0.82) return 'portrait';
+    if (ratio > 2.2) return 'ultrawide';
+    if (ratio >= 0.9 && ratio <= 1.1) return 'square';
+    return 'landscape';
+  }
+
+  function getAspectLayoutSpace(session) {
+    const computed = window.getComputedStyle(session.grid);
+    const paddingX = (parseFloat(computed.paddingLeft) || 0) + (parseFloat(computed.paddingRight) || 0);
+    const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0);
+    const rawWidth = session.grid.clientWidth || session.panel.clientWidth || window.innerWidth;
+    const rawHeight = session.grid.clientHeight || session.panel.clientHeight || window.innerHeight;
+    return {
+      width: Math.max(1, rawWidth - paddingX),
+      height: Math.max(1, rawHeight - paddingY),
+      gapX: Math.max(2, parseFloat(computed.columnGap) || 4),
+      gapY: Math.max(2, parseFloat(computed.rowGap) || 4)
+    };
+  }
+
+  function getAspectLayoutRatio(cell, overrides) {
+    const override = overrides && overrides.get(cell);
+    const value = Number.isFinite(override) ? override : mediaAspectRatio(cell);
+    return Math.max(0.35, Math.min(3.2, value || DEFAULT_ASPECT_RATIO));
+  }
+
+  function enumerateAspectPartitions(cells) {
+    if (!cells.length) return [[]];
+    const partitions = [];
+    const maskCount = 1 << Math.max(0, cells.length - 1);
+    for (let mask = 0; mask < maskCount; mask++) {
+      const groups = [];
+      let start = 0;
+      for (let index = 0; index < cells.length - 1; index++) {
+        if (mask & (1 << index)) {
+          groups.push(cells.slice(start, index + 1));
+          start = index + 1;
+        }
+      }
+      groups.push(cells.slice(start));
+      partitions.push(groups);
+    }
+    return partitions;
+  }
+
+  function chooseAspectRows(session, fixedGroups, fixedWeights, partitionCells, ratioOverrides = null) {
+    const space = getAspectLayoutSpace(session);
+    let best = null;
+    enumerateAspectPartitions(partitionCells).forEach(partition => {
+      const groups = fixedGroups.concat(partition);
+      const weights = fixedWeights.concat(partition.map(() => 1));
+      if (!groups.length) return;
+      const rowGapTotal = space.gapY * Math.max(0, groups.length - 1);
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+      let baseHeight = (space.height - rowGapTotal) / totalWeight;
+      groups.forEach((group, index) => {
+        const ratioSum = group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell, ratioOverrides), 0);
+        const rowGaps = space.gapX * Math.max(0, group.length - 1);
+        baseHeight = Math.min(baseHeight, (space.width - rowGaps) / Math.max(0.01, weights[index] * ratioSum));
+      });
+      if (!Number.isFinite(baseHeight) || baseHeight <= 1) return;
+      const rowWidths = groups.map((group, index) =>
+        weights[index] * baseHeight * group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell, ratioOverrides), 0) +
+        space.gapX * Math.max(0, group.length - 1));
+      const fill = Math.max(...rowWidths) / space.width;
+      if (!best || baseHeight > best.baseHeight + 0.5 ||
+        (Math.abs(baseHeight - best.baseHeight) <= 0.5 &&
+          (groups.length < best.groups.length || (groups.length === best.groups.length && fill > best.fill)))) {
+        best = { groups, weights, baseHeight, rowWidths, fill, space, ratioOverrides };
+      }
+    });
+    return best;
+  }
+
+  function placeAspectRowInRegion(cells, row, rowSpan, rowHeight, regionStart, regionWidth, space, ratioOverrides = null) {
+    if (!cells.length || rowHeight <= 0 || regionWidth <= 0) return;
+    const trackCount = ASPECT_GRID_TRACKS;
+    const startUnit = Math.max(0, Math.min(trackCount - 1, Math.round(regionStart / space.width * trackCount)));
+    const regionUnits = Math.max(cells.length, Math.min(trackCount - startUnit,
+      Math.round(regionWidth / space.width * trackCount)));
+    const spans = cells.map((cell, index) => {
+      const width = getAspectLayoutRatio(cell, ratioOverrides) * rowHeight +
+        (index < cells.length - 1 ? space.gapX : 0);
+      return Math.max(1, Math.round(width / space.width * trackCount));
+    });
+    let used = spans.reduce((sum, span) => sum + span, 0);
+    while (used > regionUnits) {
+      let largest = -1;
+      for (let index = 0; index < spans.length; index++) {
+        if (spans[index] > 1 && (largest < 0 || spans[index] > spans[largest])) largest = index;
+      }
+      if (largest < 0) break;
+      spans[largest]--;
+      used--;
+    }
+    const offset = Math.max(0, Math.floor((regionUnits - used) / 2));
+    let column = startUnit + offset + 1;
+    cells.forEach((cell, index) => {
+      setCellGridPosition(cell, column, spans[index], row, rowSpan);
+      cell.box.style.margin = '0';
+      cell.box.style.marginRight = index < cells.length - 1 ? space.gapX + 'px' : '0px';
+      column += spans[index];
+    });
+  }
+
+  function applyAspectRowsLayout(session, fixedGroups, fixedWeights, partitionCells, ratioOverrides = null) {
+    const layout = chooseAspectRows(session, fixedGroups, fixedWeights, partitionCells, ratioOverrides);
+    if (!layout) return false;
+    const { groups, weights, baseHeight, space } = layout;
+    const heights = weights.map(weight => weight * baseHeight);
+    session.grid.style.gridTemplateColumns = 'repeat(' + ASPECT_GRID_TRACKS + ',minmax(0,1fr))';
+    session.grid.style.gridTemplateRows = heights.map(height => height.toFixed(2) + 'px').join(' ');
+    session.grid.style.columnGap = '0px';
+    session.grid.style.rowGap = space.gapY + 'px';
+    session.grid.style.justifyContent = 'stretch';
+    session.grid.style.alignContent = 'center';
+    groups.forEach((group, index) => {
+      placeAspectRowInRegion(group, index + 1, 1, heights[index], 0, space.width, space, ratioOverrides);
+    });
+    return true;
+  }
+
+  function chooseTallAspectLayout(session, tallCells, fixedGroups, fixedWeights, partitionCells) {
+    const space = getAspectLayoutSpace(session);
+    const tallRatioSum = tallCells.reduce((sum, cell) => sum + getAspectLayoutRatio(cell), 0);
+    const tallGaps = space.gapX * Math.max(0, tallCells.length - 1);
+    let best = null;
+    enumerateAspectPartitions(partitionCells).forEach(partition => {
+      const groups = fixedGroups.concat(partition);
+      const weights = fixedWeights.concat(partition.map(() => 1));
+      if (!groups.length) return;
+      const rowGapTotal = space.gapY * Math.max(0, groups.length - 1);
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+      let baseHeight = (space.height - rowGapTotal) / totalWeight;
+      groups.forEach((group, index) => {
+        const ratioSum = group.reduce((sum, cell) => sum + mediaAspectRatio(cell), 0);
+        const rowGaps = space.gapX * Math.max(0, group.length - 1);
+        const constantWidth = tallRatioSum * rowGapTotal + tallGaps + space.gapX + rowGaps;
+        const heightCoefficient = tallRatioSum * totalWeight + weights[index] * ratioSum;
+        baseHeight = Math.min(baseHeight, (space.width - constantWidth) / Math.max(0.01, heightCoefficient));
+      });
+      if (!Number.isFinite(baseHeight) || baseHeight <= 1) return;
+      const totalHeight = baseHeight * totalWeight + rowGapTotal;
+      const tallWidth = tallRatioSum * totalHeight + tallGaps;
+      const rowWidths = groups.map((group, index) =>
+        weights[index] * baseHeight * group.reduce((sum, cell) => sum + mediaAspectRatio(cell), 0) +
+        space.gapX * Math.max(0, group.length - 1));
+      const contentWidth = Math.max(...rowWidths);
+      const totalWidth = tallWidth + space.gapX + contentWidth;
+      const fill = totalWidth / space.width;
+      if (!best || baseHeight > best.baseHeight + 0.5 ||
+        (Math.abs(baseHeight - best.baseHeight) <= 0.5 &&
+          (groups.length < best.groups.length || (groups.length === best.groups.length && fill > best.fill)))) {
+        best = { groups, weights, baseHeight, totalHeight, tallWidth, contentWidth, totalWidth, fill, space };
+      }
+    });
+    return best;
+  }
+
+  function applyTallAspectLayout(session, tallCells, fixedGroups, fixedWeights, partitionCells, tallSide = 'left') {
+    const layout = chooseTallAspectLayout(session, tallCells, fixedGroups, fixedWeights, partitionCells);
+    if (!layout) return false;
+    const { groups, weights, baseHeight, totalHeight, tallWidth, contentWidth, totalWidth, space } = layout;
+    const heights = weights.map(weight => weight * baseHeight);
+    const groupStart = Math.max(0, (space.width - totalWidth) / 2);
+    const tallStart = tallSide === 'right' ? groupStart + contentWidth + space.gapX : groupStart;
+    const contentStart = tallSide === 'right' ? groupStart : groupStart + tallWidth + space.gapX;
+    session.grid.style.gridTemplateColumns = 'repeat(' + ASPECT_GRID_TRACKS + ',minmax(0,1fr))';
+    session.grid.style.gridTemplateRows = heights.map(height => height.toFixed(2) + 'px').join(' ');
+    session.grid.style.columnGap = '0px';
+    session.grid.style.rowGap = space.gapY + 'px';
+    session.grid.style.justifyContent = 'stretch';
+    session.grid.style.alignContent = 'center';
+    placeAspectRowInRegion(tallCells, 1, groups.length, totalHeight, tallStart, tallWidth, space);
+    groups.forEach((group, index) => {
+      placeAspectRowInRegion(group, index + 1, 1, heights[index], contentStart, contentWidth, space);
+    });
+    return true;
+  }
+
   function applySmartGridLayout(session) {
     const [columns, rows] = STANDARD_LAYOUTS[session.layoutCount] || [2, 2];
     const visibleCells = session.cells.filter(cell => cell && cell.index < session.layoutCount);
@@ -4467,76 +4669,87 @@
       session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
       return;
     }
+    if (!applyAspectRowsLayout(session, [], [], visibleCells)) {
+      session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',minmax(0,1fr))';
+      session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
+    }
+  }
 
-    // 智能画幅只调整单格尺寸，不改变2/4/6/9/12格的稳定网格结构。
-    // 这样9格始终是3×3、12格始终是4×3，避免最后一行被挤成不规则布局。
-    const ratios = visibleCells.map(mediaAspectRatio).sort((a, b) => a - b);
-    const targetAspect = Math.max(0.35, Math.min(3.2,
-      ratios[Math.floor(ratios.length / 2)] || DEFAULT_ASPECT_RATIO));
-    const computed = window.getComputedStyle(session.grid);
-    const paddingX = (parseFloat(computed.paddingLeft) || 0) + (parseFloat(computed.paddingRight) || 0);
-    const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0);
-    const gapX = parseFloat(computed.columnGap) || 3;
-    const gapY = parseFloat(computed.rowGap) || 3;
-    const availableWidth = Math.max(1, (session.grid.clientWidth || window.innerWidth) - paddingX);
-    const availableHeight = Math.max(1, (session.grid.clientHeight || window.innerHeight) - paddingY);
-    const widthLimit = Math.max(1, (availableWidth - gapX * (columns - 1)) / columns);
-    const heightLimit = Math.max(1, (availableHeight - gapY * (rows - 1)) / rows);
-    const cellWidth = Math.max(1, Math.min(widthLimit, heightLimit * targetAspect));
-    const cellHeight = cellWidth / targetAspect;
-
-    session.grid.style.columnGap = gapX + 'px';
-    session.grid.style.rowGap = gapY + 'px';
-    session.grid.style.justifyContent = 'center';
-    session.grid.style.alignContent = 'center';
-    session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',' + cellWidth.toFixed(2) + 'px)';
-    session.grid.style.gridTemplateRows = 'repeat(' + rows + ',' + cellHeight.toFixed(2) + 'px)';
-  }  function applyMainLayoutPositions(session) {
-    const cells = session.cells.filter(cell => cell && cell.index < session.layoutCount)
-      .slice().sort((a, b) => a.layoutSlot - b.layoutSlot);
+  function applyFixedMainLayoutPositions(session, cells) {
     if (session.layoutMode === 'mainDual') {
       if (cells.length < 3) return;
       const mainA = cells.find(cell => cell.layoutSlot === 0) || cells[0];
       const mainB = cells.find(cell => cell.layoutSlot === 1) || cells[1];
       const smallCells = cells.filter(cell => cell !== mainA && cell !== mainB);
-      const ratioA = mediaAspectRatio(mainA);
-      const ratioB = mediaAspectRatio(mainB);
-      const portraitA = session.smartAspectMode && ratioA < 0.82;
-      const portraitB = session.smartAspectMode && ratioB < 0.82;
-      const layoutType = portraitA && portraitB ? 'portrait' : (portraitA !== portraitB ? 'mixed' : 'horizontal');
-      session.grid.classList.toggle('dual-portrait-layout', layoutType === 'portrait');
-      session.grid.classList.toggle('dual-mixed-layout', layoutType === 'mixed');
+      session.grid.classList.toggle('dual-portrait-layout', false);
+      session.grid.classList.toggle('dual-mixed-layout', false);
       session.grid.style.gridTemplateColumns = 'repeat(12,minmax(0,1fr))';
-      if (layoutType === 'portrait') {
-        const perRow = smallCells.length <= 2 ? 1 : 2;
-        const smallRows = Math.max(2, Math.ceil(smallCells.length / perRow));
-        session.grid.style.gridTemplateRows = 'repeat(' + smallRows + ',minmax(0,1fr))';
-        setCellGridPosition(mainA, 1, 4, 1, smallRows);
-        setCellGridPosition(mainB, 5, 4, 1, smallRows);
-        for (let offset = 0; offset < smallCells.length; offset += perRow) {
-          positionAdaptiveRow(smallCells.slice(offset, offset + perRow), 1 + Math.floor(offset / perRow), 12, 9, 4);
-        }
-      } else if (layoutType === 'mixed') {
-        const landscape = portraitA ? mainB : mainA;
+      const smallRows = Math.max(1, Math.ceil(smallCells.length / 4));
+      session.grid.style.gridTemplateRows = 'minmax(0,1.65fr) repeat(' + smallRows + ',minmax(0,1fr))';
+      setCellGridPosition(mainA, 1, 6, 1, 1);
+      setCellGridPosition(mainB, 7, 6, 1, 1);
+      for (let offset = 0; offset < smallCells.length; offset += 4) {
+        positionAdaptiveRow(smallCells.slice(offset, offset + 4), 2 + Math.floor(offset / 4), 12, 1, 12);
+      }
+      session.mainSlotId = mainA.slotId;
+      session.secondaryMainSlotId = mainB.slotId;
+      return;
+    }
+    const main = cells.find(cell => cell.layoutSlot === 0) || cells.find(cell => cell.slotId === session.mainSlotId) || cells[0];
+    if (!main) return;
+    session.mainSlotId = main.slotId;
+    session.secondaryMainSlotId = null;
+    session.grid.classList.toggle('portrait-main-layout', false);
+    if (session.layoutMode === 'main2') {
+      session.grid.style.gridTemplateColumns = 'minmax(0,2fr) minmax(0,1fr)';
+      session.grid.style.gridTemplateRows = 'repeat(2,minmax(0,1fr))';
+      setCellGridPosition(main, 1, 1, 1, 2);
+      cells.filter(cell => cell !== main).forEach((cell, index) => setCellGridPosition(cell, 2, 1, index + 1, 1));
+      return;
+    }
+    if (session.layoutMode === 'main5') {
+      session.grid.style.gridTemplateColumns = 'repeat(3,minmax(0,1fr))';
+      session.grid.style.gridTemplateRows = 'repeat(3,minmax(0,1fr))';
+      setCellGridPosition(main, 1, 2, 1, 2);
+      const positions = [[3, 1], [3, 2], [1, 3], [2, 3], [3, 3]];
+      cells.filter(cell => cell !== main).forEach((cell, index) => {
+        const position = positions[index];
+        if (position) setCellGridPosition(cell, position[0], 1, position[1], 1);
+      });
+    }
+  }
+
+  function applyMainLayoutPositions(session) {
+    const cells = session.cells.filter(cell => cell && cell.index < session.layoutCount)
+      .slice().sort((a, b) => a.layoutSlot - b.layoutSlot);
+    if (!session.smartAspectMode) {
+      applyFixedMainLayoutPositions(session, cells);
+      return;
+    }
+    if (session.layoutMode === 'mainDual') {
+      if (cells.length < 3) return;
+      const mainA = cells.find(cell => cell.layoutSlot === 0) || cells[0];
+      const mainB = cells.find(cell => cell.layoutSlot === 1) || cells[1];
+      const smallCells = cells.filter(cell => cell !== mainA && cell !== mainB);
+      const kindA = classifyAspectRatio(mediaAspectRatio(mainA));
+      const kindB = classifyAspectRatio(mediaAspectRatio(mainB));
+      const portraitA = kindA === 'portrait';
+      const portraitB = kindB === 'portrait';
+      session.grid.classList.toggle('dual-portrait-layout', portraitA && portraitB);
+      session.grid.classList.toggle('dual-mixed-layout', portraitA !== portraitB);
+      if (portraitA && portraitB) {
+        applyTallAspectLayout(session, [mainA, mainB], [], [], smallCells, 'left');
+      } else if (portraitA !== portraitB) {
         const portrait = portraitA ? mainA : mainB;
-        const smallRows = Math.max(1, Math.ceil(smallCells.length / 4));
-        const totalRows = 1 + smallRows;
-        session.grid.style.gridTemplateRows = 'minmax(0,1.65fr) repeat(' + smallRows + ',minmax(0,1fr))';
-        setCellGridPosition(landscape, 1, 8, 1, 1);
-        setCellGridPosition(portrait, 9, 4, 1, totalRows);
-        for (let offset = 0; offset < smallCells.length; offset += 4) {
-          positionAdaptiveRow(smallCells.slice(offset, offset + 4), 2 + Math.floor(offset / 4), 12, 1, 8);
-        }
+        const landscape = portraitA ? mainB : mainA;
+        applyTallAspectLayout(session, [portrait], [[landscape]], [1.55], smallCells, 'right');
       } else {
-        const smallRows = Math.max(1, Math.ceil(smallCells.length / 4));
-        session.grid.style.gridTemplateRows = 'minmax(0,1.65fr) repeat(' + smallRows + ',minmax(0,1fr))';
-        const mainSpans = session.smartAspectMode && Math.abs(ratioA - ratioB) >= 0.35
-          ? allocateGridSpans(12, [ratioA * ratioA, ratioB * ratioB], 4) : [6, 6];
-        setCellGridPosition(mainA, 1, mainSpans[0], 1, 1);
-        setCellGridPosition(mainB, mainSpans[0] + 1, mainSpans[1], 1, 1);
-        for (let offset = 0; offset < smallCells.length; offset += 4) {
-          positionAdaptiveRow(smallCells.slice(offset, offset + 4), 2 + Math.floor(offset / 4), 12, 1, 12);
-        }
+        const ratioA = mediaAspectRatio(mainA);
+        const ratioB = mediaAspectRatio(mainB);
+        const totalRatio = ratioA + ratioB;
+        const shareA = Math.max(0.3, Math.min(0.7, ratioA / Math.max(0.01, totalRatio)));
+        const ratioOverrides = new Map([[mainA, totalRatio * shareA], [mainB, totalRatio * (1 - shareA)]]);
+        applyAspectRowsLayout(session, [[mainA, mainB]], [1.55], smallCells, ratioOverrides);
       }
       session.mainSlotId = mainA.slotId;
       session.secondaryMainSlotId = mainB.slotId;
@@ -4545,45 +4758,18 @@
 
     const main = cells.find(cell => cell.layoutSlot === 0) || cells.find(cell => cell.slotId === session.mainSlotId) || cells[0];
     if (!main) return;
+    const smallCells = cells.filter(cell => cell !== main);
+    const portraitMain = classifyAspectRatio(mediaAspectRatio(main)) === 'portrait';
     session.mainSlotId = main.slotId;
     session.secondaryMainSlotId = null;
-    const ratio = mediaAspectRatio(main);
-    const portraitMain = session.smartAspectMode && ratio < 0.82;
     session.grid.classList.toggle('portrait-main-layout', portraitMain);
-    if (session.layoutMode === 'main2') {
-      session.grid.style.gridTemplateColumns = !session.smartAspectMode
-        ? 'minmax(0,2fr) minmax(0,1fr)'
-        : (portraitMain ? 'minmax(0,1fr) minmax(0,2fr)' : (ratio < 1.2 ? 'minmax(0,1.4fr) minmax(0,1fr)' : 'minmax(0,2fr) minmax(0,1fr)'));
-      session.grid.style.gridTemplateRows = 'repeat(2,minmax(0,1fr))';
-      setCellGridPosition(main, portraitMain ? 2 : 1, 1, 1, 2);
-      cells.filter(cell => cell !== main).forEach((cell, index) => {
-        setCellGridPosition(cell, portraitMain ? 1 : 2, 1, index + 1, 1);
-      });
-      return;
-    }
-    if (session.layoutMode === 'main5') {
-      if (portraitMain) {
-        session.grid.style.gridTemplateColumns = 'repeat(4,minmax(0,1fr))';
-        session.grid.style.gridTemplateRows = 'repeat(2,minmax(0,1fr))';
-        setCellGridPosition(main, 1, 1, 1, 2);
-        const positions = [[2, 1], [3, 1], [4, 1], [2, 2], [3, 2]];
-        cells.filter(cell => cell !== main).forEach((cell, index) => {
-          const position = positions[index];
-          if (position) setCellGridPosition(cell, position[0], 1, position[1], 1);
-        });
-      } else {
-        session.grid.style.gridTemplateColumns = 'repeat(3,minmax(0,1fr))';
-        session.grid.style.gridTemplateRows = 'repeat(3,minmax(0,1fr))';
-        setCellGridPosition(main, 1, 2, 1, 2);
-        const positions = [[3, 1], [3, 2], [1, 3], [2, 3], [3, 3]];
-        cells.filter(cell => cell !== main).forEach((cell, index) => {
-          const position = positions[index];
-          if (position) setCellGridPosition(cell, position[0], 1, position[1], 1);
-        });
-      }
+    if (portraitMain) {
+      applyTallAspectLayout(session, [main], [], [], smallCells, session.layoutMode === 'main2' ? 'right' : 'left');
+    } else {
+      const mainWeight = session.layoutMode === 'main5' ? 1.85 : 1.55;
+      applyAspectRowsLayout(session, [[main]], [mainWeight], smallCells);
     }
   }
-
   function applyLayoutPositions(session) {
     session.grid.classList.toggle('has-main', session.layoutMode === 'grid' && Boolean(session.mainSlotId));
     session.grid.classList.toggle('main-layout', session.layoutMode !== 'grid');
@@ -4828,6 +5014,8 @@
     clearTimeout(session.toolbarHideTimer);
     session.toolbarHideTimer = null;
     session.layoutResizeObserver?.disconnect();
+    clearTimeout(session.layoutReflowTimer);
+    if (session.layoutReflowFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(session.layoutReflowFrame);
     if (session.layoutResizeHandler) window.removeEventListener('resize', session.layoutResizeHandler);
     active = null;
     session.abort.abort();
@@ -4881,7 +5069,7 @@
         audioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) ? indexed.settings.audioSourceIndex : -1,
         lastAudioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) && indexed.settings.audioSourceIndex >= 0 ? indexed.settings.audioSourceIndex : 0,
         fullscreenAudioBackup: null, fullscreenExitAt: 0,
-        layoutResizeObserver: null, layoutResizeHandler: null, moreDetails: null,
+        layoutResizeObserver: null, layoutResizeHandler: null, layoutReflowTimer: null, layoutReflowFrame: 0, moreDetails: null,
         bar, toolbarHideTimer: null, lastPointerType: 'programmatic',
         toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
         toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
@@ -5196,12 +5384,12 @@
         session.layoutResizeObserver = new ResizeObserver(() => {
           updateToolsDrawerOffset();
           if (session.moreDetails?.open) positionMoreMenu();
-          if (!session.closed) applyLayoutPositions(session);
+          if (!session.closed) scheduleLayoutReflow(session, 80);
         });
         session.layoutResizeObserver.observe(grid);
         session.layoutResizeObserver.observe(bar);
       } else {
-        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (session.moreDetails?.open) positionMoreMenu(); if (!session.closed) applyLayoutPositions(session); };
+        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (session.moreDetails?.open) positionMoreMenu(); if (!session.closed) scheduleLayoutReflow(session, 80); };
         window.addEventListener('resize', session.layoutResizeHandler);
       }
       shadow.addEventListener('keydown', session.onKey, true);
