@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.4
+// @version      0.9.5
 // @description  115目录扫描、断点续扫、索引管理与2/4/6/9/12宫格播放一体化。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -2084,8 +2084,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.4';
+  const VERSION = '0.9.5';
   const UI_AUTO_HIDE_MS = 2000;
+  const TOOLBAR_REVEAL_ZONE_PX = 56;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -4661,20 +4662,318 @@
     return true;
   }
 
+
+  function scoreAspectLayoutCandidate(candidate, space, partitionCost = 0) {
+    if (!candidate || !candidate.rectangles || !candidate.rectangles.length) return null;
+    const areas = candidate.rectangles.map(rect => Math.max(1, rect.width * rect.height));
+    const totalArea = areas.reduce((sum, area) => sum + area, 0);
+    const logAreas = areas.map(area => Math.log(area));
+    const meanLogArea = logAreas.reduce((sum, value) => sum + value, 0) / logAreas.length;
+    const areaVariance = logAreas.reduce((sum, value) => sum + Math.pow(value - meanLogArea, 2), 0) / logAreas.length;
+    const averageArea = totalArea / areas.length;
+    const smallestAreaRatio = Math.min(...areas) / Math.max(1, averageArea);
+    const smallTilePenalty = Math.max(0, 0.35 - smallestAreaRatio) * 0.08;
+    const coverage = Math.min(1, totalArea / Math.max(1, space.width * space.height));
+    const minLeft = Math.min(...candidate.rectangles.map(rect => rect.left));
+    const minTop = Math.min(...candidate.rectangles.map(rect => rect.top));
+    const maxRight = Math.max(...candidate.rectangles.map(rect => rect.left + rect.width));
+    const maxBottom = Math.max(...candidate.rectangles.map(rect => rect.top + rect.height));
+    const widthFill = Math.min(1, Math.max(0, maxRight - minLeft) / Math.max(1, space.width));
+    const heightFill = Math.min(1, Math.max(0, maxBottom - minTop) / Math.max(1, space.height));
+    const fillRatio = candidate.strategy === 'justified-rows' ? heightFill :
+      candidate.strategy === 'balanced-columns' ? widthFill : Math.min(widthFill, heightFill);
+    candidate.coverage = coverage;
+    candidate.fillRatio = fillRatio;
+    candidate.areaVariance = areaVariance;
+    // 借鉴 meeting-grid-layout 的面积优化行搜索：除窗口总面积外，额外惩罚未占满的主轴空间。
+    candidate.score = coverage * Math.pow(fillRatio, 1.5) -
+      Math.min(0.05, areaVariance * 0.01) - smallTilePenalty -
+      Math.min(0.02, Math.max(0, partitionCost) * 0.0005);
+    return candidate;
+  }
+  // Flickr Justified Layout：按每行视频宽高比之和计算自然行高，使每行尽量铺满宽度。
+  // React Photo Album 的 Rows/Columns 思路：用动态规划最小化目标行高/列宽的加权平方偏差。
+  function findOptimalAspectGroups(cells, groupCount, orientation, space) {
+    const count = cells.length;
+    if (!count || groupCount < 1 || groupCount > count) return null;
+    const gap = orientation === 'rows' ? space.gapY : space.gapX;
+    const dimension = orientation === 'rows' ? space.height : space.width;
+    const target = Math.max(1, (dimension - gap * (groupCount - 1)) / groupCount);
+    const costs = Array.from({ length: groupCount + 1 }, () => Array(count + 1).fill(Infinity));
+    const previous = Array.from({ length: groupCount + 1 }, () => Array(count + 1).fill(-1));
+    costs[0][0] = 0;
+
+    for (let usedGroups = 1; usedGroups <= groupCount; usedGroups++) {
+      for (let end = usedGroups; end <= count; end++) {
+        for (let start = usedGroups - 1; start < end; start++) {
+          const priorCost = costs[usedGroups - 1][start];
+          if (!Number.isFinite(priorCost)) continue;
+          const group = cells.slice(start, end);
+          const groupGap = orientation === 'rows' ? space.gapX : space.gapY;
+          const groupGapTotal = groupGap * Math.max(0, group.length - 1);
+          let naturalSize;
+          if (orientation === 'rows') {
+            const ratioSum = group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell), 0);
+            naturalSize = (space.width - groupGapTotal) / Math.max(0.01, ratioSum);
+          } else {
+            const inverseRatioSum = group.reduce((sum, cell) => sum + 1 / getAspectLayoutRatio(cell), 0);
+            naturalSize = (space.height - groupGapTotal) / Math.max(0.01, inverseRatioSum);
+          }
+          if (!Number.isFinite(naturalSize) || naturalSize <= 1) continue;
+          const deviation = Math.log(naturalSize / target);
+          const edgeCost = deviation * deviation * Math.max(1, group.length);
+          const nextCost = priorCost + edgeCost;
+          if (nextCost < costs[usedGroups][end]) {
+            costs[usedGroups][end] = nextCost;
+            previous[usedGroups][end] = start;
+          }
+        }
+      }
+    }
+
+    if (!Number.isFinite(costs[groupCount][count])) return null;
+    const groups = [];
+    let end = count;
+    for (let usedGroups = groupCount; usedGroups > 0; usedGroups--) {
+      const start = previous[usedGroups][end];
+      if (start < 0) return null;
+      groups.push(cells.slice(start, end));
+      end = start;
+    }
+    groups.reverse();
+    return { groups, cost: costs[groupCount][count], target };
+  }
+
+  function buildJustifiedRowsCandidate(cells, partition, space) {
+    const groups = partition.groups;
+    const naturalHeights = groups.map(group => {
+      const ratioSum = group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell), 0);
+      return (space.width - space.gapX * Math.max(0, group.length - 1)) / Math.max(0.01, ratioSum);
+    });
+    const gapTotal = space.gapY * Math.max(0, groups.length - 1);
+    const availableHeight = Math.max(1, space.height - gapTotal);
+    const naturalTotal = naturalHeights.reduce((sum, height) => sum + height, 0);
+    const scale = Math.min(1, availableHeight / Math.max(1, naturalTotal));
+    const heights = naturalHeights.map(height => height * scale);
+    const contentHeight = heights.reduce((sum, height) => sum + height, 0) + gapTotal;
+    const rectangles = [];
+    let top = Math.max(0, (space.height - contentHeight) / 2);
+
+    groups.forEach((group, groupIndex) => {
+      const height = heights[groupIndex];
+      const rowWidth = group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell) * height, 0) +
+        space.gapX * Math.max(0, group.length - 1);
+      let left = Math.max(0, (space.width - rowWidth) / 2);
+      group.forEach(cell => {
+        const width = getAspectLayoutRatio(cell) * height;
+        rectangles.push({ cell, left, top, width, height });
+        left += width + space.gapX;
+      });
+      top += height + space.gapY;
+    });
+    return scoreAspectLayoutCandidate({
+      strategy: 'justified-rows',
+      rectangles,
+      space,
+      partitionCost: partition.cost
+    }, space, partition.cost);
+  }
+
+  function buildBalancedColumnsCandidate(cells, partition, space) {
+    const groups = partition.groups;
+    const naturalWidths = groups.map(group => {
+      const inverseRatioSum = group.reduce((sum, cell) => sum + 1 / getAspectLayoutRatio(cell), 0);
+      return (space.height - space.gapY * Math.max(0, group.length - 1)) / Math.max(0.01, inverseRatioSum);
+    });
+    const gapTotal = space.gapX * Math.max(0, groups.length - 1);
+    const availableWidth = Math.max(1, space.width - gapTotal);
+    const naturalTotal = naturalWidths.reduce((sum, width) => sum + width, 0);
+    const scale = Math.min(1, availableWidth / Math.max(1, naturalTotal));
+    const widths = naturalWidths.map(width => width * scale);
+    const contentWidth = widths.reduce((sum, width) => sum + width, 0) + gapTotal;
+    const rectangles = [];
+    let left = Math.max(0, (space.width - contentWidth) / 2);
+
+    groups.forEach((group, groupIndex) => {
+      const width = widths[groupIndex];
+      const columnHeight = group.reduce((sum, cell) => sum + width / getAspectLayoutRatio(cell), 0) +
+        space.gapY * Math.max(0, group.length - 1);
+      let top = Math.max(0, (space.height - columnHeight) / 2);
+      group.forEach(cell => {
+        const height = width / getAspectLayoutRatio(cell);
+        rectangles.push({ cell, left, top, width, height });
+        top += height + space.gapY;
+      });
+      left += width + space.gapX;
+    });
+    return scoreAspectLayoutCandidate({
+      strategy: 'balanced-columns',
+      rectangles,
+      space,
+      partitionCost: partition.cost
+    }, space, partition.cost);
+  }
+
+  function buildPortraitSplitCandidate(session, tallCells, contentCells, tallSide) {
+    const layout = chooseTallAspectLayout(session, tallCells, [], [], contentCells);
+    if (!layout) return null;
+    const { groups, weights, baseHeight, totalHeight, tallWidth, contentWidth, totalWidth, space } = layout;
+    const groupStart = Math.max(0, (space.width - totalWidth) / 2);
+    const tallStart = tallSide === 'right' ? groupStart + contentWidth + space.gapX : groupStart;
+    const contentStart = tallSide === 'right' ? groupStart : groupStart + tallWidth + space.gapX;
+    const contentTop = Math.max(0, (space.height - totalHeight) / 2);
+    const rectangles = [];
+    let tallLeft = tallStart;
+
+    tallCells.forEach(cell => {
+      const width = getAspectLayoutRatio(cell) * totalHeight;
+      rectangles.push({ cell, left: tallLeft, top: contentTop, width, height: totalHeight });
+      tallLeft += width + space.gapX;
+    });
+
+    let top = contentTop;
+    groups.forEach((group, groupIndex) => {
+      const height = weights[groupIndex] * baseHeight;
+      const rowWidth = group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell) * height, 0) +
+        space.gapX * Math.max(0, group.length - 1);
+      let left = contentStart + Math.max(0, (contentWidth - rowWidth) / 2);
+      group.forEach(cell => {
+        const width = getAspectLayoutRatio(cell) * height;
+        rectangles.push({ cell, left, top, width, height });
+        left += width + space.gapX;
+      });
+      top += height + space.gapY;
+    });
+
+    return scoreAspectLayoutCandidate({
+      strategy: 'portrait-split-' + tallSide,
+      rectangles,
+      space
+    }, space);
+  }
+
+  function buildEvenAspectGroups(cells, groupCount) {
+    const baseSize = Math.floor(cells.length / groupCount);
+    const extraCount = cells.length % groupCount;
+    const groups = [];
+    let offset = 0;
+    for (let index = 0; index < groupCount; index++) {
+      const size = baseSize + (index < extraCount ? 1 : 0);
+      groups.push(cells.slice(offset, offset + size));
+      offset += size;
+    }
+    return groups;
+  }
+
+  function scoreAspectPartition(groups, orientation, space) {
+    if (!groups || !groups.length || groups.some(group => !group.length)) return null;
+    const dimension = orientation === 'rows' ? space.height : space.width;
+    const mainGap = orientation === 'rows' ? space.gapY : space.gapX;
+    const target = Math.max(1, (dimension - mainGap * (groups.length - 1)) / groups.length);
+    const groupGap = orientation === 'rows' ? space.gapX : space.gapY;
+    let cost = 0;
+    for (const group of groups) {
+      const gapTotal = groupGap * Math.max(0, group.length - 1);
+      const naturalSize = orientation === 'rows'
+        ? (space.width - gapTotal) / Math.max(0.01, group.reduce((sum, cell) => sum + getAspectLayoutRatio(cell), 0))
+        : (space.height - gapTotal) / Math.max(0.01, group.reduce((sum, cell) => sum + 1 / getAspectLayoutRatio(cell), 0));
+      if (!Number.isFinite(naturalSize) || naturalSize <= 1) return null;
+      const deviation = Math.log(naturalSize / target);
+      cost += deviation * deviation * Math.max(1, group.length);
+    }
+    return { groups, cost, target };
+  }
+
+  function chooseOptimalAspectGridLayout(session, cells) {
+    const space = getAspectLayoutSpace(session);
+    let best = null;
+    const consider = candidate => {
+      if (!candidate || candidate.rectangles.length !== cells.length) return;
+      if (!best || candidate.score > best.score + 0.0001) best = candidate;
+    };
+    const considerPartition = (partition, orientation) => {
+      if (!partition) return;
+      consider(orientation === 'rows'
+        ? buildJustifiedRowsCandidate(cells, partition, space)
+        : buildBalancedColumnsCandidate(cells, partition, space));
+    };
+
+    // 同时比较动态规划分组与均匀分组，避免单一分组目标错过更高的实际面积利用率。
+    // 均匀分组与 Area-Optimized Row Search 一致：每行分配 floor(N/R) 或 ceil(N/R) 个窗口。
+    const preferColumns = session.layoutCount === 2 && space.width >= space.height;
+    for (let groupCount = 1; groupCount <= cells.length; groupCount++) {
+      const rowPartitions = [
+        findOptimalAspectGroups(cells, groupCount, 'rows', space),
+        scoreAspectPartition(buildEvenAspectGroups(cells, groupCount), 'rows', space)
+      ];
+      const columnPartitions = [
+        findOptimalAspectGroups(cells, groupCount, 'columns', space),
+        scoreAspectPartition(buildEvenAspectGroups(cells, groupCount), 'columns', space)
+      ];
+      if (preferColumns) {
+        columnPartitions.forEach(partition => considerPartition(partition, 'columns'));
+        rowPartitions.forEach(partition => considerPartition(partition, 'rows'));
+      } else {
+        rowPartitions.forEach(partition => considerPartition(partition, 'rows'));
+        columnPartitions.forEach(partition => considerPartition(partition, 'columns'));
+      }
+    }
+
+    const tallCells = cells.filter(cell => classifyAspectRatio(getAspectLayoutRatio(cell)) === 'portrait');
+    const contentCells = cells.filter(cell => !tallCells.includes(cell));
+    if (tallCells.length && contentCells.length) {
+      const firstTallIndex = cells.indexOf(tallCells[0]);
+      const side = firstTallIndex <= (cells.length - 1) / 2 ? 'left' : 'right';
+      consider(buildPortraitSplitCandidate(session, tallCells, contentCells, side));
+    }
+    return best;
+  }
+  function applyOptimalAspectGridLayout(session, cells) {
+    const layout = chooseOptimalAspectGridLayout(session, cells);
+    if (!layout) return false;
+    const trackCount = ASPECT_GRID_TRACKS;
+    const space = layout.space;
+    session.grid.style.gridTemplateColumns = 'repeat(' + trackCount + ',minmax(0,1fr))';
+    session.grid.style.gridTemplateRows = 'repeat(' + trackCount + ',minmax(0,1fr))';
+    session.grid.style.columnGap = '0px';
+    session.grid.style.rowGap = '0px';
+    session.grid.style.justifyContent = 'stretch';
+    session.grid.style.alignContent = 'stretch';
+    session.grid.dataset.aspectStrategy = layout.strategy;
+    session.grid.dataset.aspectCoverage = layout.coverage.toFixed(3);
+    session.grid.dataset.aspectFill = layout.fillRatio.toFixed(3);
+    layout.rectangles.forEach(rect => {
+      const left = Math.max(0, Math.min(trackCount - 1, Math.round(rect.left / space.width * trackCount)));
+      const top = Math.max(0, Math.min(trackCount - 1, Math.round(rect.top / space.height * trackCount)));
+      const right = Math.max(left + 1, Math.min(trackCount, Math.round((rect.left + rect.width) / space.width * trackCount)));
+      const bottom = Math.max(top + 1, Math.min(trackCount, Math.round((rect.top + rect.height) / space.height * trackCount)));
+      setCellGridPosition(rect.cell, left + 1, right - left, top + 1, bottom - top);
+      rect.cell.box.style.margin = '2px';
+    });
+    return true;
+  }
+
   function applySmartGridLayout(session) {
     const [columns, rows] = STANDARD_LAYOUTS[session.layoutCount] || [2, 2];
     const visibleCells = session.cells.filter(cell => cell && cell.index < session.layoutCount);
     if (!session.smartAspectMode || !visibleCells.length) {
+      delete session.grid.dataset.aspectStrategy;
+      delete session.grid.dataset.aspectCoverage;
+      delete session.grid.dataset.aspectFill;
       session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',minmax(0,1fr))';
       session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
       return;
     }
-    if (!applyAspectRowsLayout(session, [], [], visibleCells)) {
-      session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',minmax(0,1fr))';
-      session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
+    if (!applyOptimalAspectGridLayout(session, visibleCells)) {
+      delete session.grid.dataset.aspectStrategy;
+      delete session.grid.dataset.aspectCoverage;
+      delete session.grid.dataset.aspectFill;
+      if (!applyAspectRowsLayout(session, [], [], visibleCells)) {
+        session.grid.style.gridTemplateColumns = 'repeat(' + columns + ',minmax(0,1fr))';
+        session.grid.style.gridTemplateRows = 'repeat(' + rows + ',minmax(0,1fr))';
+      }
     }
   }
-
   function applyFixedMainLayoutPositions(session, cells) {
     if (session.layoutMode === 'mainDual') {
       if (cells.length < 3) return;
@@ -4777,6 +5076,8 @@
     session.grid.classList.toggle('main5-layout', session.layoutMode === 'main5');
     session.grid.classList.toggle('dual-main-layout', session.layoutMode === 'mainDual');
     session.grid.classList.toggle('smart-aspect', Boolean(session.smartAspectMode));
+    delete session.grid.dataset.aspectStrategy;
+    delete session.grid.dataset.aspectCoverage;
     session.grid.classList.toggle('has-focus', Boolean(session.focusSlotId));
     session.grid.classList.toggle('dual-portrait-layout', false);
     session.grid.classList.toggle('dual-mixed-layout', false);
@@ -5359,13 +5660,30 @@
       const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
+      const isToolbarRevealZone = event => {
+        const panelTop = panel.getBoundingClientRect().top;
+        const revealHeight = Math.max(TOOLBAR_REVEAL_ZONE_PX, Math.min(96, bar.offsetHeight + 10));
+        return event.clientY - panelTop <= revealHeight;
+      };
       panel.addEventListener('pointermove', event => {
         const overBar = bar.contains(event.target);
-        revealToolbar(session, event.pointerType === 'touch' || !overBar, event.pointerType);
+        if (event.pointerType === 'touch') {
+          revealToolbar(session, true, event.pointerType);
+        } else if (overBar) {
+          revealToolbar(session, false, event.pointerType);
+        } else if (isToolbarRevealZone(event)) {
+          revealToolbar(session, true, event.pointerType);
+        } else if (session.panel.classList.contains('chrome-visible')) {
+          scheduleToolbarHide(session);
+        }
       }, { passive: true });
       panel.addEventListener('pointerdown', event => {
         const overBar = bar.contains(event.target);
-        revealToolbar(session, event.pointerType === 'touch' || !overBar, event.pointerType);
+        if (event.pointerType === 'touch' || overBar || isToolbarRevealZone(event)) {
+          revealToolbar(session, true, event.pointerType);
+        } else if (session.panel.classList.contains('chrome-visible')) {
+          scheduleToolbarHide(session);
+        }
       }, { passive: true });
       panel.addEventListener('pointerleave', () => scheduleToolbarHide(session), { passive: true });
       bar.addEventListener('pointerenter', event => revealToolbar(session, false, event.pointerType));
@@ -5395,7 +5713,7 @@
       shadow.addEventListener('keydown', session.onKey, true);
       applyLayout(session, indexed.settings.layoutCount, indexed.settings.layoutMode || 'grid');
       panel.focus({ preventScroll: true });
-      revealToolbar(session, true, 'programmatic');
+      // 默认隐藏顶部工具栏；只有顶部触发区、工具栏悬停、触屏点击或键盘焦点才唤出。
     } catch (error) {
       alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
     } finally {
