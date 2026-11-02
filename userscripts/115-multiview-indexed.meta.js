@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.6
+// @version      0.9.7
 // @description  115目录扫描、断点续扫、智能画幅多宫格播放，支持单击暂停、双击全屏、循环播放与自动换片。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
