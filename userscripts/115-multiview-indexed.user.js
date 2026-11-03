@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.8
+// @version      0.9.9
 // @description  115目录扫描、断点续扫、智能画幅多宫格播放，支持单击暂停、双击全屏、循环播放与自动换片。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -2697,26 +2697,40 @@
     cell.progressBar?.setAttribute('aria-disabled', String(!cell.item || !hasDuration || cell.failed));
   }
 
+  function closeMainActionMenu(cell) {
+    if (!cell) return;
+    cell.mainMenuOpen = false;
+    if (cell.mainMenu) cell.mainMenu.hidden = true;
+    if (cell.mainButton) cell.mainButton.setAttribute('aria-expanded', 'false');
+  }
+
+  function closeMainActionMenus(session) {
+    session?.cells?.forEach(closeMainActionMenu);
+  }
+
   function updateCellControls(session, cell) {
     if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '🔈' : '🔊';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
+    const dualMainMode = session.layoutMode === 'mainDual';
+    const isMainA = session.mainSlotId === cell.slotId;
+    const isMainB = dualMainMode && session.secondaryMainSlotId === cell.slotId;
+    const isMain = !dualMainMode && isMainA;
+    const canPromoteMain = Boolean(
+      cell.item && !cell.failed && !cell.box.hidden && cell.index < session.layoutCount &&
+      ['main2', 'main5', 'mainDual'].includes(session.layoutMode) && !isMainA && !isMainB
+    );
+    if (!canPromoteMain) closeMainActionMenu(cell);
     if (cell.mainButton) {
-      cell.mainButton.hidden = !['main2', 'main5'].includes(session.layoutMode) ||
-        session.mainSlotId === cell.slotId;
-      cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '当前主屏' : '↗ 设为主屏';
+      cell.mainButton.hidden = !canPromoteMain;
+      cell.mainButton.textContent = dualMainMode ? '↗ 设为主屏 ▾' : '↗ 设为主屏';
+      cell.mainButton.title = dualMainMode ? '选择设为主屏 A 或主屏 B' : '设为主屏';
+      cell.mainButton.setAttribute('aria-label', dualMainMode ? '选择主屏位置' : '设为主屏');
+      cell.mainButton.setAttribute('aria-haspopup', dualMainMode ? 'true' : 'false');
+      cell.mainButton.setAttribute('aria-expanded', String(Boolean(dualMainMode && canPromoteMain && cell.mainMenuOpen)));
     }
-    if (cell.mainAButton) {
-      cell.mainAButton.hidden = session.layoutMode !== 'mainDual' || session.mainSlotId === cell.slotId;
-      cell.mainAButton.textContent = session.mainSlotId === cell.slotId ? '主屏A ✓' : '↗ 设为主屏A';
-    }
-    if (cell.mainBButton) {
-      cell.mainBButton.hidden = session.layoutMode !== 'mainDual' || session.secondaryMainSlotId === cell.slotId;
-      cell.mainBButton.textContent = session.secondaryMainSlotId === cell.slotId ? '主屏B ✓' : '↗ 设为主屏B';
-    }
-    if (cell.mainActions) {
-      cell.mainActions.hidden = Boolean(cell.mainButton?.hidden && cell.mainAButton?.hidden && cell.mainBButton?.hidden);
-    }
+    if (cell.mainMenu) cell.mainMenu.hidden = !(dualMainMode && canPromoteMain && cell.mainMenuOpen);
+    if (cell.mainActions) cell.mainActions.hidden = !canPromoteMain;
     if (cell.lockButton) {
       cell.lockButton.textContent = cell.locked ? '🔒' : '🔓';
       cell.lockButton.title = cell.locked ? '解除锁定' : '锁定窗口，批量换一批时保留当前视频';
@@ -2726,9 +2740,6 @@
     const key = cell.item ? itemKey(cell.item) : '';
     const favorite = Boolean(key && session.preferenceState.favoritePickcodes.has(key));
     const excluded = Boolean(key && session.preferenceState.excludedPickcodes.has(key));
-    const isMainA = session.mainSlotId === cell.slotId;
-    const isMainB = session.layoutMode === 'mainDual' && session.secondaryMainSlotId === cell.slotId;
-    const isMain = session.layoutMode !== 'mainDual' && isMainA;
     if (cell.favoriteButton) {
       cell.favoriteButton.textContent = favorite ? '★' : '☆';
       cell.favoriteButton.title = favorite ? '取消收藏' : '收藏视频';
@@ -2750,13 +2761,14 @@
     if (cell.lockIndicator) cell.lockIndicator.hidden = !cell.locked;
     if (cell.favoriteIndicator) cell.favoriteIndicator.hidden = !favorite;
     if (cell.soundIndicator) cell.soundIndicator.hidden = cell.video.muted;
+    const mainBadgeLabel = dualMainMode ? (isMainB ? '主屏 B' : '主屏 A') : '主屏';
     if (cell.mainIndicator) {
       cell.mainIndicator.hidden = !(isMain || isMainA || isMainB);
-      cell.mainIndicator.textContent = isMainB ? '主屏 B' : '主屏 A';
+      cell.mainIndicator.textContent = mainBadgeLabel;
     }
     if (cell.mainScreenBadge) {
       cell.mainScreenBadge.hidden = !(isMain || isMainA || isMainB);
-      cell.mainScreenBadge.textContent = isMainB ? '主屏 B' : '主屏';
+      cell.mainScreenBadge.textContent = mainBadgeLabel;
     }
     cell.box.classList.toggle('is-locked', cell.locked);
     cell.box.classList.toggle('is-favorite', favorite);
@@ -4335,11 +4347,19 @@
 
     const mainActions = element('div', 'main-screen-actions');
     mainActions.hidden = true;
-    const mainButton = element('button', 'main-screen-action cell-main', '↗ 设为主屏');
-    const mainAButton = element('button', 'main-screen-action cell-main-a', '↗ 设为主屏A');
-    const mainBButton = element('button', 'main-screen-action cell-main-b', '↗ 设为主屏B');
-    [mainButton, mainAButton, mainBButton].forEach(button => { button.type = 'button'; });
-    mainActions.append(mainButton, mainAButton, mainBButton);
+    const mainButton = element('button', 'main-screen-action cell-main main-screen-trigger', '↗ 设为主屏');
+    mainButton.type = 'button';
+    mainButton.setAttribute('aria-haspopup', 'false');
+    mainButton.setAttribute('aria-expanded', 'false');
+    const mainMenu = element('div', 'main-screen-menu');
+    mainMenu.hidden = true;
+    mainMenu.setAttribute('role', 'group');
+    mainMenu.setAttribute('aria-label', '选择主屏位置');
+    const mainMenuAButton = element('button', 'main-screen-menu-option cell-main-a', '设为主屏 A');
+    const mainMenuBButton = element('button', 'main-screen-menu-option cell-main-b', '设为主屏 B');
+    [mainMenuAButton, mainMenuBButton].forEach(button => { button.type = 'button'; });
+    mainMenu.append(mainMenuAButton, mainMenuBButton);
+    mainActions.append(mainButton, mainMenu);
     const mainScreenBadge = element('div', 'main-screen-badge', '主屏');
     mainScreenBadge.hidden = true;
 
@@ -4354,7 +4374,8 @@
     const cell = {
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
-      mainActions, mainScreenBadge, progressBar, progressFill,
+      mainActions, mainButton, mainMenu, mainMenuAButton, mainMenuBButton, mainScreenBadge,
+      mainMenuOpen: false, progressBar, progressFill,
       hls: null, timer: null, abort: null, generation: 0, clickTimer: null,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false,
@@ -4396,6 +4417,7 @@
       button.onclick = event => {
         event.preventDefault();
         event.stopPropagation();
+        closeMainActionMenus(session);
         session.selectedSlotId = slotId;
         updateCellControls(session, cell);
         handler(event);
@@ -4426,13 +4448,43 @@
     const handleMainAction = (event, target) => {
       event.preventDefault();
       event.stopPropagation();
+      closeMainActionMenus(session);
       session.selectedSlotId = slotId;
       updateCellControls(session, cell);
       promoteMainCell(session, cell, target);
+      cell.box.focus({ preventScroll: true });
     };
-    mainButton.onclick = event => handleMainAction(event, 'A');
-    mainAButton.onclick = event => handleMainAction(event, 'A');
-    mainBButton.onclick = event => handleMainAction(event, 'B');
+    mainButton.onclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      session.selectedSlotId = slotId;
+      if (session.layoutMode !== 'mainDual') {
+        handleMainAction(event, 'A');
+        return;
+      }
+      const shouldOpen = !cell.mainMenuOpen;
+      closeMainActionMenus(session);
+      cell.mainMenuOpen = shouldOpen;
+      updateCellControls(session, cell);
+      if (shouldOpen) mainMenuAButton.focus({ preventScroll: true });
+    };
+    mainMenuAButton.onclick = event => handleMainAction(event, 'A');
+    mainMenuBButton.onclick = event => handleMainAction(event, 'B');
+    mainActions.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || !cell.mainMenuOpen) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeMainActionMenu(cell);
+      mainButton.focus({ preventScroll: true });
+    });
+    if (!session.mainActionDismissBound) {
+      session.mainActionDismissBound = true;
+      shadow.addEventListener('click', event => {
+        if (active !== session || session.closed) return;
+        if (event.target instanceof Element && event.target.closest('.main-screen-actions')) return;
+        closeMainActionMenus(session);
+      });
+    }
 
     box.append(video, mainActions, mainScreenBadge, status, tools);
     session.grid.append(box);
@@ -5246,6 +5298,7 @@
   }
 
   function applyCellVisibility(session) {
+    closeMainActionMenus(session);
     session.grid.dataset.layout = String(session.layoutCount);
     session.grid.dataset.layoutMode = session.layoutMode;
 
@@ -5493,6 +5546,14 @@
           const formEditing = eventPath.some(target => target instanceof Element && target.matches('input,textarea,select,[contenteditable="true"]'));
           const buttonFocused = eventPath.some(target => target instanceof Element && target.matches('button'));
           if (event.key === 'Escape') {
+            const openMainMenuCell = session.cells.find(cell => cell && cell.mainMenuOpen);
+            if (openMainMenuCell) {
+              event.preventDefault();
+              event.stopPropagation();
+              closeMainActionMenu(openMainMenuCell);
+              openMainMenuCell.mainButton?.focus({ preventScroll: true });
+              return;
+            }
             if (session.toolsDrawerLayer && !session.toolsDrawerLayer.hidden) {
               event.preventDefault();
               event.stopPropagation();
@@ -5933,11 +5994,14 @@
     .hud .bar:hover i,.hud .bar.dragging i{height:6px}
     .hud .bar i::after{content:'';position:absolute;right:-6px;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#4da3ff;box-shadow:0 0 4px rgba(0,0,0,.6);opacity:0;transition:opacity .1s}
     .hud .bar:hover i::after,.hud .bar.dragging i::after{opacity:1}
-    .main-screen-actions{position:absolute;top:10px;right:10px;z-index:8;display:flex;align-items:center;gap:5px}
-    .main-screen-actions[hidden],.main-screen-actions .main-screen-action[hidden]{display:none!important}
-    .main-screen-action{display:inline-flex;align-items:center;gap:5px;padding:7px 10px;border:1px solid rgba(153,139,255,.55);border-radius:8px;background:rgba(13,18,39,.88);color:#f3f0ff;font-family:inherit;font-size:11px;font-weight:750;line-height:1.2;cursor:pointer;box-shadow:0 5px 16px rgba(0,0,0,.35);backdrop-filter:blur(8px)}
-    .main-screen-action:hover{border-color:#78e7ed;background:rgba(66,57,145,.94);color:#fff}
-    .main-screen-action:focus-visible{outline:2px solid #78e7ed;outline-offset:2px}
+    .main-screen-actions{position:absolute;top:10px;right:10px;z-index:8;display:flex;align-items:center;gap:5px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .14s ease,visibility .14s ease}
+    .cell:hover .main-screen-actions,.cell:focus-within .main-screen-actions{opacity:1;visibility:visible;pointer-events:auto}
+    .main-screen-actions[hidden],.main-screen-actions .main-screen-action[hidden],.main-screen-menu[hidden]{display:none!important}
+    .main-screen-action{display:inline-flex;align-items:center;gap:5px;padding:7px 10px;border:1px solid rgba(153,139,255,.55);border-radius:8px;background:rgba(13,18,39,.88);color:#f3f0ff;font-family:inherit;font-size:11px;font-weight:750;line-height:1.2;cursor:pointer;box-shadow:0 5px 16px rgba(0,0,0,.35);backdrop-filter:blur(8px);white-space:nowrap}
+    .main-screen-action:hover,.main-screen-menu-option:hover{border-color:#78e7ed;background:rgba(66,57,145,.94);color:#fff}
+    .main-screen-action:focus-visible,.main-screen-menu-option:focus-visible{outline:2px solid #78e7ed;outline-offset:2px}
+    .main-screen-menu{position:absolute;top:calc(100% + 6px);right:0;display:flex;flex-direction:column;gap:4px;min-width:142px;padding:5px;border:1px solid rgba(153,139,255,.4);border-radius:9px;background:rgba(13,18,39,.96);box-shadow:0 8px 22px rgba(0,0,0,.42);backdrop-filter:blur(10px)}
+    .main-screen-menu-option{display:flex;align-items:center;width:100%;padding:8px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:#e9e6ff;font-family:inherit;font-size:11px;font-weight:700;text-align:left;white-space:nowrap;cursor:pointer}
     .main-screen-badge{position:absolute;top:10px;left:10px;z-index:8;display:inline-flex;align-items:center;padding:6px 9px;border:1px solid rgba(130,232,220,.4);border-radius:8px;background:rgba(12,50,55,.86);color:#a8fff0;font-size:11px;font-weight:750;letter-spacing:.5px;box-shadow:0 5px 16px rgba(0,0,0,.3)}
     .main-screen-badge[hidden]{display:none!important}
     .cell.is-locked{outline:2px solid #e8b64b;outline-offset:-2px;z-index:5}
@@ -6017,7 +6081,11 @@
       .main-screen-action{padding:5px 7px;font-size:10px}
       .tools-drawer{width:min(380px,96vw)}
     }
-    @media(hover:none){.cell-tools{opacity:1;visibility:visible}}
+    @media(hover:none){
+      .cell-tools{opacity:1;visibility:visible}
+      .main-screen-actions{opacity:0;visibility:hidden;pointer-events:none}
+      .cell.is-selected .main-screen-actions{opacity:1;visibility:visible;pointer-events:auto}
+    }
   `;
   const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
