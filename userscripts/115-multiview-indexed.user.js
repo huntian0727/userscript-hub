@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.9
-// @description  115目录扫描、断点续扫、智能画幅多宫格播放，支持单击暂停、双击全屏、循环播放与自动换片。
+// @version      0.10.0
+// @description  115目录索引与多宫格播放一体化，支持智能画幅、随机探索、回收站删除及单击暂停、双击全屏。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -288,6 +288,44 @@
       return Array.from(found.values());
     }
 
+    async function deleteVideoRecords(accountId, fileId) {
+      const owner = String(accountId || '').trim();
+      const id = String(fileId || '').trim();
+      if (!owner) throw new Error('缺少115账号标识，无法清理本地视频索引');
+      if (!/^\d+$/.test(id) || id === '0') throw new Error('视频文件ID无效，无法清理本地索引');
+      const scans = await listScans(owner);
+      if (!scans.length) return 0;
+      const db = await openDatabase();
+      const tx = db.transaction(['scans', 'records'], 'readwrite');
+      const done = transactionPromise(tx);
+      const scanStore = tx.objectStore('scans');
+      const recordStore = tx.objectStore('records');
+      let removed = 0;
+      for (const scan of scans) {
+        const scanId = String(scan.scanId);
+        const recordRequest = recordStore.get([scanId, 'video', id]);
+        recordRequest.onsuccess = () => {
+          if (!recordRequest.result) return;
+          recordStore.delete([scanId, 'video', id]);
+          removed += 1;
+          const scanRequest = scanStore.get(scanId);
+          scanRequest.onsuccess = () => {
+            const current = scanRequest.result;
+            if (!current || String(current.accountId) !== owner) return;
+            const stats = Object.assign({}, current.stats || {});
+            for (const key of ['videos', 'files', 'recordsStored']) {
+              stats[key] = Math.max(0, Number(stats[key] || 0) - 1);
+            }
+            current.stats = stats;
+            current.updatedAt = Date.now();
+            scanStore.put(current);
+          };
+        };
+      }
+      await done;
+      return removed;
+    }
+
     async function deleteScan(scanId) {
       const db = await openDatabase();
       const tx = db.transaction(['scans', 'records'], 'readwrite');
@@ -321,6 +359,7 @@
       sampleVideos,
       listScans,
       findVideosByPickcodes,
+      deleteVideoRecords,
       deleteScan,
       close
     });
@@ -1686,7 +1725,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.9.8';
+  const VERSION = '0.10.0';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2089,7 +2128,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.8';
+  const VERSION = '0.10.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2107,6 +2146,7 @@
   const preferenceStore = N115PlayerPreferenceStore.create115PlayerPreferenceStore();
   let active = null;
   let opening = false;
+  let recycleBinMutationQueue = Promise.resolve();
 
   function trustedUrl(value, base = 'https://115.com/') {
     const url = new URL(value, base);
@@ -2164,6 +2204,103 @@
         });
       } catch (error) { finish(error); }
     });
+  }
+
+  function enqueueRecycleBinDelete(item, expectedAccountId) {
+    const operation = recycleBinMutationQueue.then(async () => {
+      const fileId = String(item && item.id || '').trim();
+      const parentId = String(item && item.parentId || '0').trim();
+      if (!/^\d+$/.test(fileId) || fileId === '0') throw new Error('视频文件ID无效，已阻止删除');
+      if (!/^\d+$/.test(parentId)) throw new Error('视频所在目录ID无效，已阻止删除');
+      const currentAccountId = await resolveAccountId();
+      if (currentAccountId !== String(expectedAccountId || '')) {
+        throw new Error('当前115账号已切换，已阻止删除其他账号的文件');
+      }
+      const params = new URLSearchParams();
+      params.set('pid', parentId);
+      params.set('fid[0]', fileId);
+      params.set('ignore_warn', '1');
+      const endpoint = INDEX_API_ORIGIN + '/rb/delete';
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          if (error) reject(error);
+          else resolve(value);
+        };
+        if (typeof GM_xmlhttpRequest !== 'function') {
+          finish(new Error('未检测到Tampermonkey请求能力，无法删除115文件'));
+          return;
+        }
+        try {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: endpoint,
+            data: params.toString(),
+            timeout: 20000,
+            responseType: 'text',
+            anonymous: false,
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              Referer: 'https://115.com/'
+            },
+            onload: response => {
+              if (response.status < 200 || response.status >= 300) {
+                const error = new Error('115回收站删除请求失败（HTTP ' + response.status + '）');
+                error.outcomeUnknown = response.status === 0 || response.status >= 500;
+                finish(error);
+                return;
+              }
+              let finalUrl;
+              try { finalUrl = new URL(response.finalUrl || endpoint); }
+              catch {
+                finish(new Error('115删除响应地址无效，已停止处理'));
+                return;
+              }
+              if (finalUrl.origin !== INDEX_API_ORIGIN || finalUrl.pathname !== '/rb/delete') {
+                finish(new Error('115删除请求发生非预期跳转，已停止处理'));
+                return;
+              }
+              let payload;
+              try { payload = JSON.parse(response.responseText || ''); }
+              catch {
+                const error = new Error('115删除响应无法解析，结果暂时无法确认，请先核对回收站');
+                error.outcomeUnknown = true;
+                finish(error);
+                return;
+              }
+              if (!(payload && (payload.state === true || payload.state === 1 || payload.state === '1'))) {
+                const code = payload && (payload.code ?? payload.errno ?? payload.errNo);
+                const message = Number(code) === 911
+                  ? '115要求人机验证，请先在115网页完成验证后重试'
+                  : String(payload && (payload.error || payload.msg || payload.message) || '115未确认删除成功');
+                finish(new Error(message));
+                return;
+              }
+              finish(null, payload);
+            },
+            onerror: () => {
+              const error = new Error('115删除请求网络中断，结果暂时无法确认，请先核对回收站，暂勿重复删除');
+              error.outcomeUnknown = true;
+              finish(error);
+            },
+            ontimeout: () => {
+              const error = new Error('115删除请求超时，结果暂时无法确认，请先核对回收站，暂勿重复删除');
+              error.outcomeUnknown = true;
+              finish(error);
+            },
+            onabort: () => {
+              const error = new Error('115删除请求被中断，结果暂时无法确认，请先核对回收站');
+              error.outcomeUnknown = true;
+              finish(error);
+            }
+          });
+        } catch (error) { finish(error); }
+      });
+    });
+    recycleBinMutationQueue = operation.catch(() => undefined);
+    return operation;
   }
 
   async function resolveAccountId() {
@@ -2341,7 +2478,9 @@
     // 优先使用最新递归索引；若新建的扫描尚未提交可播放视频，则回退到同账号、同目录的旧索引，避免重扫期间播放池短暂变空。
     const scanCandidates = (recursiveScans.length ? recursiveScans.concat(directScans) : directScans).slice(0, 20);
     if (!scanCandidates.length) {
-      throw new Error('当前目录还没有本地索引。请先打开“目录索引管理”；索引一旦保存出视频记录，就能边扫描边播放。');
+      const error = new Error('当前目录还没有本地索引。请先打开“目录索引管理”；索引一旦保存出视频记录，就能边扫描边播放。');
+      error.code = 'N115_INDEX_NOT_FOUND';
+      throw error;
     }
     let scan = scanCandidates[0];
     let sampled = { items: [], total: 0 };
@@ -2712,6 +2851,14 @@
     if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '🔈' : '🔊';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
+    if (cell.deleteButton) {
+      cell.deleteButton.hidden = !cell.item;
+      cell.deleteButton.disabled = !cell.item || Boolean(cell.deleting || cell.deletionUncertain);
+      cell.deleteButton.title = cell.deletionUncertain
+        ? '删除结果待核实，请刷新115页面后检查回收站'
+        : '删除到115回收站（可在回收站尝试还原）';
+      cell.deleteButton.setAttribute('aria-label', cell.deleting ? '正在删除视频' : '删除到115回收站');
+    }
     const dualMainMode = session.layoutMode === 'mainDual';
     const isMainA = session.mainSlotId === cell.slotId;
     const isMainB = dualMainMode && session.secondaryMainSlotId === cell.slotId;
@@ -3169,6 +3316,31 @@
     return cell.index < session.layoutCount && (!session.focusSlotId || session.focusSlotId === cell.slotId);
   }
 
+  function clearDeletedCell(session, cell) {
+    disposeCell(cell);
+    cell.item = null;
+    cell.failed = false;
+    cell.hasPlayed = false;
+    cell.loadStarted = false;
+    cell.userPaused = false;
+    cell.layoutPaused = false;
+    cell.locked = false;
+    cell.deleting = false;
+    cell.deletionUncertain = false;
+    cell.retryCount = 0;
+    cell.authBlocked = false;
+    cell.aspectRatio = DEFAULT_ASPECT_RATIO;
+    cell.name.textContent = '空窗口';
+    cell.name.title = '';
+    cell.quality.textContent = '';
+    cell.video.removeAttribute('src');
+    cell.video.load();
+    setStatus(cell, '视频已移入115回收站；本轮暂无可替换视频');
+    updateCellControls(session, cell);
+    applyLayoutPositions(session);
+    updateRoundControls(session);
+  }
+
   function replaceCell(session, cell, item) {
     if (session.closed || session.authBlocked || !item) return false;
     disposeCell(cell);
@@ -3485,6 +3657,82 @@
     } catch (error) {
       setFilterMessage(session, '保存排除状态失败：' + String(error?.message || error), true);
     }
+  }
+
+  async function deleteCellVideo(session, cell) {
+    if (session.closed || !cell.item || cell.deleting || cell.deletionUncertain || cell.item.isVideo !== true) return;
+    const item = Object.assign({}, cell.item);
+    const key = itemKey(item);
+    if (!key || !/^\d+$/.test(String(item.id || ''))) {
+      setStatus(cell, '缺少有效的视频文件ID，已阻止删除');
+      return;
+    }
+    const confirmed = window.confirm(
+      '确定将以下视频删除到115回收站吗？\n\n' + String(item.name || '未命名视频') +
+      '\n\n删除后会进入115回收站，可在回收站尝试还原；本操作不是永久删除。'
+    );
+    if (!confirmed) return;
+
+    cell.deleting = true;
+    cell.deleteButton.disabled = true;
+    cell.deleteButton.textContent = '…';
+    setStatus(cell, '正在将视频移入115回收站…');
+    updateCellControls(session, cell);
+    try {
+      await enqueueRecycleBinDelete(item, session.accountId);
+    } catch (error) {
+      if (session.closed) return;
+      cell.deleting = false;
+      cell.deletionUncertain = error && error.outcomeUnknown === true;
+      cell.deleteButton.textContent = '🗑';
+      updateCellControls(session, cell);
+      setStatus(cell, cell.deletionUncertain
+        ? String(error.message || error) + '。为避免重复操作，此窗口的删除按钮已暂时禁用'
+        : '删除失败：' + String(error.message || error) + '。视频仍保留在当前窗口');
+      session.roundMessage = cell.deletionUncertain
+        ? '有一个删除操作结果待核实，请先检查115回收站'
+        : '视频删除失败，原视频仍保留';
+      updateRoundControls(session);
+      return;
+    }
+
+    session.availableItems = session.availableItems.filter(candidate => itemKey(candidate) !== key);
+    session.preferenceState.favoritePickcodes.delete(key);
+    session.preferenceState.excludedPickcodes.delete(key);
+    session.candidateTotal = Math.max(0, Number(session.candidateTotal || 0) - 1);
+    const cleanupWarnings = [];
+    try {
+      const removedRecords = await indexStore.deleteVideoRecords(session.accountId, item.id);
+      if (removedRecords > 0 && session.scan && session.scan.stats) {
+        for (const keyName of ['videos', 'files', 'recordsStored']) {
+          session.scan.stats[keyName] = Math.max(0, Number(session.scan.stats[keyName] || 0) - 1);
+        }
+        session.scan.updatedAt = Date.now();
+      } else if (removedRecords === 0) {
+        cleanupWarnings.push('未找到对应的本地索引记录');
+      }
+    } catch (error) {
+      cleanupWarnings.push('本地索引清理失败：' + String(error.message || error));
+    }
+    try {
+      await preferenceStore.setVideoPreference(session.accountId, key, { favorite: false, excluded: false });
+    } catch (error) {
+      cleanupWarnings.push('本地收藏/排除状态清理失败：' + String(error.message || error));
+    }
+    if (session.closed) return;
+
+    cell.deleting = false;
+    cell.deletionUncertain = false;
+    cell.deleteButton.textContent = '🗑';
+    cell.locked = false;
+    if (session.audioSourceIndex === cell.index) applyAudioSource(session, -1);
+    const nextItem = collectNextItem(session);
+    if (nextItem) replaceCell(session, cell, nextItem);
+    else clearDeletedCell(session, cell);
+    session.roundMessage = cleanupWarnings.length
+      ? '已移入115回收站，但' + cleanupWarnings.join('；') + '。建议重新扫描该目录'
+      : '已移入115回收站，并已同步清理本地索引：' + String(item.name || '视频');
+    updateRoundControls(session);
   }
 
   async function clearAllExclusions(session) {
@@ -4375,10 +4623,10 @@
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
       mainActions, mainButton, mainMenu, mainMenuAButton, mainMenuBButton, mainScreenBadge,
-      mainMenuOpen: false, progressBar, progressFill,
+      mainMenuOpen: false, progressBar, progressFill, deleteButton: null,
       hls: null, timer: null, abort: null, generation: 0, clickTimer: null,
       failed: false, hasPlayed: false, loadStarted: false,
-      userPaused: false, layoutPaused: false, locked: false,
+      userPaused: false, layoutPaused: false, locked: false, deleting: false, deletionUncertain: false,
       aspectRatio: DEFAULT_ASPECT_RATIO, retryCount: 0, authBlocked: false
     };
 
@@ -4444,6 +4692,9 @@
     });
     cell.favoriteButton = makeTool('cell-favorite', '☆', () => { void toggleFavorite(session, cell); });
     cell.excludeButton = makeTool('cell-exclude', '🚫', () => { void toggleExcluded(session, cell); });
+    cell.deleteButton = makeTool('cell-delete', '🗑', () => { void deleteCellVideo(session, cell); });
+    cell.deleteButton.title = '删除到115回收站（可在回收站尝试还原）';
+    cell.deleteButton.setAttribute('aria-label', '删除到115回收站');
 
     const handleMainAction = (event, target) => {
       event.preventDefault();
@@ -5484,7 +5735,7 @@
     session.abort.abort();
     session.cells.forEach(cell => { if (cell) disposeCell(cell); });
     session.panel.remove();
-    globalThis.N115IndexManagerUI?.setLauncherVisible?.(true);
+    globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
     shadow.removeEventListener('keydown', session.onKey, true);
     launcher.focus();
   }
@@ -5670,10 +5921,11 @@
       bar.setAttribute('role', 'toolbar');
       bar.setAttribute('aria-label', '多画面播放控制');
 
-      const indexManagerButton = element('button', '', '📁 更换文件夹');
+      const indexManagerButton = element('button', '', '📁 目录索引管理');
       indexManagerButton.id = 'btnRefolder';
       indexManagerButton.type = 'button';
-      indexManagerButton.title = '返回目录索引管理，重新选择或扫描目录';
+      indexManagerButton.setAttribute('aria-label', '目录索引管理');
+      indexManagerButton.title = '打开目录索引管理，扫描当前目录或继续未完成的索引';
       indexManagerButton.onclick = () => {
         closePlayer();
         globalThis.N115IndexManagerUI?.open?.(launcher);
@@ -5908,7 +6160,17 @@
       panel.focus({ preventScroll: true });
       // 默认隐藏顶部工具栏；只有顶部触发区、工具栏悬停、触屏点击或键盘焦点才唤出。
     } catch (error) {
-      alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
+      if (error && error.code === 'N115_INDEX_NOT_FOUND') {
+        const openIndexManager = window.confirm(
+          '当前目录还没有建立目录索引。\n\n建议先进行一次目录扫描；索引会保存在本地，扫描过程中已保存的视频即可用于播放，不需要等待全部扫描完成。\n\n是否现在打开“目录索引管理”？'
+        );
+        if (openIndexManager) {
+          if (typeof globalThis.N115IndexManagerUI?.open === 'function') globalThis.N115IndexManagerUI.open(launcher);
+          else alert('目录索引管理模块暂不可用，请刷新115页面后重试。');
+        }
+      } else {
+        alert('无法从115目录索引启动多画面播放：\n' + String(error && error.message || error));
+      }
     } finally {
       opening = false;
       launcher.disabled = false;
@@ -5985,6 +6247,8 @@
     .hud .controls{gap:5px;padding:8px 6px;flex-wrap:wrap}
     .hbtn{padding:6px 8px;font-size:12px}
     .hbtn.is-on{background:rgba(232,182,75,.9);color:#111;border-color:#e8b64b}
+    .hbtn.cell-delete{background:rgba(112,32,39,.78);border-color:rgba(229,105,116,.5)}
+    .hbtn.cell-delete:hover{background:#a93c49;border-color:#f18b95;color:#fff}
     .hbtn:disabled{opacity:.4;cursor:not-allowed}
     .hbtn:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
     .hud .bar{height:16px;padding:7px 0;background:transparent;cursor:pointer;position:relative;touch-action:none}
@@ -6087,12 +6351,14 @@
       .cell.is-selected .main-screen-actions{opacity:1;visibility:visible;pointer-events:auto}
     }
   `;
-  const launcher = element('button', 'launcher', '多画面播放（索引版）');
+  const launcher = element('button', 'launcher', '多画面播放');
   launcher.type = 'button';
-  launcher.title = '打开多宫格播放器；首次使用请先通过目录索引管理扫描当前目录';
+  launcher.setAttribute('aria-label', '多画面播放');
+  launcher.title = '打开多宫格播放器；首次使用时会提示建立目录索引';
   launcher.onclick = () => { void openPlayer(); };
   shadow.append(style, launcher);
   document.documentElement.append(host);
+  globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
   const handleFullscreenChange = () => {
     const session = active;
     if (!session || !session.focusSlotId) return;
