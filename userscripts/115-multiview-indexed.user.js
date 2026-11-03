@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.10.1
-// @description  115目录索引与多宫格播放一体化，支持收藏快捷入口、状态反馈、智能画幅与回收站删除。
+// @version      0.10.2
+// @description  115目录索引与多宫格播放一体化，支持收藏管理、智能画幅、回收站删除及一键退出。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1725,7 +1725,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.10.1';
+  const VERSION = '0.10.2';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2128,7 +2128,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.10.1';
+  const VERSION = '0.10.2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5818,7 +5818,7 @@
         layoutResizeObserver: null, layoutResizeHandler: null, layoutReflowTimer: null, layoutReflowFrame: 0,
         bar, toolbarHideTimer: null, lastPointerType: 'programmatic', layoutPickerOpen: false, layoutPickerMenu: null, layoutPickerButton: null,
         toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
-        toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
+        toolsButton: null, toolsTabButtons: {}, activeToolTab: null, exitButton: null,
         mainSlotId: null, secondaryMainSlotId: null, focusSlotId: null, selectedSlotId: 'slot-1',
         layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, aspectModeSelect: null, endModeSelect: null,
         audioSourceSelect: null, pauseAllButton: null, indexManagerButton: null, layoutPickerMenu: null, layoutPickerButton: null,
@@ -6147,6 +6147,15 @@
       session.favoriteToast.hidden = true;
       session.favoriteToast.setAttribute('role', 'status');
       session.favoriteToast.setAttribute('aria-live', 'polite');
+      session.exitButton = element('button', 'player-exit-button', '✕ 退出');
+      session.exitButton.type = 'button';
+      session.exitButton.title = '退出多画面播放器，返回115网盘（Esc也可退出）';
+      session.exitButton.setAttribute('aria-label', '退出多画面播放器，返回115网盘');
+      session.exitButton.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        closePlayer();
+      };
       session.description = element('div', 'description');
       session.description.hidden = true;
       session.description.title = fullIndexSummary;
@@ -6160,7 +6169,7 @@
         session.toolsButton, session.favoritesButton, session.newRoundButton, session.audioSourceSelect,
         session.endModeSelect, session.aspectModeSelect, session.layoutPickerButton,
         session.infoText, session.versionBadge);
-      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description, session.favoriteToast);
+      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description, session.favoriteToast, session.exitButton);
       shadow.append(panel);
       panel.addEventListener('click', event => {
         if (!session.layoutPickerOpen || layoutPickerMenu.contains(event.target) || session.layoutPickerButton?.contains(event.target)) return;
@@ -6329,6 +6338,9 @@
     .favorite-feedback-toast{position:absolute;top:54px;left:50%;z-index:120;max-width:90%;padding:8px 13px;border:1px solid rgba(232,182,75,.65);border-radius:999px;background:rgba(24,28,39,.96);color:#ffe8a3;font-size:12px;font-weight:800;line-height:1.35;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 6px 22px rgba(0,0,0,.42);pointer-events:none}
     .favorite-feedback-toast.is-error{border-color:rgba(241,125,125,.72);background:rgba(65,25,31,.96);color:#ffd0d0}
     .favorite-feedback-toast[hidden]{display:none!important}
+    .player-exit-button{position:absolute;top:52px;right:14px;z-index:130;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:34px;padding:7px 12px;border:1px solid rgba(255,128,128,.62);border-radius:9px;background:rgba(75,24,31,.92);color:#ffe5e5;font-family:inherit;font-size:12px;font-weight:800;letter-spacing:.2px;cursor:pointer;box-shadow:0 5px 18px rgba(0,0,0,.38);backdrop-filter:blur(8px);transition:background .14s,border-color .14s,transform .14s}
+    .player-exit-button:hover{background:rgba(153,43,54,.96);border-color:#ff9c9c;color:#fff;transform:translateY(-1px)}
+    .player-exit-button:focus-visible{outline:2px solid #ffb0b0;outline-offset:3px}
     .tools-drawer-layer{position:absolute;inset:0;z-index:80;pointer-events:none}
     .tools-drawer-layer[hidden]{display:none!important}
     .tools-drawer-backdrop{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;background:#02050a99;pointer-events:auto;cursor:default}
@@ -6397,6 +6409,7 @@
       .main-screen-actions{top:6px;right:6px;gap:3px}
       .main-screen-action{padding:5px 7px;font-size:10px}
       .tools-drawer{width:min(380px,96vw)}
+      .player-exit-button{top:50px;right:8px;min-height:32px;padding:6px 9px;font-size:11px}
     }
     @media(hover:none){
       .cell-tools{opacity:1;visibility:visible}

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.10.1
-// @description  115目录索引与多宫格播放一体化，支持收藏快捷入口、状态反馈、智能画幅与回收站删除。
+// @version      0.10.2
+// @description  115目录索引与多宫格播放一体化，支持收藏管理、智能画幅、回收站删除及一键退出。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
