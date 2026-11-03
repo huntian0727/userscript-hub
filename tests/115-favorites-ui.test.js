@@ -95,3 +95,10 @@ test('same-folder action is hidden on empty cells and stays scoped to the exact 
   assert.match(s, /scans\.filter\(scan => String\(scan\.rootCid\) === folderId\)/);
   assert.match(s, /Promise\.resolve\(listener\(page\)\)\.catch/);
 });
+
+
+test('same-folder playback automatically advances when a requested next item arrives during scanning', () => {
+  assert.match(s, /state\.waitingForNext = true/);
+  assert.match(s, /\(!state\.firstPlaybackStarted \|\| state\.waitingForNext\) && state\.availableItems\.length/);
+  assert.match(s, /state\.waitingForNext = false/);
+});

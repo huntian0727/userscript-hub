@@ -3607,10 +3607,11 @@
     if (additions.length) state.availableItems.push(...shuffleItems(additions));
     state.totalIndexed = Math.max(state.totalIndexed, sampled.total);
     state.scanId = scanId;
-    if (!state.firstPlaybackStarted && state.availableItems.length) {
+    if ((!state.firstPlaybackStarted || state.waitingForNext) && state.availableItems.length) {
       const next = takeSameFolderItem(cell, state);
       if (next) {
         state.firstPlaybackStarted = true;
+        state.waitingForNext = false;
         replaceCell(session, cell, next);
         setStatus(cell, '已进入同目录随机播放 · ' + state.folderPath);
       }
@@ -3641,7 +3642,8 @@
       return true;
     }
     if (state.scanning) {
-      setStatus(cell, '正在索引当前目录，发现下一个视频后自动加入候选…');
+      state.waitingForNext = true;
+      setStatus(cell, '正在索引当前目录，发现下一个视频后自动播放…');
       return true;
     }
     setStatus(cell, '当前目录本轮没有更多未播放视频');
@@ -3666,7 +3668,7 @@
     const state = {
       active: true, folderId,
       folderPath: String(cell.item.path || '').split('/').slice(0, -1).join('/') || ('目录 ' + folderId),
-      scanId: null, scanning: false, scanFinished: false, firstPlaybackStarted: false,
+      scanId: null, scanning: false, scanFinished: false, firstPlaybackStarted: false, waitingForNext: false,
       totalIndexed: 0, availableItems: [], knownPickcodes: new Set([itemKey(cell.item)]),
       playedPickcodes: new Set([itemKey(cell.item)]), token: 1
     };
