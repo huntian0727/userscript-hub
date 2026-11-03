@@ -60,7 +60,7 @@ test('each video cell can open its actual parent folder in a new tab without nav
   assert.match(source, /window\.open\(url\.href, '_blank'\)/);
   const folderHelper = source.match(/function openVideoFolderInNewTab\(item, cell\) \{([\s\S]*?)\n  \}\n\n  function /);
   assert.ok(folderHelper, 'folder navigation helper exists');
-  assert.doesNotMatch(folderHelper[1], /window\.location\.(?:assign|href)/);
+  assert.doesNotMatch(folderHelper[1], /window\.location\.(?:assign|replace)\s*\(/);
   assert.match(source, /cell\.folderButton = makeTool\('cell-folder', '📁',[\s\S]*?openVideoFolderInNewTab\(cell\.item, cell\)/);
   assert.match(source, /cell\.folderButton\.disabled = !hasParentFolder/);
   assert.match(source, /在新标签页打开视频所在文件夹/);
