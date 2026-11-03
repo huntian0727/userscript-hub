@@ -92,6 +92,7 @@ test('single next, all swap and new round stay inside the active shared folder p
   assert.match(source, /if \(session\.sameFolderMode && session\.sameFolderMode\.active\) \{\s*swapSameFolderCell\(session, cell\)/);
   assert.match(source, /if \(session\.sameFolderMode && session\.sameFolderMode\.active\) \{\s*swapAllSameFolderUnlocked\(session\)/);
   assert.match(source, /await startNewSameFolderRound\(session, message\)/);
+  assert.doesNotMatch(source, /cell\.sameFolderState/);
   assert.match(source, /function takeSameFolderItem\(state\)/);
   assert.match(source, /state\.playedPickcodes\.add\(key\)/);
 });

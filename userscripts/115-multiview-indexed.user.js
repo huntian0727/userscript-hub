@@ -3805,6 +3805,12 @@
         session.candidateTotal = 0;
         session.roundPoolSize = 0;
         session.roundMessage = '已退出同目录模式；筛选条件已变化，请开启新一轮刷新全局候选';
+      } else {
+        for (const cell of session.cells) {
+          if (!cell || cell.index >= session.layoutCount || cell.item || cell.locked) continue;
+          const item = collectNextItem(session);
+          if (item) replaceCell(session, cell, item);
+        }
       }
     }
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
@@ -4005,10 +4011,6 @@
     }
     let replaced = 0;
     for (const cell of targets) {
-      if (cell.sameFolderState && cell.sameFolderState.active) {
-        if (swapSameFolderCell(session, cell)) replaced++;
-        continue;
-      }
       const item = collectNextItem(session);
       if (!item) break;
       replaceCell(session, cell, item);
