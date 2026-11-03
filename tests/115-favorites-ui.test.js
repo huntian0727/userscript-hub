@@ -90,15 +90,15 @@ test('v0.12.0 adds per-cell same-folder random playback with first-result auto-p
 
 
 test('same-folder action is hidden on empty cells and stays scoped to the exact parent folder', () => {
-  assert.match(s, /cell\.sameFolderButton\.hidden = !cell\.item/);
-  assert.match(s, /cell\.sameFolderButton\.disabled = !cell\.item \|\| !\//);
-  assert.match(s, /scans\.filter\(scan => String\(scan\.rootCid\) === folderId\)/);
-  assert.match(s, /Promise\.resolve\(listener\(page\)\)\.catch/);
+  assert.match(source, /cell\.sameFolderButton\.hidden = !cell\.item/);
+  assert.match(source, /cell\.sameFolderButton\.disabled = !cell\.item \|\| !\//);
+  assert.match(source, /scans\.filter\(scan => String\(scan\.rootCid\) === folderId\)/);
+  assert.match(source, /Promise\.resolve\(listener\(page\)\)\.catch/);
 });
 
 
 test('same-folder playback automatically advances when a requested next item arrives during scanning', () => {
-  assert.match(s, /state\.waitingForNext = true/);
-  assert.match(s, /\(!state\.firstPlaybackStarted \|\| state\.waitingForNext\) && state\.availableItems\.length/);
-  assert.match(s, /state\.waitingForNext = false/);
+  assert.match(source, /state\.waitingForNext = true/);
+  assert.match(source, /\(!state\.firstPlaybackStarted \|\| state\.waitingForNext\) && state\.availableItems\.length/);
+  assert.match(source, /state\.waitingForNext = false/);
 });
