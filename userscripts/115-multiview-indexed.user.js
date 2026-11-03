@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.11.1
-// @description  115目录索引与多宫格播放一体化，支持后台扫描、视频所在目录快捷打开、收藏管理及智能画幅。
+// @version      0.12.0
+// @description  115目录索引与多宫格播放一体化，支持智能优先扫描、同目录随机连续播放、后台扫描及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -592,6 +592,7 @@
       const folderId = normalizeId(cid, 'cid');
       const signal = config.signal;
       const onProgress = typeof config.onProgress === 'function' ? config.onProgress : null;
+      const onPage = typeof config.onPage === 'function' ? config.onPage : null;
       const fallbackPath = Array.isArray(config.fallbackPath) ? config.fallbackPath : [];
       const records = new Map();
       const files = [];
@@ -625,6 +626,7 @@
 
         if (page === 0) directoryPath = result.pathSegments;
         const data = result.payload.data;
+        const pageRecords = [];
         page += 1;
         rawRecordCount += data.length;
 
@@ -659,11 +661,19 @@
             continue;
           }
           records.set(key, record);
+          pageRecords.push(record);
           if (record.type === 'folder') folders.push(record);
           else files.push(record);
         }
 
         offset += data.length;
+        if (onPage) {
+          await onPage({
+            directoryId: folderId, page, offset, total: expectedCount,
+            pathSegments: directoryPath, records: pageRecords,
+            videosFound: files.filter(file => file.isVideo).length
+          });
+        }
         if (onProgress) {
           onProgress({
             phase: 'directory-page',
@@ -681,6 +691,11 @@
           const delay = Math.max(0, Math.min(1000, Number(config.backgroundYieldMs) || 80));
           await new Promise(resolve => setTimeout(resolve, delay));
           throwIfAborted(signal);
+        }
+        if (typeof config.shouldPause === 'function' && config.shouldPause() && offset < expectedCount) {
+          const error = new Error('扫描已让出执行权，等待优先目录任务');
+          error.code = 'N115_PRIORITY_YIELD';
+          throw error;
         }
 
         if (offset >= expectedCount) break;
@@ -982,6 +997,13 @@
             fallbackPath: current.fallbackPath,
             shouldYield: config.shouldYield,
             backgroundYieldMs: config.backgroundYieldMs,
+            shouldPause: config.shouldPause,
+            onPage: async page => {
+              await store.commitDirectory(scan, page.records);
+              if (typeof config.onDirectoryPage === 'function') {
+                await config.onDirectoryPage(Object.assign({ scanId: scan.scanId }, page));
+              }
+            },
             onProgress: progress => {
               if (onProgress) onProgress(Object.assign({}, progress, {
                 phase: 'directory-page',
@@ -1097,6 +1119,13 @@
         await store.saveScan(scan);
         return scan;
       } catch (error) {
+        if (error && error.code === 'N115_PRIORITY_YIELD') {
+          scan.status = 'paused';
+          scan.pauseReason = '已让出扫描执行权，优先处理指定目录；当前分页索引已保存';
+          scan.updatedAt = now();
+          await store.saveScan(scan);
+          return scan;
+        }
         scan.status = 'paused';
         scan.pauseReason = error && error.name === 'AbortError'
           ? '用户暂停，已完成目录已保存'
@@ -1732,7 +1761,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.11.1';
+  const VERSION = '0.12.0';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -1944,6 +1973,86 @@
   let returnFocus = launcher;
   let backgroundMode = false;
   let latestProgress = null;
+  const priorityQueue = [];
+  const priorityQueuedByKey = new Map();
+  let priorityPumpPromise = null;
+  let activeScanJob = null;
+
+  function scanJobKey(accountId, rootCid) {
+    return String(accountId) + ':' + String(rootCid);
+  }
+
+  function notifyScanPage(job, page) {
+    if (!job || String(page.directoryId) !== String(job.rootCid)) return;
+    for (const listener of job.listeners || []) {
+      try { void listener(page); } catch { /* 单个窗口更新不能中断扫描。 */ }
+    }
+  }
+
+  async function pumpPriorityQueue() {
+    if (controller || priorityPumpPromise) return;
+    priorityPumpPromise = (async () => {
+      while (priorityQueue.length) {
+        const job = priorityQueue.shift();
+        priorityQueuedByKey.delete(job.key);
+        activeScanJob = job;
+        activeScanJob.priority = true;
+        try {
+          const latest = await indexStore.getLatest(job.accountId, job.rootCid, false);
+          if (latest && latest.status === 'complete' && latest.complete === true) {
+            for (const resolve of job.resolvers) resolve(latest);
+            continue;
+          }
+          const scan = await indexManager.scan({
+            accountId: job.accountId,
+            rootCid: job.rootCid,
+            recursive: false,
+            restart: Boolean(latest && ['complete', 'incomplete'].includes(latest.status)),
+            maxFilesPerBatch: 50000,
+            maxDirectoriesPerBatch: 2000,
+            maxDepth: 0,
+            onDirectoryPage: page => notifyScanPage(job, page)
+          });
+          for (const resolve of job.resolvers) resolve(scan);
+        } catch (error) {
+          for (const reject of job.rejecters) reject(error);
+        } finally {
+          activeScanJob = null;
+        }
+      }
+    })().finally(() => {
+      priorityPumpPromise = null;
+      if (priorityQueue.length && !controller) void pumpPriorityQueue();
+    });
+    return priorityPumpPromise;
+  }
+
+  function requestPriorityScan(config = {}) {
+    const accountId = String(config.accountId || '').trim();
+    const rootCid = String(config.rootCid || '').trim();
+    if (!accountId || !/^\\d+$/.test(rootCid)) {
+      return Promise.reject(new Error('优先扫描需要有效的115账号和目录ID'));
+    }
+    const key = scanJobKey(accountId, rootCid);
+    return new Promise((resolve, reject) => {
+      if (activeScanJob && activeScanJob.priority && activeScanJob.key === key) {
+        if (typeof config.onPage === 'function') activeScanJob.listeners.push(config.onPage);
+        activeScanJob.resolvers.push(resolve);
+        activeScanJob.rejecters.push(reject);
+        return;
+      }
+      let job = priorityQueuedByKey.get(key);
+      if (!job) {
+        job = { key, accountId, rootCid, listeners: [], resolvers: [], rejecters: [] };
+        priorityQueuedByKey.set(key, job);
+        priorityQueue.push(job);
+      }
+      if (typeof config.onPage === 'function') job.listeners.push(config.onPage);
+      job.resolvers.push(resolve);
+      job.rejecters.push(reject);
+      if (!controller) void pumpPriorityQueue();
+    });
+  }
 
   function updateBackgroundBadge() {
     if (!backgroundMode || !controller) {
@@ -2055,6 +2164,10 @@
       accountId = await resolveAccountId(activeController.signal);
       const latest = await indexStore.getLatest(accountId, cid, recursive.checked);
       const restart = Boolean(latest && ['complete', 'incomplete'].includes(latest.status));
+      activeScanJob = {
+        key: scanJobKey(accountId, cid), accountId, rootCid: cid,
+        recursive: recursive.checked, priority: false, listeners: [], resolvers: [], rejecters: []
+      };
       setStatus('正在连接115目录接口…', 0);
       const scan = await indexManager.scan({
         accountId,
@@ -2067,6 +2180,8 @@
         maxDepth: 20,
         shouldYield: () => backgroundMode,
         backgroundYieldMs: 80,
+        shouldPause: () => priorityQueue.length > 0,
+        onDirectoryPage: page => notifyScanPage(activeScanJob, page),
         onProgress: progress => {
           if (controller !== activeController || activeController.signal.aborted) return;
           latestProgress = progress;
@@ -2125,10 +2240,12 @@
         backgroundMode = false;
         taskBadge.hidden = true;
       }
+      activeScanJob = null;
       start.disabled = false;
       cancel.disabled = true;
       backgroundButton.disabled = true;
       recursive.disabled = false;
+      if (priorityQueue.length) void pumpPriorityQueue();
     }
   }
   function openPanel(opener) {
@@ -2180,7 +2297,8 @@
     open: openPanel,
     close: closePanel,
     isOpen: () => !overlay.hidden,
-    setLauncherVisible
+    setLauncherVisible,
+    requestPriorityScan
   });
 
 })();
@@ -2189,7 +2307,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.11.1';
+  const VERSION = '0.12.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2912,6 +3030,13 @@
     if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '🔈' : '🔊';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
+    if (cell.sameFolderButton) {
+      const enabled = Boolean(cell.sameFolderState && cell.sameFolderState.active);
+      cell.sameFolderButton.textContent = enabled ? '📂✓' : '📂';
+      cell.sameFolderButton.title = enabled ? '已开启同目录随机，点击退出' : '只从当前视频所在文件夹随机播放';
+      cell.sameFolderButton.setAttribute('aria-pressed', String(enabled));
+      cell.sameFolderButton.disabled = !cell.item || !/^\\d+$/.test(String(cell.item.parentId || ''));
+    }
     if (cell.folderButton) {
       const hasParentFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId ?? '')));
       cell.folderButton.hidden = !cell.item;
@@ -2976,7 +3101,11 @@
     }
     if (cell.nextButton) {
       cell.nextButton.textContent = '⏭ 下一个';
-      cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked || !session.availableItems.length;
+      const localMode = Boolean(cell.sameFolderState && cell.sameFolderState.active);
+      const localHasNext = localMode && cell.sameFolderState.availableItems.length > 0;
+      const localScanning = localMode && cell.sameFolderState.scanning;
+      cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked ||
+        (localMode ? !localHasNext && !localScanning : !session.availableItems.length);
     }
     if (cell.lockIndicator) cell.lockIndicator.hidden = !cell.locked;
     if (cell.favoriteIndicator) cell.favoriteIndicator.hidden = !favorite;
@@ -3402,6 +3531,7 @@
   function clearDeletedCell(session, cell) {
     disposeCell(cell);
     cell.item = null;
+    cell.sameFolderState = null;
     cell.failed = false;
     cell.hasPlayed = false;
     cell.loadStarted = false;
@@ -3454,7 +3584,155 @@
     return true;
   }
 
+  async function appendSameFolderCandidates(session, cell, state, scanId) {
+    if (session.closed || cell.sameFolderState !== state || !scanId) return 0;
+    const excluded = new Set(state.knownPickcodes);
+    const currentKey = itemKey(cell.item);
+    if (currentKey) excluded.add(currentKey);
+    const predicate = createPlayablePredicate(excluded, session.filters, session.preferenceState);
+    const sampled = await indexStore.sampleVideos(scanId, MAX_CANDIDATES, record =>
+      String(record && record.parentId || '') === state.folderId && predicate(record)
+    );
+    if (session.closed || cell.sameFolderState !== state) return 0;
+    const additions = [];
+    for (const item of sampled.items) {
+      const key = itemKey(item);
+      if (!key || state.knownPickcodes.has(key)) continue;
+      state.knownPickcodes.add(key);
+      additions.push(item);
+    }
+    if (additions.length) state.availableItems.push(...shuffleItems(additions));
+    state.totalIndexed = Math.max(state.totalIndexed, sampled.total);
+    state.scanId = scanId;
+    if (!state.firstPlaybackStarted && state.availableItems.length) {
+      const next = takeSameFolderItem(cell, state);
+      if (next) {
+        state.firstPlaybackStarted = true;
+        replaceCell(session, cell, next);
+        setStatus(cell, '已进入同目录随机播放 · ' + state.folderPath);
+      }
+    } else if (state.availableItems.length) {
+      setStatus(cell, '同目录候选已更新 · 剩余 ' + state.availableItems.length + ' 个');
+    }
+    return additions.length;
+  }
+
+  function takeSameFolderItem(cell, state) {
+    while (state.availableItems.length) {
+      const item = state.availableItems.shift();
+      const key = itemKey(item);
+      if (!key || key === itemKey(cell.item) || state.playedPickcodes.has(key)) continue;
+      state.playedPickcodes.add(key);
+      return item;
+    }
+    return null;
+  }
+
+  function swapSameFolderCell(session, cell) {
+    const state = cell.sameFolderState;
+    if (!state || !state.active || cell.locked) return false;
+    const next = takeSameFolderItem(cell, state);
+    if (next) {
+      replaceCell(session, cell, next);
+      setStatus(cell, '同目录随机播放 · ' + state.folderPath);
+      return true;
+    }
+    if (state.scanning) {
+      setStatus(cell, '正在索引当前目录，发现下一个视频后自动加入候选…');
+      return true;
+    }
+    setStatus(cell, '当前目录本轮没有更多未播放视频');
+    return false;
+  }
+
+  async function startSameFolderPlayback(session, cell) {
+    if (session.closed || !cell.item || session.authBlocked) return;
+    if (cell.sameFolderState && cell.sameFolderState.active) {
+      cell.sameFolderState.active = false;
+      cell.sameFolderState.token++;
+      cell.sameFolderState = null;
+      updateCellControls(session, cell);
+      setStatus(cell, '已退出同目录随机，恢复全局随机候选');
+      return;
+    }
+    const folderId = String(cell.item.parentId || '').trim();
+    if (!/^\\d+$/.test(folderId)) {
+      setStatus(cell, '无法识别当前视频所在目录');
+      return;
+    }
+    const state = {
+      active: true, folderId,
+      folderPath: String(cell.item.path || '').split('/').slice(0, -1).join('/') || ('目录 ' + folderId),
+      scanId: null, scanning: false, scanFinished: false, firstPlaybackStarted: false,
+      totalIndexed: 0, availableItems: [], knownPickcodes: new Set([itemKey(cell.item)]),
+      playedPickcodes: new Set([itemKey(cell.item)]), token: 1
+    };
+    cell.sameFolderState = state;
+    updateCellControls(session, cell);
+    setStatus(cell, '正在检查当前目录索引…');
+    try {
+      const scans = await indexStore.listScans(session.accountId);
+      if (session.closed || cell.sameFolderState !== state) return;
+      const candidates = scans.filter(scan => String(scan.rootCid) === folderId && scan.recursive !== true)
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+      const latest = candidates[0] || null;
+      if (latest) {
+        state.scanId = latest.scanId;
+        await appendSameFolderCandidates(session, cell, state, latest.scanId);
+      }
+      if (session.closed || cell.sameFolderState !== state) return;
+      const needsScan = !latest || latest.status !== 'complete' || latest.complete !== true;
+      if (!needsScan) {
+        state.scanFinished = true;
+        setStatus(cell, state.firstPlaybackStarted
+          ? '同目录随机播放 · 索引完整'
+          : '当前目录没有其他可播放视频');
+        return;
+      }
+      state.scanning = true;
+      setStatus(cell, state.firstPlaybackStarted
+        ? '正在后台补全当前目录索引…'
+        : '正在优先索引当前目录，发现首个可播放视频后自动开始播放…');
+      const ui = globalThis.N115IndexManagerUI;
+      if (!ui || typeof ui.requestPriorityScan !== 'function') {
+        throw new Error('当前页面的目录索引调度器不可用，请刷新115页面后重试');
+      }
+      const token = state.token;
+      const scan = await ui.requestPriorityScan({
+        accountId: session.accountId,
+        rootCid: folderId,
+        onPage: async page => {
+          if (session.closed || cell.sameFolderState !== state || state.token !== token) return;
+          await appendSameFolderCandidates(session, cell, state, page.scanId);
+        }
+      });
+      if (session.closed || cell.sameFolderState !== state || state.token !== token) return;
+      state.scanning = false;
+      state.scanFinished = true;
+      state.scanId = scan.scanId;
+      if (!state.firstPlaybackStarted) {
+        await appendSameFolderCandidates(session, cell, state, scan.scanId);
+        if (!state.firstPlaybackStarted && !state.availableItems.length) {
+          setStatus(cell, '当前目录索引完成，但没有其他可播放视频');
+        }
+      } else {
+        setStatus(cell, '同目录索引已补全 · 候选 ' + state.totalIndexed + ' 个');
+      }
+    } catch (error) {
+      if (!session.closed && cell.sameFolderState === state) {
+        state.scanning = false;
+        setStatus(cell, '同目录索引失败：' + String(error && error.message || error).slice(0, 100));
+      }
+    } finally {
+      if (cell.sameFolderState === state) updateCellControls(session, cell);
+    }
+  }
+
   function swapCell(session, cell) {
+    if (cell.sameFolderState && cell.sameFolderState.active) {
+      swapSameFolderCell(session, cell);
+      return;
+    }
     if (session.closed || session.roundRefreshing) return;
     if (session.authBlocked) {
       session.roundMessage = '115验证或登录尚未恢复，请处理后点击“验证后继续取流”';
@@ -3497,6 +3775,10 @@
     }
     let replaced = 0;
     for (const cell of targets) {
+      if (cell.sameFolderState && cell.sameFolderState.active) {
+        if (swapSameFolderCell(session, cell)) replaced++;
+        continue;
+      }
       const item = collectNextItem(session);
       if (!item) break;
       replaceCell(session, cell, item);
@@ -4742,7 +5024,7 @@
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
       mainActions, mainButton, mainMenu, mainMenuAButton, mainMenuBButton, mainScreenBadge,
-      mainMenuOpen: false, progressBar, progressFill, deleteButton: null,
+      mainMenuOpen: false, progressBar, progressFill, deleteButton: null, sameFolderState: null,
       hls: null, timer: null, abort: null, generation: 0, clickTimer: null,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false, deleting: false, deletionUncertain: false,
@@ -4813,6 +5095,9 @@
     cell.folderButton = makeTool('cell-folder', '📁', () => openVideoFolderInNewTab(cell.item, cell));
     cell.folderButton.title = '在新标签页打开视频所在文件夹';
     cell.folderButton.setAttribute('aria-label', '在新标签页打开视频所在文件夹');
+    cell.sameFolderButton = makeTool('cell-same-folder', '📂', () => { void startSameFolderPlayback(session, cell); });
+    cell.sameFolderButton.title = '只从当前视频所在文件夹随机播放';
+    cell.sameFolderButton.setAttribute('aria-label', '同目录随机播放');
     cell.excludeButton = makeTool('cell-exclude', '🚫', () => { void toggleExcluded(session, cell); });
     cell.deleteButton = makeTool('cell-delete', '🗑', () => { void deleteCellVideo(session, cell); });
     cell.deleteButton.title = '删除到115回收站（可在回收站尝试还原）';
