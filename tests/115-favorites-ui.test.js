@@ -13,8 +13,8 @@ const source = fs.readFileSync(
 
 test('115 multiview v0.11.0 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+0\.10\.2$/m);
-  assert.equal((source.match(/const VERSION = '0\.10\.2';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+0\.11\.0$/m);
+  assert.equal((source.match(/const VERSION = '0\.11\.0';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
