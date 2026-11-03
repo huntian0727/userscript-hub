@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.11.0
-// @description  115目录索引与多宫格播放一体化，支持后台扫描、收藏管理、智能画幅及一键退出。
+// @version      0.11.1
+// @description  115目录索引与多宫格播放一体化，支持后台扫描、视频所在目录快捷打开、收藏管理及智能画幅。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1732,7 +1732,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.11.0';
+  const VERSION = '0.11.1';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2189,7 +2189,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.11.0';
+  const VERSION = '0.11.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2912,6 +2912,13 @@
     if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '🔈' : '🔊';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
+    if (cell.folderButton) {
+      const hasParentFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId ?? '')));
+      cell.folderButton.hidden = !cell.item;
+      cell.folderButton.disabled = !hasParentFolder;
+      cell.folderButton.title = hasParentFolder ? '在新标签页打开视频所在文件夹' : '视频所在文件夹信息不可用';
+      cell.folderButton.setAttribute('aria-label', '在新标签页打开视频所在文件夹');
+    }
     if (cell.deleteButton) {
       cell.deleteButton.hidden = !cell.item;
       cell.deleteButton.disabled = !cell.item || Boolean(cell.deleting || cell.deletionUncertain);
@@ -4255,6 +4262,23 @@
     window.location.assign(url.href);
   }
 
+  function openVideoFolderInNewTab(item, cell) {
+    const parentId = String(item && item.parentId != null ? item.parentId : '').trim();
+    if (!/^\d+$/.test(parentId)) {
+      if (cell) setStatus(cell, '无法定位视频所在文件夹：目录 ID 不可用');
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set('cid', parentId);
+    if (!url.searchParams.has('mode')) url.searchParams.set('mode', 'wangpan');
+    const opened = window.open(url.href, '_blank');
+    if (opened) {
+      try { opened.opener = null; } catch (_) {}
+    } else if (cell) {
+      setStatus(cell, '浏览器阻止了新标签页，请允许打开115新页面');
+    }
+  }
+
   function renderRecentPanelContents(session, list) {
     if (!list) return;
     list.replaceChildren();
@@ -4786,6 +4810,9 @@
       updateRoundControls(session);
     });
     cell.favoriteButton = makeTool('cell-favorite', '☆', () => { void toggleFavorite(session, cell); });
+    cell.folderButton = makeTool('cell-folder', '📁', () => openVideoFolderInNewTab(cell.item, cell));
+    cell.folderButton.title = '在新标签页打开视频所在文件夹';
+    cell.folderButton.setAttribute('aria-label', '在新标签页打开视频所在文件夹');
     cell.excludeButton = makeTool('cell-exclude', '🚫', () => { void toggleExcluded(session, cell); });
     cell.deleteButton = makeTool('cell-delete', '🗑', () => { void deleteCellVideo(session, cell); });
     cell.deleteButton.title = '删除到115回收站（可在回收站尝试还原）';

@@ -11,7 +11,7 @@ const source = fs.readFileSync(
   'utf8'
 );
 
-test('115 multiview v0.11.0 userscript parses and exposes clear favorite controls', () => {
+test('115 multiview v0.11.1 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
   assert.match(source, /^\/\/\s*@version\s+0\.11\.0$/m);
   assert.equal((source.match(/const VERSION = '0\.11\.0';/g) || []).length, 2);
@@ -50,4 +50,16 @@ test('index scan can continue in background with a persistent reopen indicator',
   assert.match(source, /shouldYield: \(\) => backgroundMode/);
   assert.match(source, /backgroundYieldMs: 80/);
   assert.match(source, /window\.addEventListener\('pagehide',[\s\S]*?if \(controller\) controller\.abort\(\)/);
+});
+
+
+test('each video cell can open its actual parent folder in a new tab without navigating the player', () => {
+  assert.match(source, /function openVideoFolderInNewTab\(item, cell\)/);
+  assert.match(source, /const parentId = String\(item && item\.parentId != null \? item\.parentId : ''\)\.trim\(\)/);
+  assert.match(source, /url\.searchParams\.set\('cid', parentId\)/);
+  assert.match(source, /window\.open\(url\.href, '_blank'\)/);
+  assert.doesNotMatch(source, /function openVideoFolderInNewTab\(item, cell\)[\s\S]*?window\.location\.(?:assign|href)/);
+  assert.match(source, /cell\.folderButton = makeTool\('cell-folder', '📁',[\s\S]*?openVideoFolderInNewTab\(cell\.item, cell\)/);
+  assert.match(source, /cell\.folderButton\.disabled = !hasParentFolder/);
+  assert.match(source, /在新标签页打开视频所在文件夹/);
 });
