@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.0
-// @description  115目录索引与多宫格播放一体化，支持智能优先扫描、同目录随机连续播放、后台扫描及收藏管理。
+// @version      0.12.1
+// @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.12.0';
+  const VERSION = '0.12.1';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -1983,12 +1983,12 @@
     return String(accountId) + ':' + String(rootCid);
   }
 
-  function notifyScanPage(job, page) {
+  async function notifyScanPage(job, page) {
     if (!job || String(page.directoryId) !== String(job.rootCid)) return;
-    for (const listener of job.listeners || []) {
-      try { Promise.resolve(listener(page)).catch(() => undefined); }
+    await Promise.all((job.listeners || []).map(async listener => {
+      try { await listener(page); }
       catch { /* 单个窗口更新不能中断扫描。 */ }
-    }
+    }));
   }
 
   async function pumpPriorityQueue() {
@@ -2309,7 +2309,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.12.0';
+  const VERSION = '0.12.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3033,12 +3033,16 @@
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
     if (cell.sameFolderButton) {
-      const enabled = Boolean(cell.sameFolderState && cell.sameFolderState.active);
+      const mode = session.sameFolderMode;
+      const enabled = Boolean(mode && mode.active);
+      const hasFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId || '')));
       cell.sameFolderButton.textContent = enabled ? '📂✓' : '📂';
-      cell.sameFolderButton.title = enabled ? '已开启同目录随机，点击退出' : '只从当前视频所在文件夹随机播放';
+      cell.sameFolderButton.title = enabled
+        ? '整页已切换到：' + mode.folderPath + '；点击退出同目录模式'
+        : '将当前整页多宫格切换到此视频所在文件夹';
       cell.sameFolderButton.setAttribute('aria-pressed', String(enabled));
-      cell.sameFolderButton.hidden = !cell.item;
-      cell.sameFolderButton.disabled = !cell.item || !/^\d+$/.test(String(cell.item.parentId || ''));
+      cell.sameFolderButton.hidden = !cell.item && !enabled;
+      cell.sameFolderButton.disabled = enabled ? false : !hasFolder;
     }
     if (cell.folderButton) {
       const hasParentFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId ?? '')));
@@ -3104,9 +3108,10 @@
     }
     if (cell.nextButton) {
       cell.nextButton.textContent = '⏭ 下一个';
-      const localMode = Boolean(cell.sameFolderState && cell.sameFolderState.active);
-      const localHasNext = localMode && cell.sameFolderState.availableItems.length > 0;
-      const localScanning = localMode && cell.sameFolderState.scanning;
+      const folderMode = session.sameFolderMode;
+      const localMode = Boolean(folderMode && folderMode.active);
+      const localHasNext = localMode && folderMode.availableItems.length > 0;
+      const localScanning = localMode && folderMode.scanning;
       cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked ||
         (localMode ? !localHasNext && !localScanning : !session.availableItems.length);
     }
@@ -3201,7 +3206,10 @@
   }
 
   function updateRoundControls(session) {
-    const remaining = session.availableItems.length;
+    const folderMode = session.sameFolderMode && session.sameFolderMode.active ? session.sameFolderMode : null;
+    const remaining = folderMode ? folderMode.availableItems.length : session.availableItems.length;
+    const candidateTotal = folderMode ? folderMode.totalCandidates : session.candidateTotal;
+    const roundPoolSize = folderMode ? folderMode.roundPoolSize : session.roundPoolSize;
     const favoriteCount = session.preferenceState?.favoritePickcodes?.size || 0;
     if (session.favoritesButton) {
       session.favoritesButton.textContent = '★ 收藏 ' + favoriteCount;
@@ -3212,16 +3220,18 @@
       session.toolsTabButtons.favorites.textContent = '收藏 ' + favoriteCount;
       session.toolsTabButtons.favorites.title = '收藏列表，共 ' + favoriteCount + ' 条收藏';
     }
-    const detail = '第' + session.roundNumber + '轮 · 匹配' + session.candidateTotal + '个 · 候选池' + session.roundPoolSize +
+    const detail = '第' + session.roundNumber + '轮 · 匹配' + candidateTotal + '个 · 候选池' + roundPoolSize +
       '个 · 剩余' + remaining + '个 · 失败' + (session.failedCount || 0) + '个 · 收藏' +
       session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
     const layoutLabel = session.layoutMode === 'main2' ? '1大2小'
       : session.layoutMode === 'main5' ? '1大5小'
         : session.layoutMode === 'mainDual' ? '2大' + session.dualSmallCount + '小'
           : session.layoutCount + '格';
-    if (session.infoText) session.infoText.textContent = '共 ' + session.candidateTotal + ' 个视频 · ' + layoutLabel;
+    if (session.infoText) session.infoText.textContent = folderMode
+      ? '同目录 · ' + folderMode.folderPath + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
+      : '共 ' + candidateTotal + ' 个视频 · ' + layoutLabel;
     if (session.roundStatus) {
-      const compact = '第' + session.roundNumber + '轮 · 剩余' + remaining + '/' + session.roundPoolSize;
+      const compact = '第' + session.roundNumber + '轮 · 剩余' + remaining + '/' + roundPoolSize;
       session.roundStatus.textContent = session.roundMessage ? compact + ' · ' + session.roundMessage : compact;
       session.roundStatus.title = session.roundMessage ? detail + ' · ' + session.roundMessage : detail;
       session.roundStatus.setAttribute('aria-label', session.roundStatus.title);
@@ -3230,7 +3240,8 @@
       const hasTarget = session.cells.some(cell =>
         cell && cell.index < session.layoutCount && !cell.locked
       );
-      session.swapAllButton.disabled = session.closed || session.roundRefreshing || session.authBlocked || !remaining || !hasTarget;
+      session.swapAllButton.disabled = session.closed || session.roundRefreshing || session.authBlocked ||
+        (!remaining && !(folderMode && folderMode.scanning)) || !hasTarget;
     }
     if (session.newRoundButton) {
       session.newRoundButton.disabled = session.closed || session.roundRefreshing || session.authBlocked;
@@ -3534,7 +3545,6 @@
   function clearDeletedCell(session, cell) {
     disposeCell(cell);
     cell.item = null;
-    cell.sameFolderState = null;
     cell.failed = false;
     cell.hasPlayed = false;
     cell.loadStarted = false;
@@ -3587,149 +3597,360 @@
     return true;
   }
 
-  async function appendSameFolderCandidates(session, cell, state, scanId) {
-    if (session.closed || cell.sameFolderState !== state || !scanId) return 0;
-    const excluded = new Set(state.knownPickcodes);
-    const currentKey = itemKey(cell.item);
-    if (currentKey) excluded.add(currentKey);
-    const predicate = createPlayablePredicate(excluded, session.filters, session.preferenceState);
-    const sampled = await indexStore.sampleVideos(scanId, MAX_CANDIDATES, record =>
-      String(record && record.parentId || '') === state.folderId && predicate(record)
+  function sameFolderCells(session, state = session.sameFolderMode) {
+    if (!state) return [];
+    return session.cells.filter(cell =>
+      cell && cell.index < session.layoutCount && state.targetSlotIds.has(cell.slotId)
     );
-    if (session.closed || cell.sameFolderState !== state) return 0;
-    const additions = [];
-    for (const item of sampled.items) {
-      const key = itemKey(item);
-      if (!key || state.knownPickcodes.has(key)) continue;
-      state.knownPickcodes.add(key);
-      additions.push(item);
-    }
-    if (additions.length) state.availableItems.push(...shuffleItems(additions));
-    state.totalIndexed = Math.max(state.totalIndexed, sampled.total);
-    state.scanId = scanId;
-    if ((!state.firstPlaybackStarted || state.waitingForNext) && state.availableItems.length) {
-      const next = takeSameFolderItem(cell, state);
-      if (next) {
-        state.firstPlaybackStarted = true;
-        state.waitingForNext = false;
-        replaceCell(session, cell, next);
-        setStatus(cell, '已进入同目录随机播放 · ' + state.folderPath);
-      }
-    } else if (state.availableItems.length) {
-      setStatus(cell, '同目录候选已更新 · 剩余 ' + state.availableItems.length + ' 个');
-    }
-    return additions.length;
   }
 
-  function takeSameFolderItem(cell, state) {
+  function clearCellForSameFolder(session, cell) {
+    disposeCell(cell);
+    cell.item = null;
+    cell.failed = false;
+    cell.hasPlayed = false;
+    cell.loadStarted = false;
+    cell.userPaused = false;
+    cell.layoutPaused = !isCellVisible(session, cell);
+    cell.deleting = false;
+    cell.deletionUncertain = false;
+    cell.retryCount = 0;
+    cell.authBlocked = false;
+    cell.aspectRatio = DEFAULT_ASPECT_RATIO;
+    cell.name.textContent = '等待目录视频…';
+    cell.name.title = '';
+    cell.quality.textContent = '';
+    setStatus(cell, '正在准备同目录视频候选…');
+    updateCellControls(session, cell);
+  }
+
+  function takeSameFolderItem(state) {
     while (state.availableItems.length) {
       const item = state.availableItems.shift();
       const key = itemKey(item);
-      if (!key || key === itemKey(cell.item) || state.playedPickcodes.has(key)) continue;
+      if (!key || state.playedPickcodes.has(key)) continue;
       state.playedPickcodes.add(key);
       return item;
     }
     return null;
   }
 
-  function swapSameFolderCell(session, cell) {
-    const state = cell.sameFolderState;
-    if (!state || !state.active || cell.locked) return false;
-    const next = takeSameFolderItem(cell, state);
-    if (next) {
-      replaceCell(session, cell, next);
-      setStatus(cell, '同目录随机播放 · ' + state.folderPath);
-      return true;
+  function fillSameFolderCells(session, state) {
+    if (session.closed || session.sameFolderMode !== state || !state.active) return 0;
+    let replaced = 0;
+    for (const slotId of Array.from(state.pendingSlotIds)) {
+      const cell = sameFolderCells(session, state).find(item => item.slotId === slotId);
+      if (!cell) {
+        state.pendingSlotIds.delete(slotId);
+        continue;
+      }
+      const next = takeSameFolderItem(state);
+      if (!next) break;
+      state.pendingSlotIds.delete(slotId);
+      if (replaceCell(session, cell, next)) {
+        replaced++;
+        setStatus(cell, '同目录随机播放 · ' + state.folderPath);
+      }
     }
+
     if (state.scanning) {
-      state.waitingForNext = true;
-      setStatus(cell, '正在索引当前目录，发现下一个视频后自动播放…');
-      return true;
+      for (const slotId of state.pendingSlotIds) {
+        const cell = sameFolderCells(session, state).find(item => item.slotId === slotId);
+        if (cell) setStatus(cell, '正在优先索引目录，发现视频后自动填充此窗口…');
+      }
+    } else if (state.scanFinished && state.pendingSlotIds.size) {
+      for (const slotId of state.pendingSlotIds) {
+        const cell = sameFolderCells(session, state).find(item => item.slotId === slotId);
+        if (cell) setStatus(cell, cell.item
+          ? '当前目录本轮没有更多未播放视频'
+          : '目录中符合当前筛选的视频不足，窗口暂时留空');
+      }
+      state.pendingSlotIds.clear();
+    } else if (state.scanError) {
+      for (const slotId of state.pendingSlotIds) {
+        const cell = sameFolderCells(session, state).find(item => item.slotId === slotId);
+        if (cell) setStatus(cell, '目录索引未完成：' + state.scanError);
+      }
     }
-    setStatus(cell, '当前目录本轮没有更多未播放视频');
-    return false;
+
+    state.roundPoolSize = state.totalCandidates;
+    session.roundMessage = state.scanning
+      ? '整页同目录扫描中：' + state.folderPath
+      : (state.scanError ? '同目录索引异常：' + state.scanError : '整页同目录播放：' + state.folderPath);
+    updateRoundControls(session);
+    return replaced;
   }
 
-  async function startSameFolderPlayback(session, cell) {
-    if (session.closed || !cell.item || session.authBlocked) return;
-    if (cell.sameFolderState && cell.sameFolderState.active) {
-      cell.sameFolderState.active = false;
-      cell.sameFolderState.token++;
-      cell.sameFolderState = null;
-      updateCellControls(session, cell);
-      setStatus(cell, '已退出同目录随机，恢复全局随机候选');
-      return;
+  async function appendSameFolderCandidates(session, state, scanId) {
+    if (session.closed || session.sameFolderMode !== state || !state.active || !scanId) return 0;
+    if (state.samplePromise) {
+      state.samplePending = true;
+      return state.samplePromise;
     }
-    const folderId = String(cell.item.parentId || '').trim();
-    if (!/^\d+$/.test(folderId)) {
-      setStatus(cell, '无法识别当前视频所在目录');
-      return;
-    }
-    const state = {
-      active: true, folderId,
-      folderPath: String(cell.item.path || '').split('/').slice(0, -1).join('/') || ('目录 ' + folderId),
-      scanId: null, scanning: false, scanFinished: false, firstPlaybackStarted: false, waitingForNext: false,
-      totalIndexed: 0, availableItems: [], knownPickcodes: new Set([itemKey(cell.item)]),
-      playedPickcodes: new Set([itemKey(cell.item)]), token: 1
-    };
-    cell.sameFolderState = state;
-    updateCellControls(session, cell);
-    setStatus(cell, '正在检查当前目录索引…');
+    state.samplePromise = (async () => {
+      let added = 0;
+      do {
+        state.samplePending = false;
+        const predicate = createPlayablePredicate(
+          new Set(state.knownPickcodes), session.filters, session.preferenceState
+        );
+        const sampled = await indexStore.sampleVideos(scanId, MAX_CANDIDATES, record =>
+          String(record && record.parentId || '') === state.folderId && predicate(record)
+        );
+        if (session.closed || session.sameFolderMode !== state || !state.active) return added;
+        for (const item of sampled.items) {
+          const key = itemKey(item);
+          if (!key || state.knownPickcodes.has(key)) continue;
+          state.knownPickcodes.add(key);
+          state.availableItems.push(item);
+          added++;
+        }
+        state.totalCandidates = Math.max(state.totalCandidates, state.knownPickcodes.size + sampled.total);
+        state.scanId = scanId;
+        state.availableItems = shuffleItems(state.availableItems);
+        fillSameFolderCells(session, state);
+      } while (state.samplePending && !session.closed && session.sameFolderMode === state && state.active);
+      return added;
+    })();
+    const task = state.samplePromise;
     try {
+      return await task;
+    } finally {
+      if (state.samplePromise === task) state.samplePromise = null;
+    }
+  }
+
+  async function ensureSameFolderIndex(session, state) {
+    if (state.scanPromise) return state.scanPromise;
+    state.scanPromise = (async () => {
       const scans = await indexStore.listScans(session.accountId);
-      if (session.closed || cell.sameFolderState !== state) return;
-      const candidates = scans.filter(scan => String(scan.rootCid) === folderId)
+      if (session.closed || session.sameFolderMode !== state || !state.active) return null;
+      const candidates = scans.filter(scan => String(scan.rootCid) === state.folderId)
         .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
       const latest = candidates[0] || null;
       if (latest) {
         state.scanId = latest.scanId;
-        await appendSameFolderCandidates(session, cell, state, latest.scanId);
+        await appendSameFolderCandidates(session, state, latest.scanId);
       }
-      if (session.closed || cell.sameFolderState !== state) return;
-      const needsScan = !latest || latest.status !== 'complete' || latest.complete !== true;
-      if (!needsScan) {
+      if (session.closed || session.sameFolderMode !== state || !state.active) return latest;
+      if (latest && latest.status === 'complete' && latest.complete === true) {
+        state.scanning = false;
         state.scanFinished = true;
-        setStatus(cell, state.firstPlaybackStarted
-          ? '同目录随机播放 · 索引完整'
-          : '当前目录没有其他可播放视频');
-        return;
+        state.scanError = '';
+        fillSameFolderCells(session, state);
+        return latest;
       }
+
       state.scanning = true;
-      setStatus(cell, state.firstPlaybackStarted
-        ? '正在后台补全当前目录索引…'
-        : '正在优先索引当前目录，发现首个可播放视频后自动开始播放…');
+      state.scanFinished = false;
+      state.scanError = '';
+      fillSameFolderCells(session, state);
       const ui = globalThis.N115IndexManagerUI;
       if (!ui || typeof ui.requestPriorityScan !== 'function') {
         throw new Error('当前页面的目录索引调度器不可用，请刷新115页面后重试');
       }
-      const token = state.token;
       const scan = await ui.requestPriorityScan({
         accountId: session.accountId,
-        rootCid: folderId,
+        rootCid: state.folderId,
         onPage: async page => {
-          if (session.closed || cell.sameFolderState !== state || state.token !== token) return;
-          await appendSameFolderCandidates(session, cell, state, page.scanId);
+          if (session.closed || session.sameFolderMode !== state || !state.active) return;
+          await appendSameFolderCandidates(session, state, page.scanId);
         }
       });
-      if (session.closed || cell.sameFolderState !== state || state.token !== token) return;
-      state.scanning = false;
-      state.scanFinished = true;
+      if (session.closed || session.sameFolderMode !== state || !state.active) return scan;
       state.scanId = scan.scanId;
-      if (!state.firstPlaybackStarted) {
-        await appendSameFolderCandidates(session, cell, state, scan.scanId);
-        if (!state.firstPlaybackStarted && !state.availableItems.length) {
-          setStatus(cell, '当前目录索引完成，但没有其他可播放视频');
+      state.scanning = false;
+      state.scanFinished = scan.status === 'complete' && scan.complete === true;
+      state.scanError = state.scanFinished ? '' : String(scan.pauseReason || '目录索引尚未完整，请稍后重试');
+      await appendSameFolderCandidates(session, state, scan.scanId);
+      fillSameFolderCells(session, state);
+      return scan;
+    })().catch(error => {
+      if (!session.closed && session.sameFolderMode === state && state.active) {
+        state.scanning = false;
+        state.scanFinished = false;
+        state.scanError = String(error && error.message || error).slice(0, 100);
+        session.roundMessage = '同目录索引失败：' + state.scanError;
+        fillSameFolderCells(session, state);
+      }
+      throw error;
+    }).finally(() => {
+      state.scanPromise = null;
+      if (!session.closed && session.sameFolderMode === state && state.active) updateRoundControls(session);
+    });
+    return state.scanPromise;
+  }
+
+  function exitSameFolderPlayback(session) {
+    const state = session.sameFolderMode;
+    if (!state || !state.active) return;
+    state.active = false;
+    session.sameFolderMode = null;
+    const restore = session.sameFolderRestore;
+    session.sameFolderRestore = null;
+    if (restore) {
+      session.availableItems = restore.availableItems.slice();
+      session.usedPickcodes = new Set(restore.usedPickcodes);
+      session.candidateTotal = restore.candidateTotal;
+      session.roundPoolSize = restore.roundPoolSize;
+      session.roundMessage = '已退出同目录模式，恢复全局随机候选';
+      for (const cell of session.cells) {
+        if (cell && cell.index < session.layoutCount && cell.item) {
+          const key = itemKey(cell.item);
+          if (key) session.usedPickcodes.add(key);
         }
-      } else {
-        setStatus(cell, '同目录索引已补全 · 候选 ' + state.totalIndexed + ' 个');
+      }
+      if (restore.filtersKey !== JSON.stringify(session.filters)) {
+        session.availableItems = [];
+        session.candidateTotal = 0;
+        session.roundPoolSize = 0;
+        session.roundMessage = '已退出同目录模式；筛选条件已变化，请开启新一轮刷新全局候选';
+      }
+    }
+    session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
+    updateRoundControls(session);
+  }
+
+  async function startSameFolderPlayback(session, cell) {
+    if (session.closed) return;
+    const currentMode = session.sameFolderMode;
+    const clickedFolderId = String(cell && cell.item && cell.item.parentId || '').trim();
+    if (currentMode && currentMode.active &&
+        (!cell || !cell.item || clickedFolderId === currentMode.folderId)) {
+      exitSameFolderPlayback(session);
+      return;
+    }
+    if (session.authBlocked || session.roundRefreshing || !cell || !cell.item) return;
+    const folderId = clickedFolderId;
+    if (!/^\d+$/.test(folderId)) {
+      setStatus(cell, '无法识别当前视频所在目录');
+      return;
+    }
+
+    if (!session.sameFolderRestore) {
+      session.sameFolderRestore = {
+        availableItems: session.availableItems.slice(),
+        usedPickcodes: new Set(session.usedPickcodes),
+        candidateTotal: session.candidateTotal,
+        roundPoolSize: session.roundPoolSize,
+        filtersKey: JSON.stringify(session.filters)
+      };
+    }
+    if (currentMode) currentMode.active = false;
+
+    const cells = session.cells.filter(item => item && item.index < session.layoutCount);
+    const targetSlotIds = new Set(cells.map(item => item.slotId));
+    const initialFolderPickcodes = new Set(cells
+      .filter(item => item.item && String(item.item.parentId || '') === folderId)
+      .map(item => itemKey(item.item)).filter(Boolean));
+    const state = {
+      active: true,
+      folderId,
+      folderPath: String(cell.item.path || '').split('/').slice(0, -1).join('/') || ('目录 ' + folderId),
+      scanId: null,
+      scanning: false,
+      scanFinished: false,
+      scanError: '',
+      scanPromise: null,
+      samplePromise: null,
+      samplePending: false,
+      totalCandidates: 0,
+      roundPoolSize: 0,
+      availableItems: [],
+      knownPickcodes: new Set(initialFolderPickcodes),
+      playedPickcodes: new Set(initialFolderPickcodes),
+      targetSlotIds,
+      pendingSlotIds: new Set(targetSlotIds)
+    };
+    session.sameFolderMode = state;
+    session.candidateTotal = 0;
+    session.roundPoolSize = 0;
+    session.roundMessage = '正在将整页多宫格切换到：' + state.folderPath;
+    for (const target of cells) clearCellForSameFolder(session, target);
+    applyLayoutPositions(session);
+    updateRoundControls(session);
+
+    try {
+      await ensureSameFolderIndex(session, state);
+    } catch (error) {
+      if (!session.closed && session.sameFolderMode === state) {
+        session.roundMessage = '同目录索引失败：' + String(error && error.message || error).slice(0, 100);
+        updateRoundControls(session);
+      }
+    }
+  }
+
+  function swapSameFolderCell(session, cell) {
+    const state = session.sameFolderMode;
+    if (!state || !state.active || cell.locked || !state.targetSlotIds.has(cell.slotId)) return false;
+    state.pendingSlotIds.add(cell.slotId);
+    const replaced = fillSameFolderCells(session, state);
+    if (state.pendingSlotIds.has(cell.slotId) && state.scanning) {
+      setStatus(cell, '正在索引当前目录，发现下一个视频后自动播放…');
+      return true;
+    }
+    if (!replaced && !state.scanning && !cell.item) {
+      setStatus(cell, '当前目录本轮没有更多未播放视频');
+    }
+    return replaced > 0 || state.pendingSlotIds.has(cell.slotId);
+  }
+
+  function swapAllSameFolderUnlocked(session) {
+    const state = session.sameFolderMode;
+    if (!state || !state.active) return;
+    const unlocked = sameFolderCells(session, state).filter(cell => !cell.locked);
+    const requestedCount = Number(session.filters.replaceCount) || 0;
+    const targetLimit = requestedCount > 0 ? requestedCount : unlocked.length;
+    const targets = unlocked.filter(cell => !cell.item)
+      .concat(unlocked.filter(cell => cell.item)).slice(0, targetLimit);
+    if (!targets.length) {
+      session.roundMessage = '当前布局没有可换片的未锁定窗口';
+      updateRoundControls(session);
+      return;
+    }
+    targets.forEach(cell => state.pendingSlotIds.add(cell.slotId));
+    const replaced = fillSameFolderCells(session, state);
+    session.roundMessage = state.scanning && state.pendingSlotIds.size
+      ? '已提交同目录换片请求，正在等待索引补充'
+      : '已从同目录替换 ' + replaced + ' 格';
+    updateRoundControls(session);
+  }
+
+  async function startNewSameFolderRound(session, message = '') {
+    const state = session.sameFolderMode;
+    if (!state || !state.active || session.closed || session.roundRefreshing) return;
+    session.roundRefreshing = true;
+    session.roundMessage = '正在刷新同目录候选，准备开启新一轮…';
+    updateRoundControls(session);
+    state.availableItems = [];
+    state.pendingSlotIds.clear();
+    const currentPickcodes = new Set(sameFolderCells(session, state)
+      .filter(cell => cell.item && String(cell.item.parentId || '') === state.folderId)
+      .map(cell => itemKey(cell.item)).filter(Boolean));
+    state.knownPickcodes = new Set(currentPickcodes);
+    state.playedPickcodes = new Set(currentPickcodes);
+    state.totalCandidates = 0;
+    state.roundPoolSize = 0;
+    state.scanError = '';
+    state.scanFinished = false;
+    session.roundNumber++;
+    session.failedCount = 0;
+    session.failedPickcodes.clear();
+    try {
+      await ensureSameFolderIndex(session, state);
+      if (!session.closed && session.sameFolderMode === state) {
+        state.roundPoolSize = state.totalCandidates;
+        session.roundMessage = state.availableItems.length
+          ? (message || '同目录新一轮已开始')
+          : (message ? message + ' · 当前目录没有其他可换视频' : '当前目录没有其他可换视频');
       }
     } catch (error) {
-      if (!session.closed && cell.sameFolderState === state) {
-        state.scanning = false;
-        setStatus(cell, '同目录索引失败：' + String(error && error.message || error).slice(0, 100));
+      if (!session.closed && session.sameFolderMode === state) {
+        session.roundMessage = '同目录新一轮失败：' + String(error && error.message || error).slice(0, 100);
       }
     } finally {
-      if (cell.sameFolderState === state) updateCellControls(session, cell);
+      session.roundRefreshing = false;
+      if (!session.closed) updateRoundControls(session);
     }
   }
 
@@ -3745,7 +3966,7 @@
       updateRoundControls(session);
       return;
     }
-    if (cell.sameFolderState && cell.sameFolderState.active) {
+    if (session.sameFolderMode && session.sameFolderMode.active) {
       swapSameFolderCell(session, cell);
       return;
     }
@@ -3764,6 +3985,10 @@
     if (session.authBlocked) {
       session.roundMessage = '115验证或登录尚未恢复，请处理后点击“验证后继续取流”';
       updateRoundControls(session);
+      return;
+    }
+    if (session.sameFolderMode && session.sameFolderMode.active) {
+      swapAllSameFolderUnlocked(session);
       return;
     }
     const unlocked = session.cells.filter(cell =>
@@ -3800,6 +4025,10 @@
     if (session.authBlocked) {
       session.roundMessage = '115验证或登录尚未恢复，请处理后点击“验证后继续取流”';
       updateRoundControls(session);
+      return;
+    }
+    if (session.sameFolderMode && session.sameFolderMode.active) {
+      await startNewSameFolderRound(session, message);
       return;
     }
     session.roundRefreshing = true;
@@ -5029,7 +5258,7 @@
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
       mainActions, mainButton, mainMenu, mainMenuAButton, mainMenuBButton, mainScreenBadge,
-      mainMenuOpen: false, progressBar, progressFill, deleteButton: null, sameFolderState: null,
+      mainMenuOpen: false, progressBar, progressFill, deleteButton: null,
       hls: null, timer: null, abort: null, generation: 0, clickTimer: null,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false, deleting: false, deletionUncertain: false,
@@ -5101,7 +5330,7 @@
     cell.folderButton.title = '在新标签页打开视频所在文件夹';
     cell.folderButton.setAttribute('aria-label', '在新标签页打开视频所在文件夹');
     cell.sameFolderButton = makeTool('cell-same-folder', '📂', () => { void startSameFolderPlayback(session, cell); });
-    cell.sameFolderButton.title = '只从当前视频所在文件夹随机播放';
+    cell.sameFolderButton.title = '将当前整页多宫格切换到此视频所在文件夹';
     cell.sameFolderButton.setAttribute('aria-label', '同目录随机播放');
     cell.excludeButton = makeTool('cell-exclude', '🚫', () => { void toggleExcluded(session, cell); });
     cell.deleteButton = makeTool('cell-delete', '🗑', () => { void deleteCellVideo(session, cell); });
@@ -6182,6 +6411,7 @@
         settings: indexed.settings, recentDirectories: indexed.recentDirectories,
         favoriteSelected: new Set(), favoriteEntries: [],
         cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
+        sameFolderMode: null, sameFolderRestore: null,
         roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         failedCount: 0, failedPickcodes: new Set(), authBlocked: false, resumeButton: null,
         abort: new AbortController(), closed: false, globalPaused: false,

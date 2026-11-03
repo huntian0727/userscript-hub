@@ -11,10 +11,10 @@ const source = fs.readFileSync(
   'utf8'
 );
 
-test('115 multiview v0.12.0 userscript parses and exposes clear favorite controls', () => {
+test('115 multiview v0.12.1 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+0\.12\.0$/m);
-  assert.equal((source.match(/const VERSION = '0\.12\.0';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+0\.12\.1$/m);
+  assert.equal((source.match(/const VERSION = '0\.12\.1';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
@@ -67,7 +67,7 @@ test('each video cell can open its actual parent folder in a new tab without nav
 });
 
 
-test('v0.12.0 incrementally commits directory pages and yields normal scans to priority requests', () => {
+test('v0.12.1 incrementally commits directory pages and yields normal scans to priority requests', () => {
   assert.match(source, /const onPage = typeof config\.onPage === 'function' \? config\.onPage : null/);
   assert.match(source, /await onPage\(\{[\s\S]*?records: pageRecords/);
   assert.match(source, /await store\.commitDirectory\(scan, page\.records\)/);
@@ -77,28 +77,37 @@ test('v0.12.0 incrementally commits directory pages and yields normal scans to p
   assert.match(source, /priorityQueuedByKey/);
 });
 
-test('v0.12.0 adds per-cell same-folder random playback with first-result auto-play', () => {
-  assert.match(source, /cell\.sameFolderButton = makeTool\('cell-same-folder', '📂'/);
-  assert.match(source, /function startSameFolderPlayback\(session, cell\)/);
-  assert.match(source, /function appendSameFolderCandidates\(session, cell, state, scanId\)/);
-  assert.match(source, /state\.waitingForNext\) && state\.availableItems\.length/);
-  assert.match(source, /replaceCell\(session, cell, next\)/);
-  assert.match(source, /function swapSameFolderCell\(session, cell\)/);
-  assert.match(source, /if \(cell\.sameFolderState && cell\.sameFolderState\.active\) \{/);
+test('v0.12.1 switches the entire active grid into one shared same-folder pool', () => {
+  assert.match(source, /session\.sameFolderMode = state/);
+  assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
+  assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
+  assert.match(source, /function fillSameFolderCells\(session, state\)/);
+  assert.match(source, /state\.targetSlotIds/);
+  assert.match(source, /state\.pendingSlotIds/);
   assert.match(source, /String\(record && record\.parentId \|\| ''\) === state\.folderId/);
+  assert.doesNotMatch(source, /cell\.sameFolderState/);
+});
+
+test('single next, all swap and new round stay inside the active shared folder pool', () => {
+  assert.match(source, /if \(session\.sameFolderMode && session\.sameFolderMode\.active\) \{\s*swapSameFolderCell\(session, cell\)/);
+  assert.match(source, /if \(session\.sameFolderMode && session\.sameFolderMode\.active\) \{\s*swapAllSameFolderUnlocked\(session\)/);
+  assert.match(source, /await startNewSameFolderRound\(session, message\)/);
+  assert.match(source, /function takeSameFolderItem\(state\)/);
+  assert.match(source, /state\.playedPickcodes\.add\(key\)/);
+});
+
+test('same-folder controls remain available on empty cells to exit the page-wide mode', () => {
+  assert.match(source, /cell\.sameFolderButton\.hidden = !cell\.item && !enabled/);
+  assert.match(source, /cell\.sameFolderButton\.disabled = enabled \? false : !hasFolder/);
+  assert.match(source, /if \(currentMode && currentMode\.active &&[\s\S]*?exitSameFolderPlayback\(session\)/);
+  assert.match(source, /function exitSameFolderPlayback\(session\)/);
+});
+
+test('folder index pages feed the shared candidate pool before the scan continues', () => {
+  assert.match(source, /async function notifyScanPage\(job, page\)/);
+  assert.match(source, /await listener\(page\)/);
+  assert.match(source, /await appendSameFolderCandidates\(session, state, page\.scanId\)/);
+  assert.match(source, /state\.samplePending = true/);
 });
 
 
-test('same-folder action is hidden on empty cells and stays scoped to the exact parent folder', () => {
-  assert.match(source, /cell\.sameFolderButton\.hidden = !cell\.item/);
-  assert.match(source, /cell\.sameFolderButton\.disabled = !cell\.item \|\| !\//);
-  assert.match(source, /scans\.filter\(scan => String\(scan\.rootCid\) === folderId\)/);
-  assert.match(source, /Promise\.resolve\(listener\(page\)\)\.catch/);
-});
-
-
-test('same-folder playback automatically advances when a requested next item arrives during scanning', () => {
-  assert.match(source, /state\.waitingForNext = true/);
-  assert.match(source, /\(!state\.firstPlaybackStarted \|\| state\.waitingForNext\) && state\.availableItems\.length/);
-  assert.match(source, /state\.waitingForNext = false/);
-});
