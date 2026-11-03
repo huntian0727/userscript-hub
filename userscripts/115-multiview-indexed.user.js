@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.3
+// @version      0.12.4
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.12.3';
+  const VERSION = '0.12.4';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -1929,12 +1929,13 @@
   top.append(heading, close);
 
   const hint = element('div', 'hint',
-    '只读取115目录元数据，不下载、不移动、不删除、不修改任何网盘文件。索引按目录分批保存到本地IndexedDB，中断后可以继续；已保存的视频可立即用于多宫格播放，递归需要主动勾选。');
+    '只读取115目录元数据，不下载、不移动、不删除、不修改任何网盘文件。索引按目录分批保存到本地IndexedDB，中断后可以继续；已保存的视频可立即用于多宫格播放。默认勾选“包含所有子文件夹”，如只需索引当前目录可手动取消。');
   const directory = element('div', 'directory');
   const options = element('div', 'options');
   const recursiveLabel = element('label');
   const recursive = element('input');
   recursive.type = 'checkbox';
+  recursive.checked = true;
   const recursiveText = element('span', '', '包含所有子文件夹（递归读取）');
   recursiveLabel.append(recursive, recursiveText);
   options.append(recursiveLabel);
@@ -2309,7 +2310,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.12.3';
+  const VERSION = '0.12.4';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;

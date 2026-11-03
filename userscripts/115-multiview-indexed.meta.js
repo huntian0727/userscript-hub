@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.3
+// @version      0.12.4
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
