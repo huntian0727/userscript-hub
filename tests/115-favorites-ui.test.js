@@ -81,7 +81,7 @@ test('v0.12.0 adds per-cell same-folder random playback with first-result auto-p
   assert.match(source, /cell\.sameFolderButton = makeTool\('cell-same-folder', '📂'/);
   assert.match(source, /function startSameFolderPlayback\(session, cell\)/);
   assert.match(source, /function appendSameFolderCandidates\(session, cell, state, scanId\)/);
-  assert.match(source, /if \(!state\.firstPlaybackStarted && state\.availableItems\.length\)/);
+  assert.match(source, /if \(!state\.firstPlaybackStarted \|\| state\.waitingForNext\) && state\.availableItems\.length\)/);
   assert.match(source, /replaceCell\(session, cell, next\)/);
   assert.match(source, /function swapSameFolderCell\(session, cell\)/);
   assert.match(source, /if \(cell\.sameFolderState && cell\.sameFolderState\.active\) \{/);
