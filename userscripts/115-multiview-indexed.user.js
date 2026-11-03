@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.10.2
-// @description  115目录索引与多宫格播放一体化，支持收藏管理、智能画幅、回收站删除及一键退出。
+// @version      0.11.0
+// @description  115目录索引与多宫格播放一体化，支持后台扫描、收藏管理、智能画幅及一键退出。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -677,6 +677,11 @@
             videosFound: files.filter(file => file.isVideo).length
           });
         }
+        if (typeof config.shouldYield === 'function' && config.shouldYield()) {
+          const delay = Math.max(0, Math.min(1000, Number(config.backgroundYieldMs) || 80));
+          await new Promise(resolve => setTimeout(resolve, delay));
+          throwIfAborted(signal);
+        }
 
         if (offset >= expectedCount) break;
         if (data.length < result.effectivePageSize) {
@@ -975,6 +980,8 @@
           const result = await adapter.listDirectory(current.id, {
             signal,
             fallbackPath: current.fallbackPath,
+            shouldYield: config.shouldYield,
+            backgroundYieldMs: config.backgroundYieldMs,
             onProgress: progress => {
               if (onProgress) onProgress(Object.assign({}, progress, {
                 phase: 'directory-page',
@@ -1725,7 +1732,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.10.2';
+  const VERSION = '0.11.0';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -1830,6 +1837,9 @@
     'button:disabled{opacity:.45;cursor:not-allowed}',
     '.launcher{pointer-events:auto;position:absolute;right:22px;bottom:64px;padding:10px 15px;color:#fff;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:13px;box-shadow:0 4px 18px #0005}',
     '.launcher:hover{background:#3474ef}',
+    '.background-task-badge{pointer-events:auto;position:absolute;top:18px;right:20px;z-index:2147483647;max-width:min(360px,calc(100vw - 32px));padding:10px 14px;border:1px solid #d49a3a;border-radius:10px;background:linear-gradient(135deg,#49300e,#241d12);color:#ffe4a6;font-size:12px;font-weight:800;box-shadow:0 6px 24px #0009;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;cursor:pointer}',
+    '.background-task-badge:hover{background:linear-gradient(135deg,#624214,#302516);border-color:#f0bd63}',
+    '.background-task-badge[hidden]{display:none!important}',
     '.overlay{pointer-events:auto;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:18px;background:#05080dcc}',
     '.overlay[hidden]{display:none}',
     '.dialog{width:min(620px,96vw);max-height:90vh;overflow:auto;background:#151b25;border:1px solid #394456;border-radius:12px;box-shadow:0 24px 80px #0009;padding:20px;display:flex;flex-direction:column;gap:15px}',
@@ -1858,12 +1868,17 @@
     '.section-label{font-size:12px;font-weight:700;color:#dbe5f3}',
     '.sample{font-size:11px;line-height:1.6;color:#aebbd0;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}',
     '.warning{font-size:12px;line-height:1.6;color:#ffd18a;white-space:pre-wrap}',
-    '@media(max-width:520px){.dialog{padding:15px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}'
+    '@media(max-width:520px){.dialog{padding:15px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.background-task-badge{top:8px;right:8px;max-width:calc(100vw - 16px);font-size:11px;padding:8px 10px}}'
   ].join('');
 
   const launcher = element('button', 'launcher', '目录索引管理');
   launcher.type = 'button';
   launcher.title = '扫描当前115目录并管理已保存索引';
+
+  const taskBadge = element('button', 'background-task-badge', '● 后台扫描中');
+  taskBadge.type = 'button';
+  taskBadge.hidden = true;
+  taskBadge.title = '点击重新打开目录索引管理';
 
   const overlay = element('section', 'overlay');
   overlay.hidden = true;
@@ -1878,8 +1893,9 @@
   const version = element('span', 'version', '一体化版 v' + VERSION);
   title.append(version);
   heading.append(title);
-  const close = element('button', 'close', '关闭');
+  const close = element('button', 'close', '暂停并退出');
   close.type = 'button';
+  close.title = '暂停扫描、保存已完成目录并关闭扫描窗口';
   top.append(heading, close);
 
   const hint = element('div', 'hint',
@@ -1899,7 +1915,11 @@
   const cancel = element('button', 'danger', '暂停扫描');
   cancel.type = 'button';
   cancel.disabled = true;
-  actions.append(start, cancel);
+  const backgroundButton = element('button', 'secondary', '后台继续扫描');
+  backgroundButton.type = 'button';
+  backgroundButton.disabled = true;
+  backgroundButton.title = '收起扫描窗口，任务继续运行；页面右上角会显示后台扫描状态';
+  actions.append(start, cancel, backgroundButton);
 
   const status = element('div', 'status', '尚未开始扫描。');
   const track = element('div', 'track');
@@ -1917,11 +1937,27 @@
 
   dialog.append(top, hint, directory, options, actions, status, track, results);
   overlay.append(dialog);
-  shadow.append(style, launcher, overlay);
+  shadow.append(style, launcher, overlay, taskBadge);
   document.documentElement.append(host);
 
   let controller = null;
   let returnFocus = launcher;
+  let backgroundMode = false;
+  let latestProgress = null;
+
+  function updateBackgroundBadge() {
+    if (!backgroundMode || !controller) {
+      taskBadge.hidden = true;
+      return;
+    }
+    const progress = latestProgress || {};
+    const videos = Number(progress.videosFound || 0).toLocaleString();
+    const directories = Number(progress.directoriesVisited || 0).toLocaleString();
+    taskBadge.textContent = '● 后台扫描中 · ' + videos + ' 个视频';
+    taskBadge.title = '目录索引正在后台运行\n已扫描目录：' + directories +
+      '\n已发现视频：' + videos + '\n点击重新打开扫描窗口';
+    taskBadge.hidden = false;
+  }
 
   async function resolveAccountId(signal) {
     const response = await requestText(API_ORIGIN + '/offine/downpath', signal);
@@ -1948,6 +1984,7 @@
     status.textContent = text;
     if (Number.isFinite(percent)) fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
     else fill.style.width = '0%';
+    if (backgroundMode) updateBackgroundBadge();
   }
 
   function renderResult(scan, videoSamples) {
@@ -2004,8 +2041,12 @@
     controller = new AbortController();
     const activeController = controller;
     let accountId = null;
+    backgroundMode = false;
+    latestProgress = null;
+    taskBadge.hidden = true;
     start.disabled = true;
     cancel.disabled = false;
+    backgroundButton.disabled = false;
     recursive.disabled = true;
     results.hidden = true;
     setStatus('正在识别当前115账号…', 0);
@@ -2024,8 +2065,12 @@
         maxFilesPerBatch: 50000,
         maxDirectoriesPerBatch: 2000,
         maxDepth: 20,
+        shouldYield: () => backgroundMode,
+        backgroundYieldMs: 80,
         onProgress: progress => {
           if (controller !== activeController || activeController.signal.aborted) return;
+          latestProgress = progress;
+          if (backgroundMode) updateBackgroundBadge();
           if (progress.phase === 'directory-page') {
             const percent = progress.total > 0 ? progress.offset / progress.total * 100 : 100;
             setStatus(
@@ -2075,14 +2120,21 @@
         }
       }
     } finally {
-      if (controller === activeController) controller = null;
+      if (controller === activeController) {
+        controller = null;
+        backgroundMode = false;
+        taskBadge.hidden = true;
+      }
       start.disabled = false;
       cancel.disabled = true;
+      backgroundButton.disabled = true;
       recursive.disabled = false;
     }
   }
   function openPanel(opener) {
-    returnFocus = opener && typeof opener.focus === 'function' ? opener : launcher;
+    returnFocus = opener && opener !== taskBadge && typeof opener.focus === 'function' ? opener : launcher;
+    backgroundMode = false;
+    taskBadge.hidden = true;
     refreshDirectoryLabel();
     overlay.hidden = false;
     close.focus();
@@ -2090,12 +2142,21 @@
 
   function closePanel() {
     if (controller) controller.abort();
+    backgroundMode = false;
+    taskBadge.hidden = true;
     overlay.hidden = true;
     if (returnFocus && returnFocus.isConnected) returnFocus.focus();
     else launcher.focus();
   }
 
   launcher.addEventListener('click', () => openPanel(launcher));
+  taskBadge.addEventListener('click', () => openPanel(taskBadge));
+  backgroundButton.addEventListener('click', () => {
+    if (!controller || controller.signal.aborted) return;
+    backgroundMode = true;
+    overlay.hidden = true;
+    updateBackgroundBadge();
+  });
   close.addEventListener('click', closePanel);
   start.addEventListener('click', startScan);
   cancel.addEventListener('click', () => {
@@ -2128,7 +2189,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.10.2';
+  const VERSION = '0.11.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;

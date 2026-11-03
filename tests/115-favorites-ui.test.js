@@ -11,7 +11,7 @@ const source = fs.readFileSync(
   'utf8'
 );
 
-test('115 multiview v0.10.2 userscript parses and exposes clear favorite controls', () => {
+test('115 multiview v0.11.0 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
   assert.match(source, /^\/\/\s*@version\s+0\.10\.2$/m);
   assert.equal((source.match(/const VERSION = '0\.10\.2';/g) || []).length, 2);
@@ -37,4 +37,17 @@ test('exit cleanup aborts outstanding work and disposes every video cell', () =>
   assert.match(closePlayerBody[1], /session\.abort\.abort\(\)/);
   assert.match(closePlayerBody[1], /session\.cells\.forEach\(cell => \{ if \(cell\) disposeCell\(cell\); \}\)/);
   assert.match(closePlayerBody[1], /session\.panel\.remove\(\)/);
+});
+
+
+test('index scan can continue in background with a persistent reopen indicator', () => {
+  assert.match(source, /const backgroundButton = element\('button', 'secondary', '后台继续扫描'\)/);
+  assert.match(source, /const taskBadge = element\('button', 'background-task-badge', '● 后台扫描中'\)/);
+  assert.match(source, /backgroundButton\.addEventListener\('click',[\s\S]*?backgroundMode = true;[\s\S]*?overlay\.hidden = true;[\s\S]*?updateBackgroundBadge\(\)/);
+  assert.match(source, /taskBadge\.addEventListener\('click', \(\) => openPanel\(taskBadge\)\)/);
+  assert.match(source, /function closePanel\(\) \{[\s\S]*?if \(controller\) controller\.abort\(\);[\s\S]*?overlay\.hidden = true;/);
+  assert.match(source, /close = element\('button', 'close', '暂停并退出'\)/);
+  assert.match(source, /shouldYield: \(\) => backgroundMode/);
+  assert.match(source, /backgroundYieldMs: 80/);
+  assert.match(source, /window\.addEventListener\('pagehide',[\s\S]*?if \(controller\) controller\.abort\(\)/);
 });
