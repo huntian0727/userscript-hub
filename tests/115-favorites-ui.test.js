@@ -13,8 +13,8 @@ const source = fs.readFileSync(
 
 test('115 multiview v0.11.1 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+0\.11\.0$/m);
-  assert.equal((source.match(/const VERSION = '0\.11\.0';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+0\.11\.1$/m);
+  assert.equal((source.match(/const VERSION = '0\.11\.1';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
@@ -58,7 +58,9 @@ test('each video cell can open its actual parent folder in a new tab without nav
   assert.match(source, /const parentId = String\(item && item\.parentId != null \? item\.parentId : ''\)\.trim\(\)/);
   assert.match(source, /url\.searchParams\.set\('cid', parentId\)/);
   assert.match(source, /window\.open\(url\.href, '_blank'\)/);
-  assert.doesNotMatch(source, /function openVideoFolderInNewTab\(item, cell\)[\s\S]*?window\.location\.(?:assign|href)/);
+  const folderHelper = source.match(/function openVideoFolderInNewTab\(item, cell\) \{([\s\S]*?)\n  \}\n\n  function /);
+  assert.ok(folderHelper, 'folder navigation helper exists');
+  assert.doesNotMatch(folderHelper[1], /window\.location\.(?:assign|href)/);
   assert.match(source, /cell\.folderButton = makeTool\('cell-folder', '📁',[\s\S]*?openVideoFolderInNewTab\(cell\.item, cell\)/);
   assert.match(source, /cell\.folderButton\.disabled = !hasParentFolder/);
   assert.match(source, /在新标签页打开视频所在文件夹/);
