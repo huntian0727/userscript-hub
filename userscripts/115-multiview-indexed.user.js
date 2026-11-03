@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.9.7
+// @version      0.9.8
 // @description  115目录扫描、断点续扫、智能画幅多宫格播放，支持单击暂停、双击全屏、循环播放与自动换片。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1686,7 +1686,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.9.7';
+  const VERSION = '0.9.8';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2089,10 +2089,10 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.7';
+  const VERSION = '0.9.8';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
-  const TOOLBAR_AUTO_HIDE_MS = 2000;
-  const TOOLBAR_REVEAL_ZONE_PX = 56;
+  const TOOLBAR_AUTO_HIDE_MS = 2500;
+  const TOOLBAR_REVEAL_ZONE_PX = 60;
   const HOST_ID = 'local-115-multiview-indexed';
   const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
@@ -2622,16 +2622,21 @@
     scheduleCellHeadingHide(cell);
   }
 
+  function closeLayoutPicker(session) {
+    if (!session) return;
+    session.layoutPickerOpen = false;
+    if (session.layoutPickerMenu) session.layoutPickerMenu.hidden = true;
+    session.layoutPickerButton?.setAttribute('aria-expanded', 'false');
+  }
+
   function scheduleToolbarHide(session) {
-    if (!session || session.closed || !session.panel) return;
+    if (!session || session.closed || !session.panel || session.layoutPickerOpen) return;
     clearTimeout(session.toolbarHideTimer);
     session.toolbarHideTimer = setTimeout(() => {
       session.toolbarHideTimer = null;
-      const bar = session.bar;
-      const keyboardFocused = Boolean(bar?.querySelector(':focus-visible'));
-      const mouseHovering = session.lastPointerType !== 'touch' && Boolean(bar?.matches(':hover'));
-      if (session.closed || session.moreDetails?.open || keyboardFocused || mouseHovering) return;
+      if (session.closed || session.layoutPickerOpen) return;
       session.panel.classList.remove('chrome-visible');
+      session.bar?.classList.remove('show', 'keyboard-focus');
     }, TOOLBAR_AUTO_HIDE_MS);
   }
 
@@ -2639,6 +2644,7 @@
     if (!session || session.closed || !session.panel) return;
     session.lastPointerType = pointerType || 'mouse';
     session.panel.classList.add('chrome-visible');
+    session.bar?.classList.add('show');
     clearTimeout(session.toolbarHideTimer);
     session.toolbarHideTimer = null;
     if (schedule) scheduleToolbarHide(session);
@@ -2648,6 +2654,8 @@
     clearTimeout(cell.timer);
     clearTimeout(cell.retryTimer);
     clearTimeout(cell.skipTimer);
+    clearTimeout(cell.clickTimer);
+    cell.clickTimer = null;
     clearTimeout(cell.headingHideTimer);
     cell.headingHideTimer = null;
     cell.box?.classList.remove('heading-visible');
@@ -2678,103 +2686,101 @@
   }
 
   function updateCellProgress(cell) {
-    if (!cell || !cell.video) return;
+    if (!cell || !cell.video || !cell.progressFill) return;
     const currentTime = Number(cell.video.currentTime);
     const duration = Number(cell.video.duration);
-    const safeCurrentTime = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
     const hasDuration = Number.isFinite(duration) && duration > 0;
-    if (cell.progressInput) {
-      cell.progressInput.max = hasDuration ? String(duration) : '0';
-      cell.progressInput.disabled = !cell.item || !hasDuration || cell.failed;
-      if (!cell.progressInput.matches(':active')) {
-        cell.progressInput.value = hasDuration ? String(Math.min(safeCurrentTime, duration)) : '0';
-      }
-    }
-    if (cell.currentTimeLabel) cell.currentTimeLabel.textContent = formatPlaybackTime(safeCurrentTime);
-    if (cell.durationLabel) cell.durationLabel.textContent = hasDuration ? formatPlaybackTime(duration) : '--:--';
+    const safeCurrentTime = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
+    const ratio = hasDuration ? Math.max(0, Math.min(1, safeCurrentTime / duration)) : 0;
+    cell.progressFill.style.width = (ratio * 100) + '%';
+    cell.progressBar?.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+    cell.progressBar?.setAttribute('aria-disabled', String(!cell.item || !hasDuration || cell.failed));
   }
 
   function updateCellControls(session, cell) {
-    if (cell.pauseButton) cell.pauseButton.textContent = cell.video.paused ? '播放' : '暂停';
-    if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '声音' : '静音';
+    if (cell.muteButton) cell.muteButton.textContent = cell.video.muted ? '🔈' : '🔊';
     if (cell.backButton) cell.backButton.disabled = !cell.item;
     if (cell.forwardButton) cell.forwardButton.disabled = !cell.item;
     if (cell.mainButton) {
-      cell.mainButton.hidden = session.layoutMode === 'mainDual';
-      cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '当前主屏' : '设为主屏';
+      cell.mainButton.hidden = !['main2', 'main5'].includes(session.layoutMode) ||
+        session.mainSlotId === cell.slotId;
+      cell.mainButton.textContent = session.mainSlotId === cell.slotId ? '当前主屏' : '↗ 设为主屏';
     }
     if (cell.mainAButton) {
-      cell.mainAButton.hidden = session.layoutMode !== 'mainDual';
-      cell.mainAButton.textContent = session.mainSlotId === cell.slotId ? '主屏A ✓' : '设为主屏A';
+      cell.mainAButton.hidden = session.layoutMode !== 'mainDual' || session.mainSlotId === cell.slotId;
+      cell.mainAButton.textContent = session.mainSlotId === cell.slotId ? '主屏A ✓' : '↗ 设为主屏A';
     }
     if (cell.mainBButton) {
-      cell.mainBButton.hidden = session.layoutMode !== 'mainDual';
-      cell.mainBButton.textContent = session.secondaryMainSlotId === cell.slotId ? '主屏B ✓' : '设为主屏B';
+      cell.mainBButton.hidden = session.layoutMode !== 'mainDual' || session.secondaryMainSlotId === cell.slotId;
+      cell.mainBButton.textContent = session.secondaryMainSlotId === cell.slotId ? '主屏B ✓' : '↗ 设为主屏B';
     }
-    if (cell.focusButton) {
-      const focused = session.focusSlotId === cell.slotId;
-      cell.focusButton.textContent = focused ? '退出全屏' : '全屏';
-      cell.focusButton.setAttribute('aria-pressed', String(focused));
+    if (cell.mainActions) {
+      cell.mainActions.hidden = Boolean(cell.mainButton?.hidden && cell.mainAButton?.hidden && cell.mainBButton?.hidden);
     }
-    if (cell.lockButton) cell.lockButton.textContent = cell.locked ? '已锁定' : '锁定';
+    if (cell.lockButton) {
+      cell.lockButton.textContent = cell.locked ? '🔒' : '🔓';
+      cell.lockButton.title = cell.locked ? '解除锁定' : '锁定窗口，批量换一批时保留当前视频';
+      cell.lockButton.classList.toggle('is-on', Boolean(cell.locked));
+      cell.lockButton.disabled = !cell.item;
+    }
     const key = cell.item ? itemKey(cell.item) : '';
     const favorite = Boolean(key && session.preferenceState.favoritePickcodes.has(key));
     const excluded = Boolean(key && session.preferenceState.excludedPickcodes.has(key));
-    const isMain = session.layoutMode !== 'mainDual' && session.mainSlotId === cell.slotId;
+    const isMainA = session.mainSlotId === cell.slotId;
+    const isMainB = session.layoutMode === 'mainDual' && session.secondaryMainSlotId === cell.slotId;
+    const isMain = session.layoutMode !== 'mainDual' && isMainA;
     if (cell.favoriteButton) {
-      cell.favoriteButton.textContent = favorite ? '★ 已收藏' : '☆ 收藏';
+      cell.favoriteButton.textContent = favorite ? '★' : '☆';
+      cell.favoriteButton.title = favorite ? '取消收藏' : '收藏视频';
       cell.favoriteButton.setAttribute('aria-pressed', String(favorite));
       cell.favoriteButton.disabled = !cell.item;
+      cell.favoriteButton.classList.toggle('is-on', favorite);
     }
     if (cell.excludeButton) {
-      cell.excludeButton.textContent = excluded ? '已排除' : '排除';
+      cell.excludeButton.textContent = excluded ? '↩' : '🚫';
+      cell.excludeButton.title = excluded ? '恢复到随机候选池' : '排除视频，不再随机抽到';
       cell.excludeButton.setAttribute('aria-pressed', String(excluded));
       cell.excludeButton.disabled = !cell.item;
+      cell.excludeButton.classList.toggle('is-on', excluded);
     }
     if (cell.nextButton) {
-      cell.nextButton.textContent = cell.locked ? '已锁定' : '换片';
+      cell.nextButton.textContent = '⏭ 下一个';
       cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked || !session.availableItems.length;
     }
     if (cell.lockIndicator) cell.lockIndicator.hidden = !cell.locked;
     if (cell.favoriteIndicator) cell.favoriteIndicator.hidden = !favorite;
     if (cell.soundIndicator) cell.soundIndicator.hidden = cell.video.muted;
     if (cell.mainIndicator) {
-      cell.mainIndicator.hidden = !isMain;
-      cell.mainIndicator.textContent = session.layoutMode === 'mainDual'
-        ? (session.mainSlotId === cell.slotId ? '主屏 A' : '主屏 B') : '主屏';
+      cell.mainIndicator.hidden = !(isMain || isMainA || isMainB);
+      cell.mainIndicator.textContent = isMainB ? '主屏 B' : '主屏 A';
+    }
+    if (cell.mainScreenBadge) {
+      cell.mainScreenBadge.hidden = !(isMain || isMainA || isMainB);
+      cell.mainScreenBadge.textContent = isMainB ? '主屏 B' : '主屏';
     }
     cell.box.classList.toggle('is-locked', cell.locked);
     cell.box.classList.toggle('is-favorite', favorite);
     cell.box.classList.toggle('is-excluded', excluded);
     cell.box.classList.toggle('is-selected', session.selectedSlotId === cell.slotId);
     cell.box.classList.toggle('is-main', isMain);
-    cell.box.classList.toggle('is-main-a', session.mainSlotId === cell.slotId && session.layoutMode === 'mainDual');
-    cell.box.classList.toggle('is-main-b', session.secondaryMainSlotId === cell.slotId && session.layoutMode === 'mainDual');
+    cell.box.classList.toggle('is-main-a', isMainA && session.layoutMode === 'mainDual');
+    cell.box.classList.toggle('is-main-b', isMainB);
     updateCellProgress(cell);
+    updateGlobalControls(session);
   }
-
   function updateGlobalControls(session) {
+    const visibleCells = session.cells.filter(cell => cell && cell.item && !cell.box.hidden && !cell.failed && !cell.layoutPaused);
+    const allPaused = visibleCells.length > 0 && visibleCells.every(cell => cell.video.paused);
     if (session.pauseAllButton) {
-      session.pauseAllButton.textContent = session.globalPaused ? '全部继续' : '全部暂停';
+      session.pauseAllButton.textContent = allPaused ? '▶ 全部播放' : '⏸ 全部暂停';
+      session.pauseAllButton.setAttribute('aria-label', allPaused ? '全部继续' : '全部暂停');
+      session.pauseAllButton.disabled = visibleCells.length === 0;
     }
     if (session.audioSourceSelect) session.audioSourceSelect.value = String(session.audioSourceIndex);
-    if (session.muteAllButton) {
-      const hasSource = Number.isInteger(session.audioSourceIndex) && session.audioSourceIndex >= 0 && session.audioSourceIndex < session.layoutCount;
-      session.muteAllButton.textContent = hasSource ? '全部静音' : '恢复声音';
-      session.muteAllButton.disabled = !session.cells.some(cell => cell && cell.index < session.layoutCount);
-    }
   }
 
   function updatePlaybackModeControls(session) {
-    const looping = session.videoEndMode === 'loop';
-    if (session.loopModeButton) {
-      session.loopModeButton.classList.toggle('is-active', looping);
-      session.loopModeButton.setAttribute('aria-pressed', String(looping));
-    }
-    if (session.autoNextButton) {
-      session.autoNextButton.classList.toggle('is-active', !looping);
-      session.autoNextButton.setAttribute('aria-pressed', String(!looping));
-    }
+    if (session.endModeSelect) session.endModeSelect.value = session.videoEndMode === 'next' ? 'next' : 'loop';
   }
 
   function setPlaybackEndMode(session, mode) {
@@ -2832,10 +2838,15 @@
 
   function updateRoundControls(session) {
     const remaining = session.availableItems.length;
+    const detail = '第' + session.roundNumber + '轮 · 匹配' + session.candidateTotal + '个 · 候选池' + session.roundPoolSize +
+      '个 · 剩余' + remaining + '个 · 失败' + (session.failedCount || 0) + '个 · 收藏' +
+      session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
+    const layoutLabel = session.layoutMode === 'main2' ? '1大2小'
+      : session.layoutMode === 'main5' ? '1大5小'
+        : session.layoutMode === 'mainDual' ? '2大' + session.dualSmallCount + '小'
+          : session.layoutCount + '格';
+    if (session.infoText) session.infoText.textContent = '共 ' + session.candidateTotal + ' 个视频 · ' + layoutLabel;
     if (session.roundStatus) {
-      const detail = '第' + session.roundNumber + '轮 · 匹配' + session.candidateTotal + '个 · 候选池' + session.roundPoolSize +
-        '个 · 剩余' + remaining + '个 · 失败' + (session.failedCount || 0) + '个 · 收藏' +
-        session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
       const compact = '第' + session.roundNumber + '轮 · 剩余' + remaining + '/' + session.roundPoolSize;
       session.roundStatus.textContent = session.roundMessage ? compact + ' · ' + session.roundMessage : compact;
       session.roundStatus.title = session.roundMessage ? detail + ' · ' + session.roundMessage : detail;
@@ -2849,7 +2860,8 @@
     }
     if (session.newRoundButton) {
       session.newRoundButton.disabled = session.closed || session.roundRefreshing || session.authBlocked;
-      session.newRoundButton.textContent = session.roundRefreshing ? '正在抽取…' : '开启新一轮';
+      session.newRoundButton.textContent = session.roundRefreshing ? '🔄 正在抽取…' : '🔄 新一轮';
+      session.newRoundButton.setAttribute('aria-label', session.roundRefreshing ? '正在抽取' : '开启新一轮');
     }
     if (session.resumeButton) session.resumeButton.hidden = !session.authBlocked;
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
@@ -3159,7 +3171,7 @@
     cell.video.loop = session.videoEndMode === 'loop';
     cell.timer = null;
     cell.quality.textContent = '';
-    cell.name.textContent = (cell.index + 1) + '. ' + item.name;
+    cell.name.textContent = item.name;
     cell.name.title = item.name || '';
     revealCellHeading(cell, 'programmatic');
     const visible = isCellVisible(session, cell);
@@ -3253,17 +3265,19 @@
       session.settings = indexed.settings;
       session.recentDirectories = indexed.recentDirectories;
       session.filters = indexed.filters;
+      const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
+        (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
+        (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
+        ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
+        indexed.total + ' 个 · 默认静音';
+      if (session.bar) session.bar.title = fullIndexSummary;
       if (session.description) {
-        const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
-          (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
-          (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
-          ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
-          indexed.total + ' 个 · 默认静音';
         session.description.title = fullIndexSummary;
         session.description.setAttribute('aria-label', '115 多画面播放 · 索引版 v' + VERSION + ' · ' + fullIndexSummary);
         const summary = session.description.querySelector('small');
         if (summary) summary.textContent = '索引版 v' + VERSION + ' · ' + indexed.total + ' 个候选';
       }
+      if (session.versionBadge) session.versionBadge.textContent = 'v' + VERSION;
 
       let sampled = await indexStore.sampleVideos(
         session.scan.scanId, MAX_CANDIDATES,
@@ -3718,11 +3732,7 @@
       if (session.audioSourceIndex >= 0) session.lastAudioSourceIndex = session.audioSourceIndex;
       updatePlaybackModeControls(session);
       if (session.dualSmallCountSelect) session.dualSmallCountSelect.value = String(settings.dualSmallCount);
-      if (session.smartAspectButton) {
-        session.smartAspectButton.textContent = settings.smartAspectMode ? '智能画幅：开' : '智能画幅：关';
-        session.smartAspectButton.classList.toggle('is-active', Boolean(settings.smartAspectMode));
-        session.smartAspectButton.setAttribute('aria-pressed', String(settings.smartAspectMode));
-      }
+      if (session.aspectModeSelect) session.aspectModeSelect.value = settings.smartAspectMode ? 'smart' : 'fixed';
       session.cells.forEach(cell => {
         if (!cell) return;
         cell.video.loop = settings.videoEndMode === 'loop';
@@ -4292,33 +4302,47 @@
     box.dataset.slotId = slotId;
     box.dataset.slotIndex = String(index);
     box.tabIndex = 0;
-    const heading = element('div', 'heading');
-    const name = element('span', 'name', item ? (index + 1) + '. ' + item.name : (index + 1) + '. 空窗口');
+    const heading = element('div', 'heading name');
+    const indexBadge = element('span', 'idx', String(index + 1));
+    const name = element('span', 'fname', item ? item.name : '空窗口');
     name.title = item?.name || '';
     const quality = element('span', 'quality');
+    quality.hidden = true;
     const indicators = element('div', 'cell-indicators');
+    indicators.hidden = true;
     const mainIndicator = element('span', 'cell-indicator cell-indicator-main', '主屏');
     const lockIndicator = element('span', 'cell-indicator cell-indicator-lock', '锁定');
     const favoriteIndicator = element('span', 'cell-indicator cell-indicator-favorite', '收藏');
     const soundIndicator = element('span', 'cell-indicator cell-indicator-sound', '声音');
     [mainIndicator, lockIndicator, favoriteIndicator, soundIndicator].forEach(indicator => { indicator.hidden = true; });
     indicators.append(mainIndicator, lockIndicator, favoriteIndicator, soundIndicator);
-    const tools = element('div', 'cell-tools');
+    heading.append(indexBadge, name, quality, indicators);
+
+    const tools = element('div', 'cell-tools hud');
     tools.setAttribute('aria-label', '视频窗口操作');
-    const primaryTools = element('div', 'cell-primary-tools');
-    const secondaryTools = element('div', 'cell-secondary-tools');
-    const progressRow = element('div', 'cell-progress-row');
-    const currentTimeLabel = element('span', 'cell-time cell-time-current', '0:00');
-    const progressInput = element('input', 'cell-progress');
-    progressInput.type = 'range';
-    progressInput.min = '0';
-    progressInput.max = '0';
-    progressInput.step = '0.1';
-    progressInput.value = '0';
-    progressInput.disabled = !item;
-    progressInput.setAttribute('aria-label', '播放进度');
-    const durationLabel = element('span', 'cell-time cell-time-duration', '--:--');
-    progressRow.append(currentTimeLabel, progressInput, durationLabel);
+    const primaryTools = element('div', 'controls cell-primary-tools');
+    const progressBar = element('div', 'bar cell-progress-row');
+    progressBar.setAttribute('role', 'slider');
+    progressBar.setAttribute('aria-label', '播放进度');
+    progressBar.setAttribute('aria-valuemin', '0');
+    progressBar.setAttribute('aria-valuemax', '100');
+    const progressFill = element('i', 'cell-progress');
+    progressBar.append(progressFill);
+    const hudSpacer = element('div');
+    const hudBottom = element('div');
+    hudBottom.append(primaryTools, progressBar);
+    tools.append(heading, hudSpacer, hudBottom);
+
+    const mainActions = element('div', 'main-screen-actions');
+    mainActions.hidden = true;
+    const mainButton = element('button', 'main-screen-action cell-main', '↗ 设为主屏');
+    const mainAButton = element('button', 'main-screen-action cell-main-a', '↗ 设为主屏A');
+    const mainBButton = element('button', 'main-screen-action cell-main-b', '↗ 设为主屏B');
+    [mainButton, mainAButton, mainBButton].forEach(button => { button.type = 'button'; });
+    mainActions.append(mainButton, mainAButton, mainBButton);
+    const mainScreenBadge = element('div', 'main-screen-badge', '主屏');
+    mainScreenBadge.hidden = true;
+
     const video = element('video');
     video.controls = false;
     video.tabIndex = 0;
@@ -4330,91 +4354,112 @@
     const cell = {
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
-      progressInput, currentTimeLabel, durationLabel,
-      hls: null, timer: null, abort: null, generation: 0,
+      mainActions, mainScreenBadge, progressBar, progressFill,
+      hls: null, timer: null, abort: null, generation: 0, clickTimer: null,
       failed: false, hasPlayed: false, loadStarted: false,
       userPaused: false, layoutPaused: false, locked: false,
       aspectRatio: DEFAULT_ASPECT_RATIO, retryCount: 0, authBlocked: false
     };
 
-    progressInput.addEventListener('change', () => {
+    const seekTo = event => {
       const duration = Number(video.duration);
-      const target = Number(progressInput.value);
-      if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(target)) return;
-      video.currentTime = Math.max(0, Math.min(duration, target));
+      const rect = progressBar.getBoundingClientRect();
+      if (!cell.item || !Number.isFinite(duration) || duration <= 0 || rect.width <= 0) return;
+      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      video.currentTime = ratio * duration;
       updateCellProgress(cell);
+    };
+    let dragging = false;
+    progressBar.addEventListener('pointerdown', event => {
+      event.stopPropagation();
+      event.preventDefault();
+      dragging = true;
+      progressBar.classList.add('dragging');
+      progressBar.setPointerCapture(event.pointerId);
+      seekTo(event);
     });
+    progressBar.addEventListener('pointermove', event => { if (dragging) seekTo(event); });
+    const endProgressDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      progressBar.classList.remove('dragging');
+    };
+    progressBar.addEventListener('pointerup', endProgressDrag);
+    progressBar.addEventListener('pointercancel', endProgressDrag);
+    progressBar.addEventListener('click', event => event.stopPropagation());
 
-    const makeTool = (className, label, handler, target = primaryTools) => {
-      const button = element('button', 'cell-tool ' + className, label);
+    const makeTool = (className, label, handler) => {
+      const button = element('button', 'hbtn cell-tool ' + className, label);
       button.type = 'button';
+      button.dataset.act = className.replace(/^cell-/, '');
       button.disabled = !item;
       button.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
         session.selectedSlotId = slotId;
         updateCellControls(session, cell);
         handler(event);
       };
-      target.append(button);
+      primaryTools.append(button);
       return button;
     };
-
-    cell.pauseButton = makeTool('cell-pause', '暂停', () => {
-      if (video.paused) {
-        cell.userPaused = false;
-        void tryPlay(session, cell);
-      } else {
-        cell.userPaused = true;
-        video.pause();
-      }
-      updateCellControls(session, cell);
-    });
-    cell.backButton = makeTool('cell-back', '−10秒', () => {
+    cell.backButton = makeTool('cell-back', '⏪ -10s', () => {
       if (Number.isFinite(video.duration)) video.currentTime = Math.max(0, video.currentTime - 10);
     });
-    cell.forwardButton = makeTool('cell-forward', '+10秒', () => {
+    cell.nextButton = makeTool('cell-next', '⏭ 下一个', () => swapCell(session, cell));
+    cell.nextButton.classList.add('big');
+    cell.forwardButton = makeTool('cell-forward', '+10s ⏩', () => {
       if (Number.isFinite(video.duration)) video.currentTime = Math.min(video.duration, video.currentTime + 10);
     });
-    cell.muteButton = makeTool('cell-mute', '声音', () => {
+    cell.forwardButton.dataset.act = 'fwd';
+    cell.muteButton = makeTool('cell-mute', '🔈', () => {
       applyAudioSource(session, video.muted ? cell.index : -1);
     });
-    cell.nextButton = makeTool('cell-next', '换片', () => swapCell(session, cell));
-    cell.favoriteButton = makeTool('cell-favorite', '☆ 收藏', () => { void toggleFavorite(session, cell); });
-    cell.excludeButton = makeTool('cell-exclude', '排除', () => { void toggleExcluded(session, cell); }, secondaryTools);
-    cell.mainButton = makeTool('cell-main', '主屏', () => promoteMainCell(session, cell, 'A'), secondaryTools);
-    cell.mainAButton = makeTool('cell-main-a', '设为主屏A', () => promoteMainCell(session, cell, 'A'), secondaryTools);
-    cell.mainBButton = makeTool('cell-main-b', '设为主屏B', () => promoteMainCell(session, cell, 'B'), secondaryTools);
-    cell.focusButton = makeTool('cell-focus', '全屏', () => toggleCellFullscreen(session, cell), secondaryTools);
-    cell.lockButton = makeTool('cell-lock', '锁定', () => {
+    cell.lockButton = makeTool('cell-lock', '🔓', () => {
       cell.locked = !cell.locked;
       updateCellControls(session, cell);
       updateRoundControls(session);
-    }, secondaryTools);
+    });
+    cell.favoriteButton = makeTool('cell-favorite', '☆', () => { void toggleFavorite(session, cell); });
+    cell.excludeButton = makeTool('cell-exclude', '🚫', () => { void toggleExcluded(session, cell); });
 
-    heading.append(name, quality, indicators);
-    tools.append(progressRow, primaryTools, secondaryTools);
-    box.append(heading, video, tools, status);
+    const handleMainAction = (event, target) => {
+      event.preventDefault();
+      event.stopPropagation();
+      session.selectedSlotId = slotId;
+      updateCellControls(session, cell);
+      promoteMainCell(session, cell, target);
+    };
+    mainButton.onclick = event => handleMainAction(event, 'A');
+    mainAButton.onclick = event => handleMainAction(event, 'A');
+    mainBButton.onclick = event => handleMainAction(event, 'B');
+
+    box.append(video, mainActions, mainScreenBadge, status, tools);
     session.grid.append(box);
     session.cells[index] = cell;
-    revealCellHeading(cell, 'programmatic');
-    box.addEventListener('pointerenter', event => revealCellHeading(cell, event.pointerType));
-    box.addEventListener('pointermove', event => revealCellHeading(cell, event.pointerType), { passive: true });
-    box.addEventListener('pointerdown', event => revealCellHeading(cell, event.pointerType));
-    box.addEventListener('pointerleave', () => scheduleCellHeadingHide(cell));
-    box.addEventListener('focusin', () => revealCellHeading(cell, 'keyboard'));
-    box.addEventListener('focusout', () => scheduleCellHeadingHide(cell));
-    box.addEventListener('click', event => {
-      if (event.target instanceof Element && event.target.closest('button')) return;
-      session.selectedSlotId = slotId;
-      updateCellControls(session, cell);
-    });
 
-    video.addEventListener('click', () => {
+    box.addEventListener('click', event => {
+      if (event.target instanceof Element &&
+          (event.target.closest('.main-screen-actions') || event.target.closest('.controls') || event.target.closest('.bar'))) return;
       session.selectedSlotId = slotId;
       updateCellControls(session, cell);
-      toggleCellPlayback(session, cell);
+      if (cell.clickTimer) {
+        clearTimeout(cell.clickTimer);
+        cell.clickTimer = null;
+        return;
+      }
+      cell.clickTimer = setTimeout(() => {
+        cell.clickTimer = null;
+        toggleCellPlayback(session, cell);
+      }, 250);
     });
-    video.addEventListener('dblclick', event => {
-      event.preventDefault();
+    box.addEventListener('dblclick', event => {
+      if (event.target instanceof Element &&
+          (event.target.closest('.main-screen-actions') || event.target.closest('.controls') || event.target.closest('.bar'))) return;
+      if (cell.clickTimer) {
+        clearTimeout(cell.clickTimer);
+        cell.clickTimer = null;
+      }
       session.selectedSlotId = slotId;
       updateCellControls(session, cell);
       toggleCellFullscreen(session, cell);
@@ -4432,6 +4477,12 @@
     video.addEventListener('seeked', () => updateCellProgress(cell));
     video.addEventListener('emptied', () => updateCellProgress(cell));
     video.addEventListener('loadedmetadata', () => {
+      updateCellProgress(cell);
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        cell.aspectRatio = video.videoWidth / video.videoHeight;
+        scheduleLayoutReflow(session, 120);
+      }
+    });    video.addEventListener('loadedmetadata', () => {
       updateCellProgress(cell);
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         cell.aspectRatio = video.videoWidth / video.videoHeight;
@@ -5248,11 +5299,7 @@
       session.dualSmallCountSelect.hidden = session.layoutMode !== 'mainDual';
       session.dualSmallCountSelect.value = String(session.dualSmallCount);
     }
-    if (session.smartAspectButton) {
-      session.smartAspectButton.textContent = session.smartAspectMode ? '智能画幅：开' : '智能画幅：关';
-      session.smartAspectButton.classList.toggle('is-active', Boolean(session.smartAspectMode));
-      session.smartAspectButton.setAttribute('aria-pressed', String(session.smartAspectMode));
-    }
+    if (session.aspectModeSelect) session.aspectModeSelect.value = session.smartAspectMode ? 'smart' : 'fixed';
     updatePlaybackModeControls(session);
     updateGlobalControls(session);
     updateRoundControls(session);
@@ -5401,23 +5448,18 @@
       panel.setAttribute('aria-modal', 'true');
       panel.setAttribute('aria-label', '115索引多画面播放');
       panel.tabIndex = -1;
-      const bar = element('header', 'bar');
-      const description = element('div', 'description');
+      const bar = element('div', 'bar toolbar');
+      bar.id = 'topbar';
       const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
         (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
         (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
         ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
         indexed.total + ' 个 · 本次抽样 ' + items.length + ' 个 · 默认静音';
-      description.title = fullIndexSummary;
-      description.setAttribute('aria-label', '115 多画面播放 · 索引版 v' + VERSION + ' · ' + fullIndexSummary);
-      description.append(
-        element('strong', '', '115 多画面播放'),
-        element('small', '', '索引版 v' + VERSION + ' · ' + indexed.total + ' 个候选')
-      );
+      bar.title = fullIndexSummary;
 
       const grid = element('div', 'grid');
       const session = {
-        panel, grid, description, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
+        panel, grid, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
         preferenceState: indexed.preferenceState, profiles: indexed.profiles, filters: indexed.filters,
         settings: indexed.settings, recentDirectories: indexed.recentDirectories,
         favoriteSelected: new Set(), favoriteEntries: [],
@@ -5433,15 +5475,14 @@
         audioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) ? indexed.settings.audioSourceIndex : -1,
         lastAudioSourceIndex: Number.isInteger(indexed.settings.audioSourceIndex) && indexed.settings.audioSourceIndex >= 0 ? indexed.settings.audioSourceIndex : 0,
         fullscreenAudioBackup: null, fullscreenExitAt: 0,
-        layoutResizeObserver: null, layoutResizeHandler: null, layoutReflowTimer: null, layoutReflowFrame: 0, moreDetails: null,
-        bar, toolbarHideTimer: null, lastPointerType: 'programmatic',
+        layoutResizeObserver: null, layoutResizeHandler: null, layoutReflowTimer: null, layoutReflowFrame: 0,
+        bar, toolbarHideTimer: null, lastPointerType: 'programmatic', layoutPickerOpen: false, layoutPickerMenu: null, layoutPickerButton: null,
         toolsDrawerLayer: null, toolsDrawer: null, toolsDrawerTabs: null, toolsDrawerBody: null,
         toolsButton: null, toolsTabButtons: {}, activeToolTab: null,
         mainSlotId: null, secondaryMainSlotId: null, focusSlotId: null, selectedSlotId: 'slot-1',
-        layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, smartAspectButton: null,
-        playbackModeGroup: null, loopModeButton: null, autoNextButton: null,
-        audioSourceSelect: null, pauseAllButton: null, muteAllButton: null,
-        roundStatus: null, swapAllButton: null, newRoundButton: null,
+        layoutButtons: [], layoutModeSelect: null, dualSmallCountSelect: null, aspectModeSelect: null, endModeSelect: null,
+        audioSourceSelect: null, pauseAllButton: null, indexManagerButton: null, layoutPickerMenu: null, layoutPickerButton: null,
+        roundStatus: null, infoText: null, description: null, versionBadge: null, swapAllButton: null, newRoundButton: null,
         filterToggleButton: null, filterPanel: null, filterInputs: null, filterMessage: null,
         recentButton: null, recentPanel: null, recentClearButton: null, recentMessage: null, favoritesButton: null, favoritePanel: null,
         excludedButton: null, excludedPanel: null, excludedList: null, excludedMessage: null, excludedEntries: [],
@@ -5456,6 +5497,13 @@
               event.preventDefault();
               event.stopPropagation();
               closeToolsDrawer(session, true);
+              return;
+            }
+            if (session.layoutPickerOpen) {
+              event.preventDefault();
+              event.stopPropagation();
+              closeLayoutPicker(session);
+              scheduleToolbarHide(session);
               return;
             }
             if (formEditing) return;
@@ -5528,6 +5576,26 @@
       const toolsTabs = element('nav', 'tools-drawer-tabs');
       toolsTabs.setAttribute('role', 'tablist');
       toolsTabs.setAttribute('aria-label', '工具分类');
+      const toolTabDefinitions = [
+        ['filter', '智能筛选', filterPanel],
+        ['recent', '最近目录', recentPanel],
+        ['favorites', '收藏列表', favoritePanel],
+        ['excluded', '排除列表', excludedPanel]
+      ];
+      toolTabDefinitions.forEach(([key, label, targetPanel]) => {
+        const button = element('button', 'drawer-tab', label);
+        button.type = 'button';
+        button.id = 'tools-tab-' + key;
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', 'false');
+        targetPanel.id = 'tools-panel-' + key;
+        targetPanel.setAttribute('role', 'tabpanel');
+        targetPanel.setAttribute('aria-labelledby', button.id);
+        button.setAttribute('aria-controls', targetPanel.id);
+        button.onclick = () => setToolsDrawerTab(session, key, false);
+        session.toolsTabButtons[key] = button;
+        toolsTabs.append(button);
+      });
       const toolsBody = element('div', 'tools-drawer-body');
       toolsBody.append(filterPanel, recentPanel, favoritePanel, excludedPanel);
       toolsDrawer.append(toolsHeader, toolsTabs, toolsBody);
@@ -5536,16 +5604,140 @@
         toolsDrawerLayer: toolsLayer, toolsDrawer, toolsDrawerTabs: toolsTabs,
         toolsDrawerBody: toolsBody
       });
-      const toolbar = element('nav', 'toolbar');
-      toolbar.setAttribute('role', 'toolbar');
-      toolbar.setAttribute('aria-label', '多画面布局与播放控制');
+      bar.id = 'topbar';
+      bar.classList.add('toolbar');
+      bar.setAttribute('role', 'toolbar');
+      bar.setAttribute('aria-label', '多画面播放控制');
+
+      const indexManagerButton = element('button', '', '📁 更换文件夹');
+      indexManagerButton.id = 'btnRefolder';
+      indexManagerButton.type = 'button';
+      indexManagerButton.title = '返回目录索引管理，重新选择或扫描目录';
+      indexManagerButton.onclick = () => {
+        closePlayer();
+        globalThis.N115IndexManagerUI?.open?.(launcher);
+      };
+      session.indexManagerButton = indexManagerButton;
+
+      session.swapAllButton = element('button', '', '🔀 全部换一批');
+      session.swapAllButton.id = 'btnShuffle';
+      session.swapAllButton.type = 'button';
+      session.swapAllButton.setAttribute('aria-label', '全部换一批');
+      session.swapAllButton.onclick = () => swapAllUnlocked(session);
+
+      session.pauseAllButton = element('button', '', '⏸ 全部暂停');
+      session.pauseAllButton.id = 'btnToggleAll';
+      session.pauseAllButton.type = 'button';
+      session.pauseAllButton.title = '快捷键：空格暂停/播放；方向键快退/快进 5 秒；M 切换声音；F 放大；N 下一个';
+      session.pauseAllButton.onclick = () => {
+        const visibleCells = session.cells.filter(cell =>
+          cell && cell.item && !cell.box.hidden && !cell.failed && !cell.layoutPaused
+        );
+        const shouldPlay = visibleCells.length > 0 && visibleCells.every(cell => cell.video.paused);
+        session.globalPaused = !shouldPlay;
+        visibleCells.forEach(cell => {
+          clearTimeout(cell.timer);
+          cell.timer = null;
+          if (shouldPlay) {
+            cell.userPaused = false;
+            void tryPlay(session, cell);
+          } else {
+            cell.video.pause();
+          }
+        });
+        updateGlobalControls(session);
+      };
+
+      session.toolsButton = element('button', 'tools-toggle', '🎲 随机探索');
+      session.toolsButton.id = 'btnExplore';
+      session.toolsButton.type = 'button';
+      session.toolsButton.setAttribute('aria-label', '工具');
+      session.toolsButton.setAttribute('aria-expanded', String(!toolsLayer.hidden));
+      session.toolsButton.onclick = () => {
+        if (!toolsLayer.hidden) closeToolsDrawer(session);
+        else setToolsDrawerTab(session, session.activeToolTab || 'filter', false);
+      };
+
+      session.newRoundButton = element('button', '', '🔄 新一轮');
+      session.newRoundButton.id = 'btnNewRound';
+      session.newRoundButton.type = 'button';
+      session.newRoundButton.title = '以当前画面为起点开启新一轮，锁定窗口保留，其余窗口继续随机';
+      session.newRoundButton.setAttribute('aria-label', '开启新一轮');
+      session.newRoundButton.onclick = () => { void startNewRound(session); };
+
+      session.audioSourceSelect = element('select', 'audio-source-select');
+      session.audioSourceSelect.id = 'audioSel';
+      session.audioSourceSelect.setAttribute('aria-label', '声音来源');
+      session.audioSourceSelect.title = '选择播放哪个窗口的声音';
+      session.audioSourceSelect.onchange = () => {
+        applyAudioSource(session, Number(session.audioSourceSelect.value));
+      };
+      // Cells are created by applyLayout below; build the audio options only after they exist,
+      // otherwise this early empty list would erase the account's persisted audio source.
+
+      session.endModeSelect = element('select', 'end-mode-select');
+      session.endModeSelect.id = 'endModeSel';
+      session.endModeSelect.setAttribute('aria-label', '播放结束后的行为');
+      session.endModeSelect.title = '视频结束后的行为';
+      [['loop', '🔁 当前视频循环'], ['next', '⏭ 播完切换下一个']].forEach(([value, label]) => {
+        const option = element('option', '', label);
+        option.value = value;
+        session.endModeSelect.append(option);
+      });
+      session.endModeSelect.onchange = () => setPlaybackEndMode(session, session.endModeSelect.value);
+      updatePlaybackModeControls(session);
+
+      session.aspectModeSelect = element('select', 'aspect-mode-select');
+      session.aspectModeSelect.id = 'aspectModeSel';
+      session.aspectModeSelect.setAttribute('aria-label', '画幅模式');
+      session.aspectModeSelect.title = '根据视频实际宽高比调整主窗与宫格布局';
+      [['smart', '🧠 智能画幅'], ['fixed', '▦ 固定布局']].forEach(([value, label]) => {
+        const option = element('option', '', label);
+        option.value = value;
+        session.aspectModeSelect.append(option);
+      });
+      session.aspectModeSelect.value = session.smartAspectMode ? 'smart' : 'fixed';
+      session.aspectModeSelect.onchange = () => {
+        session.smartAspectMode = session.aspectModeSelect.value !== 'fixed';
+        applyCellVisibility(session);
+        void saveSessionSettings(session).catch(error =>
+          setFilterMessage(session, '智能画幅设置保存失败：' + String(error?.message || error), true)
+        );
+      };
+
+      session.layoutPickerButton = element('button', '', '🗗 切换宫格');
+      session.layoutPickerButton.id = 'btnLayout';
+      session.layoutPickerButton.type = 'button';
+      session.layoutPickerButton.setAttribute('aria-label', '切换宫格');
+      session.layoutPickerButton.setAttribute('aria-expanded', 'false');
+      session.layoutPickerButton.onclick = () => {
+        if (session.layoutPickerOpen) {
+          closeLayoutPicker(session);
+          scheduleToolbarHide(session);
+        } else {
+          session.layoutPickerOpen = true;
+          session.layoutPickerMenu.hidden = false;
+          session.layoutPickerButton.setAttribute('aria-expanded', 'true');
+          revealToolbar(session, false, 'mouse');
+        }
+      };
+
+      const layoutPickerMenu = element('div', 'layout-picker-menu');
+      layoutPickerMenu.hidden = true;
+      layoutPickerMenu.setAttribute('role', 'group');
+      layoutPickerMenu.setAttribute('aria-label', '宫格布局选择');
+      session.layoutPickerMenu = layoutPickerMenu;
       const layoutGroup = element('div', 'layout-group');
       [2, 4, 6, 9, 12].forEach(count => {
         const button = element('button', 'layout-button', count + '格');
         button.type = 'button';
         button.dataset.layout = String(count);
         button.setAttribute('aria-label', count + '格布局');
-        button.onclick = () => applyLayout(session, count);
+        button.onclick = () => {
+          applyLayout(session, count);
+          closeLayoutPicker(session);
+          scheduleToolbarHide(session);
+        };
         session.layoutButtons.push(button);
         layoutGroup.append(button);
       });
@@ -5558,9 +5750,16 @@
       });
       session.layoutModeSelect.onchange = () => {
         const mode = session.layoutModeSelect.value;
-        const count = mode === 'grid' ? session.standardLayoutCount : mode === 'main2' ? 3 : mode === 'main5' ? 6 : 2 + session.dualSmallCount;
+        const count = mode === 'grid' ? session.standardLayoutCount
+          : mode === 'main2' ? 3
+            : mode === 'main5' ? 6
+              : 2 + session.dualSmallCount;
         applyLayout(session, count, mode);
+        closeLayoutPicker(session);
+        scheduleToolbarHide(session);
       };
+      layoutGroup.append(session.layoutModeSelect);
+
       session.dualSmallCountSelect = element('select', 'dual-small-count-select');
       session.dualSmallCountSelect.setAttribute('aria-label', '双主屏小窗口数量');
       for (let count = 1; count <= 7; count++) {
@@ -5572,180 +5771,58 @@
       session.dualSmallCountSelect.hidden = session.layoutMode !== 'mainDual';
       session.dualSmallCountSelect.onchange = () => {
         applyLayout(session, 2 + Number(session.dualSmallCountSelect.value), 'mainDual');
-        if (session.moreDetails) session.moreDetails.open = false;
+        closeLayoutPicker(session);
+        scheduleToolbarHide(session);
       };
-      session.smartAspectButton = element('button', 'toolbar-button smart-aspect-toggle', session.smartAspectMode ? '智能画幅：开' : '智能画幅：关');
-      session.smartAspectButton.type = 'button';
-      session.smartAspectButton.classList.toggle('is-active', Boolean(session.smartAspectMode));
-      session.smartAspectButton.setAttribute('aria-pressed', String(session.smartAspectMode));
-      session.smartAspectButton.title = '根据已解码视频画幅和可用屏幕空间，自动调整宫格行列与窗口尺寸';
-      session.smartAspectButton.onclick = () => {
-        session.smartAspectMode = !session.smartAspectMode;
-        applyCellVisibility(session);
-        if (session.moreDetails) session.moreDetails.open = false;
-        void saveSessionSettings(session).catch(error => setFilterMessage(session, '智能画幅设置保存失败：' + String(error?.message || error), true));
-      };
-      const playbackModeGroup = element('div', 'playback-mode-group');
-      playbackModeGroup.setAttribute('role', 'group');
-      playbackModeGroup.setAttribute('aria-label', '播放结束方式');
-      session.loopModeButton = element('button', 'toolbar-button playback-mode-button', '循环播放');
-      session.loopModeButton.type = 'button';
-      session.loopModeButton.title = '当前视频播放结束后，从头循环播放';
-      session.loopModeButton.onclick = () => setPlaybackEndMode(session, 'loop');
-      session.autoNextButton = element('button', 'toolbar-button playback-mode-button', '自动换片');
-      session.autoNextButton.type = 'button';
-      session.autoNextButton.title = '当前视频播放结束后，自动切换到下一条视频';
-      session.autoNextButton.onclick = () => setPlaybackEndMode(session, 'next');
-      playbackModeGroup.append(session.loopModeButton, session.autoNextButton);
-      session.playbackModeGroup = playbackModeGroup;
-      updatePlaybackModeControls(session);
-      layoutGroup.append(session.layoutModeSelect);
-      session.pauseAllButton = element('button', 'toolbar-button', '全部暂停');
-      session.pauseAllButton.type = 'button';
-      session.pauseAllButton.onclick = () => {
-        session.globalPaused = !session.globalPaused;
-        if (session.globalPaused) {
-          session.cells.forEach(cell => {
-            if (!cell) return;
-            clearTimeout(cell.timer);
-            cell.timer = null;
-            cell.video.pause();
-          });
-        } else {
-          session.cells.forEach(cell => {
-            if (!cell || cell.index >= session.layoutCount || cell.layoutPaused || cell.failed) return;
-            cell.userPaused = false;
-            void tryPlay(session, cell);
-          });
-        }
-        updateGlobalControls(session);
-      };
-      session.audioSourceSelect = element('select', 'audio-source-select');
-      session.audioSourceSelect.setAttribute('aria-label', '声音来源');
-      session.audioSourceSelect.title = '选择播放哪个窗口的声音';
-      session.audioSourceSelect.onchange = () => {
-        applyAudioSource(session, Number(session.audioSourceSelect.value));
-        if (session.moreDetails) session.moreDetails.open = false;
-      };
-      session.muteAllButton = element('button', 'toolbar-button', '恢复声音');
-      session.muteAllButton.type = 'button';
-      session.muteAllButton.onclick = () => {
-        let target = -1;
-        if (session.audioSourceIndex < 0) {
-          const preferred = Number(session.lastAudioSourceIndex);
-          target = Number.isInteger(preferred) && preferred >= 0 && preferred < session.layoutCount
-            ? preferred
-            : (session.cells.find(cell => cell && cell.index < session.layoutCount)?.index ?? -1);
-        }
-        applyAudioSource(session, target);
-        if (session.moreDetails) session.moreDetails.open = false;
-      };
-      const createToolsTab = (key, label) => {
-        const button = element('button', 'drawer-tab', label);
-        button.type = 'button';
-        button.setAttribute('role', 'tab');
-        button.setAttribute('aria-selected', 'false');
-        button.onclick = () => setToolsDrawerTab(session, key, true);
-        session.toolsTabButtons[key] = button;
-        toolsTabs.append(button);
-        return button;
-      };
-      session.filterToggleButton = createToolsTab('filter', '智能筛选');
-      session.recentButton = createToolsTab('recent', '最近目录');
-      session.favoritesButton = createToolsTab('favorites', '收藏列表');
-      session.excludedButton = createToolsTab('excluded', '排除列表');
-      if (!items.length) setToolsDrawerTab(session, 'filter', false);
-      session.swapAllButton = element('button', 'toolbar-button', '全部换一批');
-      session.swapAllButton.type = 'button';
-      session.swapAllButton.onclick = () => swapAllUnlocked(session);
-      session.newRoundButton = element('button', 'toolbar-button', '开启新一轮');
-      session.newRoundButton.type = 'button';
-      session.newRoundButton.onclick = () => { void startNewRound(session); };
-      session.resumeButton = element('button', 'toolbar-button', '验证后继续取流');
+      layoutPickerMenu.append(layoutGroup, session.dualSmallCountSelect);
+
+      session.resumeButton = element('button', 'auth-resume', '验证后继续取流');
       session.resumeButton.type = 'button';
       session.resumeButton.hidden = true;
       session.resumeButton.onclick = () => resumeAfterAuth(session);
-      session.toolsButton = element('button', 'toolbar-button tools-toggle', '工具');
-      session.toolsButton.type = 'button';
-      session.toolsButton.setAttribute('aria-expanded', String(!toolsLayer.hidden));
-      session.toolsButton.onclick = () => {
-        if (!toolsLayer.hidden) closeToolsDrawer(session);
-        else setToolsDrawerTab(session, session.activeToolTab || 'filter', false);
-      };
-      session.roundStatus = element('small', 'round-status', '第1轮 · 剩余' + items.length + '/' + items.length);
-      const moreDetails = element('details', 'toolbar-more');
-      moreDetails.setAttribute('aria-label', '更多播放设置');
-      const moreSummary = element('summary', 'toolbar-more-summary', '更多');
-      moreSummary.title = '双主屏小窗口数量和声音来源设置';
-      const moreMenu = element('div', 'toolbar-more-menu');
-      moreMenu.hidden = true;
-      moreMenu.append(session.dualSmallCountSelect, session.audioSourceSelect, session.muteAllButton);
-      const positionMoreMenu = () => {
-        moreMenu.hidden = !moreDetails.open;
-        if (moreMenu.hidden) return;
-        const anchorRect = moreSummary.getBoundingClientRect();
-        const barRect = bar.getBoundingClientRect();
-        const availableWidth = panel.clientWidth;
-        const menuWidth = Math.min(360, Math.max(270, availableWidth * 0.88));
-        const maxLeft = Math.max(8, availableWidth - menuWidth - 8);
-        const left = Math.max(8, Math.min(anchorRect.left - barRect.left, maxLeft));
-        moreMenu.style.left = left + 'px';
-      };
-      moreDetails.addEventListener('toggle', () => {
-        positionMoreMenu();
-        if (moreDetails.open) revealToolbar(session, false, 'mouse');
-        else scheduleToolbarHide(session);
-      });
-      toolbar.addEventListener('scroll', () => {
-        if (moreDetails.open) positionMoreMenu();
-      }, { passive: true });
-      moreDetails.append(moreSummary);
-      session.moreDetails = moreDetails;
-      // 智能画幅是高频布局控制，必须常驻顶栏前段；不能放回“更多”菜单。
-      toolbar.append(session.smartAspectButton, layoutGroup, session.playbackModeGroup,
-        session.swapAllButton, session.pauseAllButton, session.newRoundButton, session.toolsButton,
-        session.resumeButton, session.roundStatus, moreDetails);
 
-      const close = element('button', 'close', '关闭 ✕');
-      close.type = 'button';
-      close.onclick = closePlayer;
-      bar.append(description, toolbar, close, moreMenu);
-      panel.append(bar, grid, toolsLayer);
+      session.infoText = element('span', 'info', '共 ' + indexed.total + ' 个视频 · ' + session.layoutCount + '格');
+      session.infoText.id = 'infoText';
+      session.roundStatus = element('span', 'round-status', '第1轮');
+      session.roundStatus.setAttribute('aria-hidden', 'true');
+      session.roundStatus.style.cssText = 'position:absolute;left:-10000px;top:0;white-space:nowrap;';
+      session.description = element('div', 'description');
+      session.description.hidden = true;
+      session.description.title = fullIndexSummary;
+      session.description.setAttribute('aria-label', '115 多画面播放 · 索引版 v' + VERSION + ' · ' + fullIndexSummary);
+      session.description.append(element('strong', '', '115 多画面播放'),
+        element('small', '', '索引版 v' + VERSION + ' · ' + indexed.total + ' 个候选'));
+      session.versionBadge = element('span', 'version', 'v' + VERSION);
+      session.versionBadge.id = 'versionBadge';
+
+      bar.append(indexManagerButton, session.swapAllButton, session.pauseAllButton,
+        session.toolsButton, session.newRoundButton, session.audioSourceSelect,
+        session.endModeSelect, session.aspectModeSelect, session.layoutPickerButton,
+        session.infoText, session.versionBadge);
+      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description);
       shadow.append(panel);
+      panel.addEventListener('click', event => {
+        if (!session.layoutPickerOpen || layoutPickerMenu.contains(event.target) || session.layoutPickerButton?.contains(event.target)) return;
+        closeLayoutPicker(session);
+        scheduleToolbarHide(session);
+      });
       const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
       globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
-      const isToolbarRevealZone = event => {
-        const panelTop = panel.getBoundingClientRect().top;
-        const revealHeight = Math.max(TOOLBAR_REVEAL_ZONE_PX, Math.min(96, bar.offsetHeight + 10));
-        return event.clientY - panelTop <= revealHeight;
-      };
+      const isToolbarRevealZone = event => event.clientY - panel.getBoundingClientRect().top < TOOLBAR_REVEAL_ZONE_PX;
       panel.addEventListener('pointermove', event => {
-        const overBar = bar.contains(event.target);
-        if (event.pointerType === 'touch') {
-          revealToolbar(session, true, event.pointerType);
-        } else if (overBar) {
-          revealToolbar(session, false, event.pointerType);
-        } else if (isToolbarRevealZone(event)) {
-          revealToolbar(session, true, event.pointerType);
-        } else if (session.panel.classList.contains('chrome-visible')) {
-          scheduleToolbarHide(session);
-        }
+        if (event.pointerType === 'touch') revealToolbar(session, true, event.pointerType);
+        else if (isToolbarRevealZone(event)) revealToolbar(session, true, event.pointerType);
       }, { passive: true });
       panel.addEventListener('pointerdown', event => {
-        const overBar = bar.contains(event.target);
-        if (event.pointerType === 'touch' || overBar || isToolbarRevealZone(event)) {
+        if (event.pointerType === 'touch' || isToolbarRevealZone(event)) {
           revealToolbar(session, true, event.pointerType);
-        } else if (session.panel.classList.contains('chrome-visible')) {
-          scheduleToolbarHide(session);
         }
       }, { passive: true });
-      panel.addEventListener('pointerleave', () => scheduleToolbarHide(session), { passive: true });
-      bar.addEventListener('pointerenter', event => revealToolbar(session, false, event.pointerType));
-      bar.addEventListener('pointerleave', () => scheduleToolbarHide(session));
+      bar.addEventListener('pointerenter', event => revealToolbar(session, true, event.pointerType));
       bar.addEventListener('focusin', () => {
-        if (bar.querySelector(':focus-visible')) bar.classList.add('keyboard-focus');
+        bar.classList.add('keyboard-focus');
         revealToolbar(session, true, 'keyboard');
       });
       bar.addEventListener('focusout', () => {
@@ -5757,13 +5834,12 @@
       if (typeof ResizeObserver === 'function') {
         session.layoutResizeObserver = new ResizeObserver(() => {
           updateToolsDrawerOffset();
-          if (session.moreDetails?.open) positionMoreMenu();
           if (!session.closed) scheduleLayoutReflow(session, 80);
         });
         session.layoutResizeObserver.observe(grid);
         session.layoutResizeObserver.observe(bar);
       } else {
-        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (session.moreDetails?.open) positionMoreMenu(); if (!session.closed) scheduleLayoutReflow(session, 80); };
+        session.layoutResizeHandler = () => { updateToolsDrawerOffset(); if (!session.closed) scheduleLayoutReflow(session, 80); };
         window.addEventListener('resize', session.layoutResizeHandler);
       }
       shadow.addEventListener('keydown', session.onKey, true);
@@ -5776,7 +5852,8 @@
       opening = false;
       launcher.disabled = false;
     }
-  }  if (window.top !== window.self || document.getElementById(HOST_ID)) return;
+  }
+  if (window.top !== window.self || document.getElementById(HOST_ID)) return;
   const host = element('div');
   host.id = HOST_ID;
   // 不受网页或其他脚本对div设置的隐藏/定位样式影响。
@@ -5791,42 +5868,28 @@
       color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
-    .bar{position:absolute;top:0;left:0;right:0;z-index:20;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"description toolbar close";align-items:center;gap:6px;padding:0 12px;height:44px;min-height:44px;background:linear-gradient(to bottom,rgba(0,0,0,.84),rgba(0,0,0,.24));border:0;box-shadow:none;opacity:0;visibility:hidden;transform:translateY(calc(-100% - 4px));pointer-events:none;transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s}
-    .panel.chrome-visible .bar,.bar.keyboard-focus{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;transition-delay:0s}
-    .description{grid-area:description;display:flex;flex-wrap:nowrap;align-items:center;gap:4px 7px;min-width:0;max-width:190px;overflow:hidden}
-    .description strong{font-size:13px;font-weight:700;letter-spacing:.2px;white-space:nowrap;flex-shrink:0}
-    .description small{font-size:10px;color:#8e9db2;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
-    .toolbar{grid-area:toolbar;display:flex;align-items:center;gap:4px;flex-wrap:nowrap;min-width:0;overflow-x:auto;scrollbar-width:none;padding:1px 0}
-    .toolbar::-webkit-scrollbar{display:none}
-    .layout-group{display:flex;align-items:center;gap:3px;padding:2px;border:1px solid #2c3a4d;border-radius:8px;background:#0b111a;flex-shrink:0}
-    .round-status{display:block;max-width:210px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:#91a2b9;white-space:nowrap;flex-shrink:1}
-    .toolbar-more{position:relative;z-index:30;flex-shrink:0}
-    .toolbar-more-summary{display:inline-flex;align-items:center;justify-content:center;list-style:none;cursor:pointer;color:#dce7f7;background:#1a2635;border:1px solid #35465d;border-radius:7px;padding:4px 8px;font:inherit;font-size:10px;white-space:nowrap}
-    .toolbar-more-summary::-webkit-details-marker{display:none}
-    .toolbar-more[open]>.toolbar-more-summary{background:#244d8c;border-color:#5484d0}
-    .toolbar-more-menu{position:absolute;top:calc(100% + 7px);left:0;right:auto;z-index:100;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:270px;max-width:min(88vw,360px);padding:12px;border:1px solid #35465d;border-radius:10px;background:#121b27;box-shadow:0 14px 40px #000b}
-    .toolbar-more-menu[hidden]{display:none!important}
-    .toolbar-more-menu button,.toolbar-more-menu select{width:100%;min-width:0;max-width:none}
-    .toolbar-more-menu select{font-size:11px}
-    .toolbar-more-menu .dual-small-count-select[hidden]{display:none}
-    .close{grid-area:close;justify-self:end;background:#1a2635;border:1px solid #35465d;color:#dce7f7;padding:4px 8px;border-radius:7px;white-space:nowrap;font-size:10px}
-    .toolbar button,.cell-tool{font:inherit;color:#dce7f7;background:#1a2635;border:1px solid #35465d;border-radius:7px;padding:4px 7px;font-size:10px;white-space:nowrap;transition:background .15s,border-color .15s,transform .15s}
-    .toolbar button:hover,.cell-tool:hover{background:#263b56;border-color:#55749d}
-    .toolbar .is-active,.toolbar .layout-button.is-active{background:#214f96;border-color:#5c8edb;color:#fff}
-    .toolbar button:disabled,.cell-tool:disabled{opacity:.4;cursor:not-allowed}
-    .toolbar button:focus-visible,.cell-tool:focus-visible,.close:focus-visible,.drawer-tab:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
-    .toolbar-button{background:#1a2635!important}
-    .toolbar .smart-aspect-toggle{flex-shrink:0;min-width:88px;font-weight:700;letter-spacing:.1px}
-    .toolbar .smart-aspect-toggle[aria-pressed="true"]{background:#214f96!important;border-color:#6ea4fa;color:#fff;box-shadow:inset 0 0 0 1px #ffffff16}
-    .toolbar .smart-aspect-toggle[aria-pressed="false"]{background:#273343!important;border-color:#65758b;color:#edf3ff}
-    .playback-mode-group{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid #35465d;border-radius:8px;background:#0d141e;flex-shrink:0}
-    .playback-mode-group .playback-mode-button{padding:4px 7px}
-    .toolbar .playback-mode-button[aria-pressed="true"]{background:#214f96!important;border-color:#6ea4fa;color:#fff;box-shadow:inset 0 0 0 1px #ffffff16}
-    .toolbar select{max-width:150px;min-width:88px;padding:6px 8px;border:1px solid #35465d;border-radius:7px;background:#121b27;color:#dce7f7;font:inherit;font-size:11px}
+    #topbar{position:fixed;top:0;left:0;right:0;height:44px;z-index:50;display:flex;align-items:center;gap:10px;padding:0 14px;background:linear-gradient(to bottom,rgba(0,0,0,.8),transparent);transform:translateY(-100%);transition:transform .2s}
+    #topbar.show{transform:translateY(0)}
+    #topbar button{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.7);color:#ddd;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:12px}
+    .layout-picker-menu button{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.7);color:#ddd;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap}
+    #topbar button:hover,.layout-picker-menu button:hover{background:#4da3ff;border-color:#4da3ff;color:#fff}
+    #topbar button:disabled,.layout-picker-menu button:disabled{opacity:.4;cursor:not-allowed}
+    #topbar button:focus-visible,#topbar select:focus-visible,.layout-picker-menu button:focus-visible,.layout-picker-menu select:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
+    #topbar select{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.85);color:#ddd;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:12px}
+    .layout-picker-menu select{max-width:150px;min-width:88px;border:1px solid rgba(121,144,190,.24);background:#111729;color:#dbe4ff;padding:5px 6px;border-radius:7px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap}
+    #topbar .info{color:#888;font-size:12px;margin-left:auto}
+    #topbar .version{color:#666;font-size:10px;white-space:nowrap}
+    #topbar #aspectModeSel{max-width:126px}
+    .layout-picker-menu{position:fixed;top:50px;left:8px;z-index:60;display:flex;align-items:center;gap:7px;flex-wrap:wrap;max-width:min(88vw,560px);padding:10px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(20,22,26,.98);box-shadow:0 12px 40px rgba(0,0,0,.5)}
+    .layout-picker-menu[hidden]{display:none!important}
+    .auth-resume{position:fixed;top:52px;right:10px;z-index:90;padding:8px 12px;border:1px solid #5c8edb;border-radius:7px;background:#18365e;color:#fff}
+    .auth-resume[hidden]{display:none!important}
+    .layout-group{display:flex;align-items:center;gap:3px}
+    .layout-group .layout-button.is-active{background:#214f96;border-color:#5c8edb;color:#fff}
+    .layout-picker-menu .layout-mode-select{min-width:100px;max-width:150px}
+    .layout-picker-menu .dual-small-count-select[hidden]{display:none!important}
     .grid.main-layout{grid-auto-flow:row;grid-auto-rows:minmax(0,1fr);gap:4px;padding:4px;background:#0b0e1a}
     .grid.main2-layout,.grid.main5-layout,.grid.dual-main-layout{align-content:stretch}
-    .grid.dual-main-layout .cell.is-main-a .heading{border-bottom:2px solid #4f8df5}
-    .grid.dual-main-layout .cell.is-main-b .heading{border-bottom:2px solid #39b7a5}
     .cell.is-selected{outline:1px solid #5f8fe0;outline-offset:-1px}
     .cell.is-main{border:0;box-shadow:inset 0 0 0 1px #4f8df5}
     .cell.is-main-b{border:0;box-shadow:inset 0 0 0 1px #39b7a5}
@@ -5844,34 +5907,44 @@
     .cell[hidden]{display:none!important}
     .cell:fullscreen{width:100vw;height:100vh;max-width:100vw;max-height:100vh;background:#000}
     .cell.fullscreen-fallback{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:2147483000!important}
-    .cell.is-locked .heading{border-left:2px solid #d8ad52;padding-left:6px}
-    .cell.is-favorite .cell-indicator-favorite{color:#f5d98c;background:#4c3b1c}
-    .heading{position:absolute;top:8px;left:10px;right:auto;max-width:50%;z-index:6;display:flex;gap:7px;align-items:center;flex-wrap:nowrap;min-height:0;height:auto;padding:0;background:transparent;font-size:11px;border:0;opacity:0;visibility:hidden;transform:translateY(-6px);pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility 0s linear .16s}
-    .cell.heading-visible .heading{opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;transition-delay:0s}
-    .name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;font-size:12px;text-shadow:0 1px 2px #000}
-    .quality{color:#8ea8c9;font-size:10px;white-space:nowrap;flex-shrink:0}
-    .cell-indicators{display:flex;align-items:center;gap:3px;flex-shrink:0}
-    .cell-indicator{display:inline-flex;align-items:center;padding:2px 5px;border-radius:4px;background:#1a2a3d;color:#b9cce6;font-size:9px;line-height:1.2;white-space:nowrap}
+    .heading{display:block;min-width:0;max-width:100%;padding:0;pointer-events:none}
+    .hud .name{display:block;padding:6px 10px;font-size:12px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000}
+    .hud .idx{display:inline-block;background:#4da3ff;color:#fff;font-size:10px;border-radius:3px;padding:1px 5px;margin-right:6px;vertical-align:1px}
+    .fname{display:inline}
+    .quality,.cell-indicators{display:none!important}
     .cell-indicator[hidden]{display:none}
-    .cell-indicator-main{background:#1d3c69;color:#c8ddff}
-    .cell-indicator-lock{background:#493819;color:#f0d69c}
-    .cell-indicator-favorite{background:#493819;color:#f5d98c}
-    .cell-indicator-sound{background:#16443c;color:#9ce0ce}
-    video{position:relative;z-index:1;display:block;width:100%;flex:1;min-height:0;object-fit:contain;background:#000}
-    .cell-tools{position:absolute;z-index:5;inset:0;display:block;padding:0;border:0;border-radius:0;background:linear-gradient(180deg,rgba(0,0,0,.55) 0%,transparent 35%,transparent 60%,rgba(0,0,0,.6) 100%);opacity:0;visibility:hidden;transform:none;transition:opacity .16s ease,visibility .16s;pointer-events:none}
-    .cell:hover .cell-tools,.cell:focus-within .cell-tools{opacity:1;visibility:visible;pointer-events:none}
-    .cell-progress-row{position:absolute;left:10px;right:10px;bottom:8px;display:flex;align-items:center;gap:6px;min-width:0;padding:0;pointer-events:auto}
-    .cell-time{flex:0 0 auto;min-width:32px;color:#d8e4f5;font-size:9px;font-variant-numeric:tabular-nums;text-align:center;white-space:nowrap}
-    .cell-progress{flex:1;min-width:24px;width:100%;height:16px;margin:0;accent-color:#6da5ff;cursor:pointer}
-    .cell-progress:disabled{opacity:.4;cursor:not-allowed}
-    .cell-progress:focus-visible{outline:2px solid #8db7ff;outline-offset:2px;border-radius:4px}
-    .cell-primary-tools,.cell-secondary-tools{position:absolute;display:flex;align-items:center;gap:5px;flex-wrap:wrap;pointer-events:auto}
-    .cell-primary-tools{top:auto;left:50%;bottom:28px;transform:translateX(-50%);justify-content:center;max-width:calc(100% - 20px);padding:7px 9px;border:1px solid #ffffff28;border-radius:8px;background:rgba(12,18,28,.72);backdrop-filter:blur(5px)}
-    .cell-secondary-tools{top:10px;right:10px;justify-content:flex-end;max-width:45%;padding:0;border:0;background:transparent}
-    .cell-primary-tools .cell-next{background:#245dd6;border-color:#4d8df0;color:#fff;font-weight:700}
-    .cell-tool{padding:6px 9px;font-size:10px;line-height:1.2;background:rgba(20,20,20,.75);border-color:rgba(255,255,255,.2);border-radius:6px;backdrop-filter:blur(4px)}
-    .cell-secondary-tools .cell-tool{padding:4px 6px;font-size:9px;background:rgba(12,18,28,.78);border-color:#ffffff2b;backdrop-filter:blur(4px)}
-    .cell-tool[hidden]{display:none!important}
+    video{position:relative;z-index:1;display:block;width:100%;height:100%;object-fit:contain;background:#000}
+    .hud{position:absolute;inset:0;opacity:0;transition:opacity .15s;background:linear-gradient(to bottom,rgba(0,0,0,.55),transparent 35%,transparent 60%,rgba(0,0,0,.6));display:flex;flex-direction:column;justify-content:space-between;z-index:5;pointer-events:none}
+    .hud .controls,.hud .bar{pointer-events:auto}
+    .cell:hover .hud{opacity:1}
+    .hud .controls{display:flex;align-items:center;justify-content:center;gap:14px;padding:10px}
+    .hbtn{border:none;background:rgba(20,20,20,.75);color:#fff;cursor:pointer;border-radius:6px;padding:7px 14px;font-size:13px;backdrop-filter:blur(4px);transition:.12s;border:1px solid rgba(255,255,255,.15)}
+    .hbtn:hover{background:#4da3ff;border-color:#4da3ff}
+    .hbtn.big{font-size:16px;padding:8px 18px}
+    .hud .controls{gap:5px;padding:8px 6px;flex-wrap:wrap}
+    .hbtn{padding:6px 8px;font-size:12px}
+    .hbtn.is-on{background:rgba(232,182,75,.9);color:#111;border-color:#e8b64b}
+    .hbtn:disabled{opacity:.4;cursor:not-allowed}
+    .hbtn:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
+    .hud .bar{height:16px;padding:7px 0;background:transparent;cursor:pointer;position:relative;touch-action:none}
+    .hud .bar::before{content:'';position:absolute;left:0;right:0;top:7px;height:3px;background:rgba(255,255,255,.18);border-radius:2px;transition:height .1s}
+    .hud .bar:hover::before,.hud .bar.dragging::before{height:6px}
+    .hud .bar i{position:absolute;left:0;top:7px;height:3px;width:0%;background:#4da3ff;display:block;border-radius:2px;pointer-events:none;transition:height .1s}
+    .hud .bar:hover i,.hud .bar.dragging i{height:6px}
+    .hud .bar i::after{content:'';position:absolute;right:-6px;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#4da3ff;box-shadow:0 0 4px rgba(0,0,0,.6);opacity:0;transition:opacity .1s}
+    .hud .bar:hover i::after,.hud .bar.dragging i::after{opacity:1}
+    .main-screen-actions{position:absolute;top:10px;right:10px;z-index:8;display:flex;align-items:center;gap:5px}
+    .main-screen-actions[hidden],.main-screen-actions .main-screen-action[hidden]{display:none!important}
+    .main-screen-action{display:inline-flex;align-items:center;gap:5px;padding:7px 10px;border:1px solid rgba(153,139,255,.55);border-radius:8px;background:rgba(13,18,39,.88);color:#f3f0ff;font-family:inherit;font-size:11px;font-weight:750;line-height:1.2;cursor:pointer;box-shadow:0 5px 16px rgba(0,0,0,.35);backdrop-filter:blur(8px)}
+    .main-screen-action:hover{border-color:#78e7ed;background:rgba(66,57,145,.94);color:#fff}
+    .main-screen-action:focus-visible{outline:2px solid #78e7ed;outline-offset:2px}
+    .main-screen-badge{position:absolute;top:10px;left:10px;z-index:8;display:inline-flex;align-items:center;padding:6px 9px;border:1px solid rgba(130,232,220,.4);border-radius:8px;background:rgba(12,50,55,.86);color:#a8fff0;font-size:11px;font-weight:750;letter-spacing:.5px;box-shadow:0 5px 16px rgba(0,0,0,.3)}
+    .main-screen-badge[hidden]{display:none!important}
+    .cell.is-locked{outline:2px solid #e8b64b;outline-offset:-2px;z-index:5}
+    .cell.is-selected:not(.is-locked){outline:2px solid rgba(255,255,255,.55);outline-offset:-2px;z-index:4}
+    .cell.is-main{outline:2px solid rgba(143,128,255,.82);outline-offset:-2px}
+    .cell.is-main-a{outline:2px solid rgba(143,128,255,.82);outline-offset:-2px}
+    .cell.is-main-b{outline:1px solid rgba(107,227,238,.55);outline-offset:-2px}
     .status{position:absolute;z-index:3;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:9px 13px;line-height:1.6;
       background:#111923eF;border:1px solid #ffffff18;border-radius:7px;color:#d7e0ef;text-align:center;font-size:12px;pointer-events:none;overflow-wrap:anywhere}
     .status[hidden]{display:none}
@@ -5925,41 +5998,28 @@
     .backup-status.is-error{color:#ff9c9c}
     .backup-file-input[hidden]{display:none}
     @media(max-width:1000px){
-      .bar{grid-template-columns:minmax(110px,auto) minmax(0,1fr) auto;gap:4px 6px;padding:0 8px}
-      .description strong{font-size:12px}
-      .description small{display:none}
-      .toolbar{flex-wrap:nowrap;gap:4px}
-      .toolbar button,.toolbar-more-summary,.close{padding:4px 6px}
-      .toolbar select{min-width:78px;padding:4px 6px}
       .grid[data-layout="12"]{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(4,minmax(0,1fr))}
       .grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
     }
-    @media(max-width:620px){
-      .bar{height:auto;min-height:0;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"description close" "toolbar toolbar";padding:6px 7px;gap:4px 7px}
-      .description{flex-wrap:nowrap;gap:3px 8px}
-      .description strong{font-size:14px}
-      .description small{display:none}
-      .toolbar{width:100%;gap:4px;flex-wrap:nowrap;overflow-x:auto}
-      .toolbar-more-menu{right:auto;left:0}
+    @media(max-width:680px){
+      #topbar{gap:4px;padding:0 6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain}
+      #topbar::-webkit-scrollbar{display:none}
+      #topbar button,#topbar select{flex:0 0 auto}
+      #topbar button{padding:4px 6px;font-size:10px}
+      #topbar select{max-width:100px;padding:4px 5px;font-size:10px}
+      #topbar #aspectModeSel{max-width:98px}
+      #topbar .info,#topbar .version{display:none}
       .grid[data-layout="12"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr))}
       .grid[data-layout="9"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr))}
       .grid[data-layout="6"]{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr))}
-      .heading{top:6px;left:7px;max-width:50%;gap:4px}
-      .quality{font-size:9px}
-      .cell-indicator{font-size:8px}
-      .cell-primary-tools{max-width:calc(100% - 12px);gap:3px;padding:5px}
-      .cell-primary-tools .cell-tool{padding:4px 5px;font-size:9px}
-      .cell-secondary-tools{top:6px;right:6px;max-width:45%;gap:3px}
-      .cell-secondary-tools .cell-tool{padding:3px 4px;font-size:8px}
-      .cell-progress-row{left:6px;right:6px;bottom:5px;gap:3px}
-      .cell-time{min-width:24px;font-size:8px}
-      .cell-progress{min-width:16px;height:12px}
+      .hud .name{padding:6px 10px;font-size:12px}
+      .main-screen-actions{top:6px;right:6px;gap:3px}
+      .main-screen-action{padding:5px 7px;font-size:10px}
       .tools-drawer{width:min(380px,96vw)}
     }
-    @media(hover:none){
-      .cell-tools{visibility:visible;opacity:1;transform:none}
-    }
-  `;  const launcher = element('button', 'launcher', '多画面播放（索引版）');
+    @media(hover:none){.cell-tools{opacity:1;visibility:visible}}
+  `;
+  const launcher = element('button', 'launcher', '多画面播放（索引版）');
   launcher.type = 'button';
   launcher.title = '打开多宫格播放器；首次使用请先通过目录索引管理扫描当前目录';
   launcher.onclick = () => { void openPlayer(); };
