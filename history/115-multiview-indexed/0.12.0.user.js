@@ -999,6 +999,7 @@
             backgroundYieldMs: config.backgroundYieldMs,
             shouldPause: config.shouldPause,
             onPage: async page => {
+              scan.updatedAt = now();
               await store.commitDirectory(scan, page.records);
               if (typeof config.onDirectoryPage === 'function') {
                 await config.onDirectoryPage(Object.assign({ scanId: scan.scanId }, page));
@@ -1985,7 +1986,8 @@
   function notifyScanPage(job, page) {
     if (!job || String(page.directoryId) !== String(job.rootCid)) return;
     for (const listener of job.listeners || []) {
-      try { void listener(page); } catch { /* 单个窗口更新不能中断扫描。 */ }
+      try { Promise.resolve(listener(page)).catch(() => undefined); }
+      catch { /* 单个窗口更新不能中断扫描。 */ }
     }
   }
 
@@ -2030,7 +2032,7 @@
   function requestPriorityScan(config = {}) {
     const accountId = String(config.accountId || '').trim();
     const rootCid = String(config.rootCid || '').trim();
-    if (!accountId || !/^\\d+$/.test(rootCid)) {
+    if (!accountId || !/^\d+$/.test(rootCid)) {
       return Promise.reject(new Error('优先扫描需要有效的115账号和目录ID'));
     }
     const key = scanJobKey(accountId, rootCid);
@@ -3035,7 +3037,8 @@
       cell.sameFolderButton.textContent = enabled ? '📂✓' : '📂';
       cell.sameFolderButton.title = enabled ? '已开启同目录随机，点击退出' : '只从当前视频所在文件夹随机播放';
       cell.sameFolderButton.setAttribute('aria-pressed', String(enabled));
-      cell.sameFolderButton.disabled = !cell.item || !/^\\d+$/.test(String(cell.item.parentId || ''));
+      cell.sameFolderButton.hidden = !cell.item;
+      cell.sameFolderButton.disabled = !cell.item || !/^\d+$/.test(String(cell.item.parentId || ''));
     }
     if (cell.folderButton) {
       const hasParentFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId ?? '')));
@@ -3656,7 +3659,7 @@
       return;
     }
     const folderId = String(cell.item.parentId || '').trim();
-    if (!/^\\d+$/.test(folderId)) {
+    if (!/^\d+$/.test(folderId)) {
       setStatus(cell, '无法识别当前视频所在目录');
       return;
     }
@@ -3673,7 +3676,7 @@
     try {
       const scans = await indexStore.listScans(session.accountId);
       if (session.closed || cell.sameFolderState !== state) return;
-      const candidates = scans.filter(scan => String(scan.rootCid) === folderId && scan.recursive !== true)
+      const candidates = scans.filter(scan => String(scan.rootCid) === folderId)
         .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
       const latest = candidates[0] || null;
       if (latest) {
@@ -3729,10 +3732,6 @@
   }
 
   function swapCell(session, cell) {
-    if (cell.sameFolderState && cell.sameFolderState.active) {
-      swapSameFolderCell(session, cell);
-      return;
-    }
     if (session.closed || session.roundRefreshing) return;
     if (session.authBlocked) {
       session.roundMessage = '115验证或登录尚未恢复，请处理后点击“验证后继续取流”';
@@ -3742,6 +3741,10 @@
     if (cell.locked) {
       session.roundMessage = '该窗口已锁定，请先解锁再换片';
       updateRoundControls(session);
+      return;
+    }
+    if (cell.sameFolderState && cell.sameFolderState.active) {
+      swapSameFolderCell(session, cell);
       return;
     }
     const item = collectNextItem(session);

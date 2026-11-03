@@ -87,3 +87,11 @@ test('v0.12.0 adds per-cell same-folder random playback with first-result auto-p
   assert.match(source, /if \(cell\.sameFolderState && cell\.sameFolderState\.active\) \{/);
   assert.match(source, /String\(record && record\.parentId \|\| ''\) === state\.folderId/);
 });
+
+
+test('same-folder action is hidden on empty cells and stays scoped to the exact parent folder', () => {
+  assert.match(s, /cell\.sameFolderButton\.hidden = !cell\.item/);
+  assert.match(s, /cell\.sameFolderButton\.disabled = !cell\.item \|\| !\//);
+  assert.match(s, /scans\.filter\(scan => String\(scan\.rootCid\) === folderId\)/);
+  assert.match(s, /Promise\.resolve\(listener\(page\)\)\.catch/);
+});
