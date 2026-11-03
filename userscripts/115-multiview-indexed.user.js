@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.2
+// @version      0.12.3
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.12.2';
+  const VERSION = '0.12.3';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2309,7 +2309,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.12.2';
+  const VERSION = '0.12.3';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3879,7 +3879,7 @@
       samplePending: false,
       totalCandidates: 0,
       roundPoolSize: 0,
-      replacedThisRound: 0;
+      replacedThisRound: 0,
       availableItems: [],
       knownPickcodes: new Set(initialFolderPickcodes),
       playedPickcodes: new Set(initialFolderPickcodes),
