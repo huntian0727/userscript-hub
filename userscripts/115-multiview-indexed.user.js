@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.1
+// @version      0.12.2
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.12.1';
+  const VERSION = '0.12.2';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2309,7 +2309,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.12.1';
+  const VERSION = '0.12.2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3624,12 +3624,29 @@
     updateCellControls(session, cell);
   }
 
+  function syncSameFolderLayout(session) {
+    const state = session.sameFolderMode;
+    if (!state || !state.active) return;
+    const cells = session.cells.filter(cell => cell && cell.index < session.layoutCount);
+    const nextIds = new Set(cells.map(cell => cell.slotId));
+    state.pendingSlotIds = new Set(Array.from(state.pendingSlotIds).filter(slotId => nextIds.has(slotId)));
+    state.targetSlotIds = nextIds;
+    for (const cell of cells) {
+      const isSameFolder = cell.item && String(cell.item.parentId || '') === state.folderId;
+      if (isSameFolder) continue;
+      state.pendingSlotIds.add(cell.slotId);
+      clearCellForSameFolder(session, cell);
+    }
+    fillSameFolderCells(session, state);
+  }
+
   function takeSameFolderItem(state) {
     while (state.availableItems.length) {
       const item = state.availableItems.shift();
       const key = itemKey(item);
       if (!key || state.playedPickcodes.has(key)) continue;
       state.playedPickcodes.add(key);
+      state.replacedThisRound++;
       return item;
     }
     return null;
@@ -3673,7 +3690,7 @@
       }
     }
 
-    state.roundPoolSize = state.totalCandidates;
+    state.roundPoolSize = state.availableItems.length + state.replacedThisRound;
     session.roundMessage = state.scanning
       ? '整页同目录扫描中：' + state.folderPath
       : (state.scanError ? '同目录索引异常：' + state.scanError : '整页同目录播放：' + state.folderPath);
@@ -3862,6 +3879,7 @@
       samplePending: false,
       totalCandidates: 0,
       roundPoolSize: 0,
+      replacedThisRound: 0;
       availableItems: [],
       knownPickcodes: new Set(initialFolderPickcodes),
       playedPickcodes: new Set(initialFolderPickcodes),
@@ -3937,6 +3955,7 @@
     state.playedPickcodes = new Set(currentPickcodes);
     state.totalCandidates = 0;
     state.roundPoolSize = 0;
+    state.replacedThisRound = 0;
     state.scanError = '';
     state.scanFinished = false;
     session.roundNumber++;
@@ -3945,7 +3964,7 @@
     try {
       await ensureSameFolderIndex(session, state);
       if (!session.closed && session.sameFolderMode === state) {
-        state.roundPoolSize = state.totalCandidates;
+        state.roundPoolSize = state.availableItems.length + state.replacedThisRound;
         session.roundMessage = state.availableItems.length
           ? (message || '同目录新一轮已开始')
           : (message ? message + ' · 当前目录没有其他可换视频' : '当前目录没有其他可换视频');
@@ -5193,7 +5212,7 @@
   }
 
   function createCell(session, index) {
-    const item = collectNextItem(session);
+    const item = session.sameFolderMode && session.sameFolderMode.active ? null : collectNextItem(session);
     const slotId = 'slot-' + (index + 1);
     const box = element('article', 'cell');
     box.dataset.slotId = slotId;
@@ -6284,6 +6303,7 @@
     for (let index = 0; index < count; index++) {
       if (!session.cells[index]) createCell(session, index);
     }
+    syncSameFolderLayout(session);
     if (nextMode === 'mainDual') {
       const activeCells = session.cells.filter(cell => cell && cell.index < count);
       const mainA = activeCells.find(cell => cell.slotId === previousMain) || activeCells[0];

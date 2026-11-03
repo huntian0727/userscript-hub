@@ -11,10 +11,10 @@ const source = fs.readFileSync(
   'utf8'
 );
 
-test('115 multiview v0.12.1 userscript parses and exposes clear favorite controls', () => {
+test('115 multiview v0.12.2 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+0\.12\.1$/m);
-  assert.equal((source.match(/const VERSION = '0\.12\.1';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+0\.12\.2$/m);
+  assert.equal((source.match(/const VERSION = '0\.12\.2';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
@@ -67,7 +67,7 @@ test('each video cell can open its actual parent folder in a new tab without nav
 });
 
 
-test('v0.12.1 incrementally commits directory pages and yields normal scans to priority requests', () => {
+test('v0.12.2 incrementally commits directory pages and yields normal scans to priority requests', () => {
   assert.match(source, /const onPage = typeof config\.onPage === 'function' \? config\.onPage : null/);
   assert.match(source, /await onPage\(\{[\s\S]*?records: pageRecords/);
   assert.match(source, /await store\.commitDirectory\(scan, page\.records\)/);
@@ -77,7 +77,7 @@ test('v0.12.1 incrementally commits directory pages and yields normal scans to p
   assert.match(source, /priorityQueuedByKey/);
 });
 
-test('v0.12.1 switches the entire active grid into one shared same-folder pool', () => {
+test('v0.12.2 switches the entire active grid into one shared same-folder pool', () => {
   assert.match(source, /session\.sameFolderMode = state/);
   assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
   assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
@@ -112,3 +112,12 @@ test('folder index pages feed the shared candidate pool before the scan continue
 });
 
 
+
+
+test('v0.12.2 keeps newly added layout cells inside the active same-folder mode', () => {
+  assert.match(source, /function syncSameFolderLayout\(session\)/);
+  assert.match(source, /syncSameFolderLayout\(session\);/);
+  assert.match(source, /session\.sameFolderMode && session\.sameFolderMode\.active \? null : collectNextItem\(session\)/);
+  assert.match(source, /state\.replacedThisRound\+\+/);
+  assert.match(source, /state\.availableItems\.length \+ state\.replacedThisRound/);
+});
