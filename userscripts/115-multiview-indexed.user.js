@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.10.0
-// @description  115目录索引与多宫格播放一体化，支持智能画幅、随机探索、回收站删除及单击暂停、双击全屏。
+// @version      0.10.1
+// @description  115目录索引与多宫格播放一体化，支持收藏快捷入口、状态反馈、智能画幅与回收站删除。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1725,7 +1725,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.10.0';
+  const VERSION = '0.10.1';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2128,7 +2128,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.10.0';
+  const VERSION = '0.10.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2889,7 +2889,12 @@
     const excluded = Boolean(key && session.preferenceState.excludedPickcodes.has(key));
     if (cell.favoriteButton) {
       cell.favoriteButton.textContent = favorite ? '★' : '☆';
-      cell.favoriteButton.title = favorite ? '取消收藏' : '收藏视频';
+      cell.favoriteButton.title = favorite
+        ? '取消收藏'
+        : '收藏视频；收藏后可从播放器顶部的“★ 收藏”入口查看，也可在智能筛选中仅显示收藏';
+      cell.favoriteButton.setAttribute('aria-label', favorite
+        ? '取消收藏当前视频'
+        : '收藏当前视频，可从播放器顶部收藏列表查看');
       cell.favoriteButton.setAttribute('aria-pressed', String(favorite));
       cell.favoriteButton.disabled = !cell.item;
       cell.favoriteButton.classList.toggle('is-on', favorite);
@@ -2997,6 +3002,16 @@
 
   function updateRoundControls(session) {
     const remaining = session.availableItems.length;
+    const favoriteCount = session.preferenceState?.favoritePickcodes?.size || 0;
+    if (session.favoritesButton) {
+      session.favoritesButton.textContent = '★ 收藏 ' + favoriteCount;
+      session.favoritesButton.title = '打开收藏列表，共 ' + favoriteCount + ' 条收藏';
+      session.favoritesButton.setAttribute('aria-label', '打开收藏列表，共 ' + favoriteCount + ' 条收藏');
+    }
+    if (session.toolsTabButtons?.favorites) {
+      session.toolsTabButtons.favorites.textContent = '收藏 ' + favoriteCount;
+      session.toolsTabButtons.favorites.title = '收藏列表，共 ' + favoriteCount + ' 条收藏';
+    }
     const detail = '第' + session.roundNumber + '轮 · 匹配' + session.candidateTotal + '个 · 候选池' + session.roundPoolSize +
       '个 · 剩余' + remaining + '个 · 失败' + (session.failedCount || 0) + '个 · 收藏' +
       session.preferenceState.favoritePickcodes.size + ' · 排除' + session.preferenceState.excludedPickcodes.size;
@@ -3609,6 +3624,18 @@
     }
   }
 
+  function showFavoriteFeedback(session, message, isError = false) {
+    if (!session || !session.favoriteToast) return;
+    clearTimeout(session.favoriteToastTimer);
+    session.favoriteToast.textContent = message;
+    session.favoriteToast.classList.toggle('is-error', Boolean(isError));
+    session.favoriteToast.hidden = false;
+    session.favoriteToastTimer = setTimeout(() => {
+      if (session.favoriteToast) session.favoriteToast.hidden = true;
+      session.favoriteToastTimer = null;
+    }, 1900);
+  }
+
   async function toggleFavorite(session, cell) {
     if (session.closed || !cell.item) return;
     const key = itemKey(cell.item);
@@ -3629,10 +3656,15 @@
       else session.preferenceState.favoritePickcodes.delete(key);
       session.roundMessage = next ? '已加入收藏' : '已取消收藏';
       updateRoundControls(session);
+      showFavoriteFeedback(session, next
+        ? '★ 已加入收藏 · 点击顶部“★ 收藏”即可查看'
+        : '已取消收藏');
       if (session.favoritePanel && !session.favoritePanel.hidden) void refreshFavoritesPanel(session);
       if (session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
     } catch (error) {
-      setFilterMessage(session, '保存收藏状态失败：' + String(error?.message || error), true);
+      const message = '收藏保存失败：' + String(error?.message || error);
+      showFavoriteFeedback(session, message, true);
+      setFilterMessage(session, message, true);
     }
   }
 
@@ -4519,6 +4551,7 @@
     if (!session || !session.toolsDrawerLayer) return;
     session.toolsDrawerLayer.hidden = true;
     if (session.toolsButton) session.toolsButton.setAttribute('aria-expanded', 'false');
+    if (session.favoritesButton) session.favoritesButton.setAttribute('aria-expanded', 'false');
     Object.values(session.toolsTabButtons || {}).forEach(button => {
       button.setAttribute('aria-selected', 'false');
       button.classList.remove('is-active');
@@ -4550,6 +4583,7 @@
       button.classList.toggle('is-active', selected);
     });
     if (session.toolsButton) session.toolsButton.setAttribute('aria-expanded', 'true');
+    if (session.favoritesButton) session.favoritesButton.setAttribute('aria-expanded', String(tab === 'favorites'));
     if (tab === 'filter') session.filterInputs?.keyword?.focus();
     if (tab === 'favorites') void refreshFavoritesPanel(session);
     if (tab === 'excluded') void refreshExclusionsPanel(session);
@@ -5727,6 +5761,8 @@
     session.closed = true;
     clearTimeout(session.toolbarHideTimer);
     session.toolbarHideTimer = null;
+    clearTimeout(session.favoriteToastTimer);
+    session.favoriteToastTimer = null;
     session.layoutResizeObserver?.disconnect();
     clearTimeout(session.layoutReflowTimer);
     if (session.layoutReflowFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(session.layoutReflowFrame);
@@ -5971,6 +6007,14 @@
         else setToolsDrawerTab(session, session.activeToolTab || 'filter', false);
       };
 
+      session.favoritesButton = element('button', 'favorites-shortcut', '★ 收藏 0');
+      session.favoritesButton.id = 'btnFavorites';
+      session.favoritesButton.type = 'button';
+      session.favoritesButton.setAttribute('aria-label', '打开收藏列表');
+      session.favoritesButton.setAttribute('aria-expanded', 'false');
+      session.favoritesButton.title = '打开收藏列表';
+      session.favoritesButton.onclick = () => setToolsDrawerTab(session, 'favorites', true);
+
       session.newRoundButton = element('button', '', '🔄 新一轮');
       session.newRoundButton.id = 'btnNewRound';
       session.newRoundButton.type = 'button';
@@ -6099,6 +6143,10 @@
       session.roundStatus = element('span', 'round-status', '第1轮');
       session.roundStatus.setAttribute('aria-hidden', 'true');
       session.roundStatus.style.cssText = 'position:absolute;left:-10000px;top:0;white-space:nowrap;';
+      session.favoriteToast = element('div', 'favorite-feedback-toast');
+      session.favoriteToast.hidden = true;
+      session.favoriteToast.setAttribute('role', 'status');
+      session.favoriteToast.setAttribute('aria-live', 'polite');
       session.description = element('div', 'description');
       session.description.hidden = true;
       session.description.title = fullIndexSummary;
@@ -6109,10 +6157,10 @@
       session.versionBadge.id = 'versionBadge';
 
       bar.append(indexManagerButton, session.swapAllButton, session.pauseAllButton,
-        session.toolsButton, session.newRoundButton, session.audioSourceSelect,
+        session.toolsButton, session.favoritesButton, session.newRoundButton, session.audioSourceSelect,
         session.endModeSelect, session.aspectModeSelect, session.layoutPickerButton,
         session.infoText, session.versionBadge);
-      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description);
+      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description, session.favoriteToast);
       shadow.append(panel);
       panel.addEventListener('click', event => {
         if (!session.layoutPickerOpen || layoutPickerMenu.contains(event.target) || session.layoutPickerButton?.contains(event.target)) return;
@@ -6196,6 +6244,8 @@
     #topbar button{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.7);color:#ddd;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:12px}
     .layout-picker-menu button{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.7);color:#ddd;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap}
     #topbar button:hover,.layout-picker-menu button:hover{background:#4da3ff;border-color:#4da3ff;color:#fff}
+    #topbar .favorites-shortcut{border-color:rgba(232,182,75,.62);background:rgba(67,48,12,.68);color:#ffe8a3;font-weight:800}
+    #topbar .favorites-shortcut[aria-expanded="true"]{background:rgba(112,82,22,.92);border-color:#f0c65e;color:#fff2bf}
     #topbar button:disabled,.layout-picker-menu button:disabled{opacity:.4;cursor:not-allowed}
     #topbar button:focus-visible,#topbar select:focus-visible,.layout-picker-menu button:focus-visible,.layout-picker-menu select:focus-visible{outline:2px solid #8db7ff;outline-offset:2px}
     #topbar select{border:1px solid rgba(255,255,255,.2);background:rgba(15,15,15,.85);color:#ddd;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:12px}
@@ -6276,6 +6326,9 @@
     .status{position:absolute;z-index:3;top:50%;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:90%;padding:9px 13px;line-height:1.6;
       background:#111923eF;border:1px solid #ffffff18;border-radius:7px;color:#d7e0ef;text-align:center;font-size:12px;pointer-events:none;overflow-wrap:anywhere}
     .status[hidden]{display:none}
+    .favorite-feedback-toast{position:absolute;top:54px;left:50%;z-index:120;max-width:90%;padding:8px 13px;border:1px solid rgba(232,182,75,.65);border-radius:999px;background:rgba(24,28,39,.96);color:#ffe8a3;font-size:12px;font-weight:800;line-height:1.35;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 6px 22px rgba(0,0,0,.42);pointer-events:none}
+    .favorite-feedback-toast.is-error{border-color:rgba(241,125,125,.72);background:rgba(65,25,31,.96);color:#ffd0d0}
+    .favorite-feedback-toast[hidden]{display:none!important}
     .tools-drawer-layer{position:absolute;inset:0;z-index:80;pointer-events:none}
     .tools-drawer-layer[hidden]{display:none!important}
     .tools-drawer-backdrop{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;background:#02050a99;pointer-events:auto;cursor:default}
