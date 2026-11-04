@@ -10,18 +10,17 @@ const source = fs.readFileSync(
   path.join(__dirname, '..', 'userscripts', '115-multiview-indexed.user.js'),
   'utf8'
 ).replace(/\r\n/g, '\n');
-test('115 multiview v1.0.0 userscript parses and exposes clear favorite controls', () => {
+test('115 multiview v1.1.0 userscript parses and exposes multi-folder favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+1\.0\.1$/m);
-  assert.equal((source.match(/const VERSION = '1\.0\.1';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+1\.1\.0$/m);
+  assert.equal((source.match(/const VERSION = '1\.1\.0';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
   assert.match(source, /session\.favoritesButton\.textContent = '★ 收藏 ' \+ favoriteCount/);
   assert.match(source, /点击顶部“★ 收藏”即可查看/);
-  assert.match(source, /preferenceStore\.listFavorites\(session\.accountId\)/);
+  assert.match(source, /preferenceStore\.listFavoriteFolders\(session\.accountId\)/);
 });
-
 test('player has a persistent exit button independent of the auto-hiding toolbar', () => {
   assert.match(source, /session\.exitButton = element\('button', 'player-exit-button', '✕ 退出'\)/);
   assert.match(source, /session\.exitButton\.onclick = event => \{[\s\S]*?closePlayer\(\);[\s\S]*?\};/);
@@ -626,4 +625,135 @@ test('v1.0.0 smart layout reflow is debounced and coalesced through animation fr
   assert.equal(timers.size, pendingTimers);
   assert.equal(frames.size, 0);
   assert.equal(session.reflowCount, 1);
+});
+
+test('v1.1.0 upgrades the preference database and migrates legacy favorites into the default folder', () => {
+  assert.match(source, /const DB_VERSION = 3/);
+  assert.match(source, /createObjectStore\('favoriteFolders', \{ keyPath: \['accountId', 'folderId'\] \}\)/);
+  assert.match(source, /createObjectStore\('favoriteFolderItems',[\s\S]*?keyPath: \['accountId', 'folderId', 'pickcode'\]/);
+  assert.match(source, /const migrationCursor = videos\.openCursor\(\)/);
+  assert.match(source, /preference\.favorite === true/);
+  assert.match(source, /folderId: DEFAULT_FAVORITE_FOLDER_ID/);
+});
+
+test('v1.1.0 supports multiple custom favorite folders and removes only collection relations', () => {
+  assert.match(source, /async function createFavoriteFolder\(/);
+  assert.match(source, /async function renameFavoriteFolder\(/);
+  const deleteBody = source.match(/async function deleteFavoriteFolder\([\s\S]*?\n    \}\n\n    async function listFavoriteFolderItems/);
+  assert.ok(deleteBody, 'favorite folder deletion method exists');
+  assert.match(deleteBody[0], /favoriteFolderItems/);
+  assert.doesNotMatch(deleteBody[0], /deleteVideo|removeFile|deleteFile/);
+  assert.match(source, /async function addVideosToFavoriteFolder\(/);
+  assert.match(source, /async function removeVideosFromFavoriteFolder\(/);
+  assert.match(source, /if \(id === DEFAULT_FAVORITE_FOLDER_ID\) \{[\s\S]*?updateVideoPreferences\(owner, normalized\.map\(entry => entry\.pickcode\), \{ favorite: true \}\)/);
+  assert.match(source, /snapshot: normalizeVideoSnapshot\(next\.snapshot\) \|\| \(relation && normalizeVideoSnapshot\(relation\.snapshot\)\) \|\| null/);
+});
+
+test('v1.1.0 exports custom collections and still accepts legacy backups without collection fields', () => {
+  assert.match(source, /return \{ preferences, profiles, settings, recentDirectories, favoriteFolders, favoriteFolderItems \}/);
+  assert.match(source, /const hasFavoriteFolders = Array\.isArray\(payload\.favoriteFolders\)/);
+  assert.match(source, /const hasFavoriteFolderItems = Array\.isArray\(payload\.favoriteFolderItems\)/);
+  assert.match(source, /incomingPreferences\.filter\(item => item && item\.favorite === true\)/);
+  assert.match(source, /favoriteFolderItemsStore\.put\(item\)/);
+});
+
+test('v1.1.0 favorite-folder playback consumes only its own pool, never the global candidate pool', () => {
+  const start = source.indexOf('  function collectNextItem(session) {');
+  const end = source.indexOf('\n  function isCellVisible', start);
+  assert.ok(start >= 0 && end > start, 'candidate collector exists');
+  const sandbox = {
+    itemKey: item => String(item && item.pickcode || '').trim().toLowerCase()
+  };
+  vm.runInNewContext(source.slice(start, end) + '\nglobalThis.collectNextItem = collectNextItem;', sandbox);
+  const session = {
+    favoriteFolderPlayback: {
+      active: true,
+      availableItems: [{ pickcode: 'folder01' }],
+      playedPickcodes: new Set()
+    },
+    availableItems: [{ pickcode: 'global01' }],
+    usedPickcodes: new Set()
+  };
+  assert.equal(sandbox.collectNextItem(session).pickcode, 'folder01');
+  assert.equal(sandbox.collectNextItem(session), null);
+  assert.equal(session.availableItems[0].pickcode, 'global01');
+});
+
+test('v1.1.0 favorites panel includes folder management, filters, batch copy, and random multi-grid playback', () => {
+  assert.match(source, /function createFavoriteFolderFromPanel\(/);
+  assert.match(source, /function renameFavoriteFolderFromPanel\(/);
+  assert.match(source, /function deleteFavoriteFolderFromPanel\(/);
+  assert.match(source, /favorite-folder-select/);
+  assert.match(source, /favorite-filter-keyword/);
+  assert.match(source, /addSelectedToFavoriteFolder\(session\)/);
+  assert.match(source, /addCurrentGridToFavoriteFolder\(session\)/);
+  assert.match(source, /startNewFavoriteFolderRound\(session/);
+  assert.match(source, /退出收藏夹播放/);
+});
+
+test('v1.1.0 favorite-folder round respects locked cells and clears unlocked cells when the folder runs short', () => {
+  const start = source.indexOf('  function clearFavoritePlaybackCell(session, cell) {');
+  const end = source.indexOf('\n  function exitFavoriteFolderPlayback', start);
+  assert.ok(start >= 0 && end > start, 'favorite-folder round helpers exist');
+  const sandbox = {
+    DEFAULT_ASPECT_RATIO: 1,
+    itemKey: item => String(item && item.pickcode || '').trim().toLowerCase(),
+    shuffleItems: items => items.slice(),
+    disposeCell: () => {},
+    setStatus: () => {},
+    updateCellControls: () => {},
+    applyLayoutPositions: () => {},
+    updateRoundControls: () => {},
+    replaceCell: (_session, cell, item) => { cell.item = item; },
+    collectNextItem: session => {
+      const state = session.favoriteFolderPlayback;
+      while (state.availableItems.length) {
+        const item = state.availableItems.shift();
+        const key = String(item.pickcode).toLowerCase();
+        if (state.playedPickcodes.has(key)) continue;
+        state.playedPickcodes.add(key);
+        return item;
+      }
+      return null;
+    }
+  };
+  vm.runInNewContext(source.slice(start, end) + '\nglobalThis.startNewFavoriteFolderRound = startNewFavoriteFolderRound;', sandbox);
+  const lockedItem = { pickcode: 'locked01' };
+  const locked = { index: 0, locked: true, item: lockedItem };
+  const first = { index: 1, locked: false, item: { pickcode: 'old00001' }, name: { textContent: '', title: '' }, quality: { textContent: '' }, video: { removeAttribute() {}, load() {} } };
+  const second = { index: 2, locked: false, item: { pickcode: 'old00002' }, name: { textContent: '', title: '' }, quality: { textContent: '' }, video: { removeAttribute() {}, load() {} } };
+  const session = {
+    closed: false,
+    layoutCount: 3,
+    cells: [locked, first, second],
+    roundNumber: 1,
+    failedCount: 0,
+    failedPickcodes: new Set(),
+    favoriteFolderPlayback: {
+      active: true, folderName: '测试夹',
+      items: [{ pickcode: 'fav00001' }],
+      availableItems: [],
+      playedPickcodes: new Set()
+    }
+  };
+  assert.equal(sandbox.startNewFavoriteFolderRound(session), true);
+  assert.equal(locked.item, lockedItem, 'locked video remains untouched');
+  assert.equal(first.item.pickcode, 'fav00001', 'available favorite video fills an unlocked cell');
+  assert.equal(second.item, null, 'unlocked cells do not retain videos from outside the favorite folder');
+  assert.equal(second.name.textContent, '收藏夹候选不足');
+
+  const onlyLocked = { pickcode: 'fav00001' };
+  const lockedOnlyCell = { index: 0, locked: true, item: onlyLocked };
+  const emptyCell = { index: 1, locked: false, item: { pickcode: 'old00003' }, name: { textContent: '', title: '' }, quality: { textContent: '' }, video: { removeAttribute() {}, load() {} } };
+  const lockedOnlySession = {
+    closed: false, layoutCount: 2, cells: [lockedOnlyCell, emptyCell], roundNumber: 1,
+    failedCount: 0, failedPickcodes: new Set(),
+    favoriteFolderPlayback: {
+      active: true, folderName: '测试夹', items: [{ pickcode: 'fav00001' }],
+      availableItems: [], playedPickcodes: new Set()
+    }
+  };
+  assert.equal(sandbox.startNewFavoriteFolderRound(lockedOnlySession), false);
+  assert.equal(lockedOnlyCell.item, onlyLocked, 'the locked favorite is not duplicated into an unlocked cell');
+  assert.equal(emptyCell.item, null, 'no candidate is borrowed from the global pool');
 });

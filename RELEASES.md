@@ -7,7 +7,7 @@
 | v0.12.4 | 历史稳定基线 | `b7f8b5c686bbdfd61f4f4a0a793da0c75a6762dc` | `history/115-multiview-indexed/0.12.4.user.js` | `6a19e964e02d251996f69ad0c77f816623c991c79f3b53fe3fb7796d501544a5` | 进入1.0.0开发前最后一个0.x版本 |
 | v1.0.0 | 开发基线（已冻结） | `da002d4f808b4b903dd38b770d34481fc5a66d4d` | `history/115-multiview-indexed/1.0.0.user.js` | `06d05b0bbe06527839518aea9ae4c10c55a9867cfccdc156da8500bab55d2330` | 重大更新首轮开发基线；32项自动化测试通过；未发布，历史快照不可覆盖 |
 | v1.0.1 | 开发中（未发布） | `64ba537d6258efe572144251fed40f061cab4083` | `history/115-multiview-indexed/1.0.1.user.js` | `68e0b71fabee1e509a97d39539634cc779a388f59b80f726a47135e9f399245f` | 修复同目录模式下失败自动跳片回落全局候选池；33项自动化测试通过；真实115页面验收待完成 |
-
+| v1.1.0 | 开发候选（未发布） | 待提交（`develop/v1.1.0`） | `history/115-multiview-indexed/1.1.0.user.js` | `d3a63ffd445703e6f9e57dff6a7a1326e08dd5d169197e6e2a984bb1ba5a26c7` | 多自定义收藏夹：旧收藏迁移、同视频多夹、筛选、随机多宫格播放、新旧备份兼容；39项自动化测试通过；真实115页面验收后置 |
 ## 回滚规则
 
 1. 不删除或覆盖既有历史快照。

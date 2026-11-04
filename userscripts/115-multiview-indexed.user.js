@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      1.0.1
-// @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
+// @version      1.1.0
+// @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及多自定义收藏夹。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1152,7 +1152,9 @@
   'use strict';
 
   const DEFAULT_DB_NAME = '115-multiview-player-preferences';
-  const DB_VERSION = 2;
+  const DEFAULT_FAVORITE_FOLDER_ID = 'default';
+  const DB_VERSION = 3;
+
 
   function create115PlayerPreferenceStore(options = {}) {
     const indexedDBRef = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
@@ -1224,6 +1226,67 @@
           if (!recentDirectories.indexNames.contains('byAccount')) {
             recentDirectories.createIndex('byAccount', 'accountId', { unique: false });
           }
+
+          let favoriteFolders;
+          if (db.objectStoreNames.contains('favoriteFolders')) {
+            favoriteFolders = request.transaction.objectStore('favoriteFolders');
+          } else {
+            favoriteFolders = db.createObjectStore('favoriteFolders', { keyPath: ['accountId', 'folderId'] });
+          }
+          if (!favoriteFolders.indexNames.contains('byAccount')) {
+            favoriteFolders.createIndex('byAccount', 'accountId', { unique: false });
+          }
+
+          let favoriteFolderItems;
+          if (db.objectStoreNames.contains('favoriteFolderItems')) {
+            favoriteFolderItems = request.transaction.objectStore('favoriteFolderItems');
+          } else {
+            favoriteFolderItems = db.createObjectStore('favoriteFolderItems', {
+              keyPath: ['accountId', 'folderId', 'pickcode']
+            });
+          }
+          if (!favoriteFolderItems.indexNames.contains('byFolder')) {
+            favoriteFolderItems.createIndex('byFolder', ['accountId', 'folderId'], { unique: false });
+          }
+          if (!favoriteFolderItems.indexNames.contains('byAccount')) {
+            favoriteFolderItems.createIndex('byAccount', 'accountId', { unique: false });
+          }
+
+          // v2 -> v3：把旧 favorite=true 记录无损映射到默认收藏夹。
+          // IndexedDB versionchange 事务具备原子性；迁移失败时旧数据与旧版本都会保留。
+          const migratedAccounts = new Set();
+          const migrationCursor = videos.openCursor();
+          migrationCursor.onsuccess = () => {
+            const cursor = migrationCursor.result;
+            if (!cursor) return;
+            const preference = cursor.value || {};
+            if (preference.favorite === true) {
+              const owner = String(preference.accountId || '').trim();
+              const pickcode = String(preference.pickcode || '').trim().toLowerCase();
+              if (owner && /^[a-z0-9]{6,64}$/i.test(pickcode)) {
+                const timestamp = Number(preference.updatedAt || preference.createdAt || Date.now());
+                if (!migratedAccounts.has(owner)) {
+                  favoriteFolders.put({
+                    accountId: owner,
+                    folderId: DEFAULT_FAVORITE_FOLDER_ID,
+                    name: '默认收藏夹',
+                    isDefault: true,
+                    createdAt: Number(preference.createdAt || timestamp),
+                    updatedAt: timestamp
+                  });
+                  migratedAccounts.add(owner);
+                }
+                favoriteFolderItems.put({
+                  accountId: owner,
+                  folderId: DEFAULT_FAVORITE_FOLDER_ID,
+                  pickcode,
+                  addedAt: timestamp,
+                  snapshot: normalizeVideoSnapshot(preference.snapshot) || null
+                });
+              }
+            }
+            cursor.continue();
+          };
         };
         request.onsuccess = () => {
           const db = request.result;
@@ -1259,6 +1322,205 @@
       return pickcode;
     }
 
+    function normalizeFavoriteFolderName(value) {
+      const name = String(value || '').trim();
+      if (!name || name.length > 40) throw new Error('收藏夹名称不能为空且不能超过40个字符');
+      return name;
+    }
+
+    async function ensureDefaultFavoriteFolder(accountId) {
+      const owner = normalizeAccountId(accountId);
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolders', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('favoriteFolders');
+      const existing = await requestPromise(store.get([owner, DEFAULT_FAVORITE_FOLDER_ID]));
+      const folder = existing || {
+        accountId: owner,
+        folderId: DEFAULT_FAVORITE_FOLDER_ID,
+        name: '默认收藏夹',
+        isDefault: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      if (!existing) store.put(folder);
+      await done;
+      return folder;
+    }
+
+    async function listFavoriteFolders(accountId) {
+      const owner = normalizeAccountId(accountId);
+      await ensureDefaultFavoriteFolder(owner);
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolders', 'readonly');
+      const done = transactionPromise(tx);
+      const items = await requestPromise(tx.objectStore('favoriteFolders').index('byAccount').getAll(only(owner)));
+      await done;
+      return items.sort((a, b) => {
+        if (a.folderId === DEFAULT_FAVORITE_FOLDER_ID) return -1;
+        if (b.folderId === DEFAULT_FAVORITE_FOLDER_ID) return 1;
+        return Number(a.createdAt || 0) - Number(b.createdAt || 0) || String(a.name).localeCompare(String(b.name), 'zh-CN');
+      });
+    }
+
+    async function createFavoriteFolder(accountId, name) {
+      const owner = normalizeAccountId(accountId);
+      const normalizedName = normalizeFavoriteFolderName(name);
+      const folders = await listFavoriteFolders(owner);
+      if (folders.some(folder => String(folder.name).toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) {
+        throw new Error('已经存在同名收藏夹');
+      }
+      const now = Date.now();
+      const folderId = 'folder-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+      const folder = { accountId: owner, folderId, name: normalizedName, isDefault: false, createdAt: now, updatedAt: now };
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolders', 'readwrite');
+      const done = transactionPromise(tx);
+      tx.objectStore('favoriteFolders').add(folder);
+      await done;
+      return folder;
+    }
+
+    async function renameFavoriteFolder(accountId, folderId, name) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(folderId || '').trim();
+      if (!id || id === DEFAULT_FAVORITE_FOLDER_ID) throw new Error('默认收藏夹不能重命名');
+      const normalizedName = normalizeFavoriteFolderName(name);
+      const folders = await listFavoriteFolders(owner);
+      if (folders.some(folder => folder.folderId !== id && String(folder.name).toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) {
+        throw new Error('已经存在同名收藏夹');
+      }
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolders', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('favoriteFolders');
+      const existing = await requestPromise(store.get([owner, id]));
+      if (!existing) throw new Error('收藏夹不存在或已被删除');
+      existing.name = normalizedName;
+      existing.updatedAt = Date.now();
+      store.put(existing);
+      await done;
+      return existing;
+    }
+
+    async function deleteFavoriteFolder(accountId, folderId) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(folderId || '').trim();
+      if (!id || id === DEFAULT_FAVORITE_FOLDER_ID) throw new Error('默认收藏夹不能删除');
+      const db = await openDatabase();
+      const tx = db.transaction(['favoriteFolders', 'favoriteFolderItems'], 'readwrite');
+      const done = transactionPromise(tx);
+      const folderStore = tx.objectStore('favoriteFolders');
+      const existing = await requestPromise(folderStore.get([owner, id]));
+      if (!existing) {
+        await done;
+        return 0;
+      }
+      const relationStore = tx.objectStore('favoriteFolderItems');
+      const request = relationStore.index('byFolder').openCursor(only([owner, id]));
+      let removed = 0;
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        cursor.delete();
+        removed += 1;
+        cursor.continue();
+      };
+      folderStore.delete([owner, id]);
+      await done;
+      return removed;
+    }
+
+    async function listFavoriteFolderItems(accountId, folderId = DEFAULT_FAVORITE_FOLDER_ID) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(folderId || DEFAULT_FAVORITE_FOLDER_ID).trim();
+      if (!id) throw new Error('收藏夹编号无效');
+      await ensureDefaultFavoriteFolder(owner);
+      const db = await openDatabase();
+      const tx = db.transaction(['favoriteFolderItems', 'videos'], 'readonly');
+      const done = transactionPromise(tx);
+      const relations = await requestPromise(
+        tx.objectStore('favoriteFolderItems').index('byFolder').getAll(only([owner, id]))
+      );
+      const videos = tx.objectStore('videos');
+      const result = [];
+      for (const relation of relations) {
+        const preference = await requestPromise(videos.get([owner, relation.pickcode]));
+        result.push(Object.assign({}, preference || {}, {
+          accountId: owner,
+          pickcode: relation.pickcode,
+          favorite: id === DEFAULT_FAVORITE_FOLDER_ID,
+          excluded: Boolean(preference && preference.excluded),
+          snapshot: normalizeVideoSnapshot(relation.snapshot) || normalizeVideoSnapshot(preference && preference.snapshot) || null,
+          folderId: id,
+          addedAt: Number(relation.addedAt || preference && preference.updatedAt || 0),
+          updatedAt: Number(relation.addedAt || preference && preference.updatedAt || 0)
+        }));
+      }
+      await done;
+      return result.sort((a, b) => Number(b.addedAt || 0) - Number(a.addedAt || 0));
+    }
+
+    async function listAllFavoriteFolderItems(accountId) {
+      const folders = await listFavoriteFolders(accountId);
+      const result = [];
+      for (const folder of folders) {
+        result.push(...await listFavoriteFolderItems(accountId, folder.folderId));
+      }
+      return result;
+    }
+
+    async function addVideosToFavoriteFolder(accountId, folderId, entries) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(folderId || '').trim();
+      if (!id) throw new Error('请选择目标收藏夹');
+      const folders = await listFavoriteFolders(owner);
+      if (!folders.some(folder => folder.folderId === id)) throw new Error('目标收藏夹不存在');
+      const normalized = Array.from(new Map((Array.isArray(entries) ? entries : []).map(entry => {
+        const value = entry && typeof entry === 'object' ? entry : { pickcode: entry };
+        const pickcode = normalizePickcode(value.pickcode);
+        return [pickcode, { pickcode, snapshot: normalizeVideoSnapshot(value.snapshot) }];
+      })).values());
+      if (!normalized.length) return 0;
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolderItems', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('favoriteFolderItems');
+      for (const entry of normalized) {
+        const key = [owner, id, entry.pickcode];
+        const existing = await requestPromise(store.get(key));
+        store.put({
+          accountId: owner,
+          folderId: id,
+          pickcode: entry.pickcode,
+          addedAt: existing ? Number(existing.addedAt || Date.now()) : Date.now(),
+          snapshot: entry.snapshot || existing && normalizeVideoSnapshot(existing.snapshot) || null
+        });
+      }
+      await done;
+      if (id === DEFAULT_FAVORITE_FOLDER_ID) {
+        await updateVideoPreferences(owner, normalized.map(entry => entry.pickcode), { favorite: true });
+      }
+      return normalized.length;    }
+
+    async function removeVideosFromFavoriteFolder(accountId, folderId, pickcodes) {
+      const owner = normalizeAccountId(accountId);
+      const id = String(folderId || '').trim();
+      const codes = Array.from(new Set((Array.isArray(pickcodes) ? pickcodes : []).map(normalizePickcode)));
+      if (!id || !codes.length) return 0;
+      if (id === DEFAULT_FAVORITE_FOLDER_ID) {
+        await updateVideoPreferences(owner, codes, { favorite: false });
+        return codes.length;
+      }
+      const db = await openDatabase();
+      const tx = db.transaction('favoriteFolderItems', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('favoriteFolderItems');
+      codes.forEach(code => store.delete([owner, id, code]));
+      await done;
+      return codes.length;
+    }
+
     async function listVideoPreferences(accountId) {
       const owner = normalizeAccountId(accountId);
       const db = await openDatabase();
@@ -1269,29 +1531,7 @@
       return items;
     }
 
-    async function setVideoPreference(accountId, pickcode, patch = {}) {
-      const owner = normalizeAccountId(accountId);
-      const code = normalizePickcode(pickcode);
-      const db = await openDatabase();
-      const tx = db.transaction('videos', 'readwrite');
-      const done = transactionPromise(tx);
-      const store = tx.objectStore('videos');
-      const existing = await requestPromise(store.get([owner, code]));
-      const next = Object.assign({}, existing || {
-        accountId: owner, pickcode: code, favorite: false, excluded: false, createdAt: Date.now()
-      });
-      if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
-      if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
-      if (patch.snapshot && next.favorite) {
-        const snapshot = normalizeVideoSnapshot(patch.snapshot);
-        if (snapshot) next.snapshot = snapshot;
-      }
-      next.updatedAt = Date.now();
-      if (!next.favorite && !next.excluded) store.delete([owner, code]);
-      else store.put(next);
-      await done;
-      return next;
-    }
+
 
     async function clearExclusions(accountId) {
       const owner = normalizeAccountId(accountId);
@@ -1439,29 +1679,90 @@
     }
 
     async function listFavorites(accountId) {
-      const items = await listVideoPreferences(accountId);
-      return items.filter(item => item.favorite === true)
-        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+      return listFavoriteFolderItems(accountId, DEFAULT_FAVORITE_FOLDER_ID);
+    }
+
+    async function setVideoPreference(accountId, pickcode, patch = {}) {
+      const owner = normalizeAccountId(accountId);
+      const code = normalizePickcode(pickcode);
+      const db = await openDatabase();
+      const tx = db.transaction(['videos', 'favoriteFolders', 'favoriteFolderItems'], 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('videos');
+      const folderStore = tx.objectStore('favoriteFolders');
+      const relationStore = tx.objectStore('favoriteFolderItems');
+      const existing = await requestPromise(store.get([owner, code]));
+      const next = Object.assign({}, existing || {
+        accountId: owner, pickcode: code, favorite: false, excluded: false, createdAt: Date.now()
+      });
+      if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
+      if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
+      if (patch.snapshot && next.favorite) {
+        const snapshot = normalizeVideoSnapshot(patch.snapshot);
+        if (snapshot) next.snapshot = snapshot;
+      }
+      next.updatedAt = Date.now();
+      if (typeof patch.favorite === 'boolean') {
+        if (patch.favorite) {
+          const folder = await requestPromise(folderStore.get([owner, DEFAULT_FAVORITE_FOLDER_ID]));
+          if (!folder) folderStore.put({
+            accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, name: '默认收藏夹',
+            isDefault: true, createdAt: next.createdAt || next.updatedAt, updatedAt: next.updatedAt
+          });
+          const relationKey = [owner, DEFAULT_FAVORITE_FOLDER_ID, code];
+          const relation = await requestPromise(relationStore.get(relationKey));
+          relationStore.put({
+            accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, pickcode: code,
+            addedAt: relation ? Number(relation.addedAt || next.updatedAt) : next.updatedAt,
+            snapshot: normalizeVideoSnapshot(next.snapshot) || (relation && normalizeVideoSnapshot(relation.snapshot)) || null          });
+        } else {
+          relationStore.delete([owner, DEFAULT_FAVORITE_FOLDER_ID, code]);
+        }
+      }
+      if (!next.favorite && !next.excluded) store.delete([owner, code]);
+      else store.put(next);
+      await done;
+      return next;
     }
 
     async function updateVideoPreferences(accountId, pickcodes, patch = {}) {
       const owner = normalizeAccountId(accountId);
-      const codes = Array.from(new Set((Array.isArray(pickcodes) ? pickcodes : [])
-        .map(normalizePickcode)));
+      const codes = Array.from(new Set((Array.isArray(pickcodes) ? pickcodes : []).map(normalizePickcode)));
       if (!codes.length) return 0;
       if (typeof patch.favorite !== 'boolean' && typeof patch.excluded !== 'boolean') {
         throw new Error('批量偏好更新至少需要指定收藏或排除状态');
       }
       const db = await openDatabase();
-      const tx = db.transaction('videos', 'readwrite');
+      const tx = db.transaction(['videos', 'favoriteFolders', 'favoriteFolderItems'], 'readwrite');
       const done = transactionPromise(tx);
       const store = tx.objectStore('videos');
+      const folderStore = tx.objectStore('favoriteFolders');
+      const relationStore = tx.objectStore('favoriteFolderItems');
+      if (patch.favorite === true) {
+        const defaultFolder = await requestPromise(folderStore.get([owner, DEFAULT_FAVORITE_FOLDER_ID]));
+        if (!defaultFolder) folderStore.put({
+          accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, name: '默认收藏夹',
+          isDefault: true, createdAt: Date.now(), updatedAt: Date.now()
+        });
+      }
       for (const code of codes) {
         const existing = await requestPromise(store.get([owner, code]));
         const next = Object.assign({}, existing || {
           accountId: owner, pickcode: code, favorite: false, excluded: false, createdAt: Date.now()
         });
-        if (typeof patch.favorite === 'boolean') next.favorite = patch.favorite;
+        if (typeof patch.favorite === 'boolean') {
+          next.favorite = patch.favorite;
+          if (patch.favorite) {
+            const relationKey = [owner, DEFAULT_FAVORITE_FOLDER_ID, code];
+            const relation = await requestPromise(relationStore.get(relationKey));
+            relationStore.put({
+              accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, pickcode: code,
+              addedAt: relation ? Number(relation.addedAt || Date.now()) : Date.now(),
+              snapshot: normalizeVideoSnapshot(next.snapshot) || (relation && normalizeVideoSnapshot(relation.snapshot)) || null            });
+          } else {
+            relationStore.delete([owner, DEFAULT_FAVORITE_FOLDER_ID, code]);
+          }
+        }
         if (typeof patch.excluded === 'boolean') next.excluded = patch.excluded;
         next.updatedAt = Date.now();
         if (!next.favorite && !next.excluded) store.delete([owner, code]);
@@ -1480,7 +1781,6 @@
       await done;
       return normalizePlayerSettings(saved || {}, owner);
     }
-
     async function savePlayerSettings(accountId, settings = {}) {
       const owner = normalizeAccountId(accountId);
       const db = await openDatabase();
@@ -1549,15 +1849,16 @@
 
     async function exportAccountData(accountId) {
       const owner = normalizeAccountId(accountId);
-      const [preferences, profiles, settings, recentDirectories] = await Promise.all([
+      const [preferences, profiles, settings, recentDirectories, favoriteFolders] = await Promise.all([
         listVideoPreferences(owner),
         listProfiles(owner),
         getPlayerSettings(owner),
-        listRecentDirectories(owner, 5)
+        listRecentDirectories(owner, 5),
+        listFavoriteFolders(owner)
       ]);
-      return { preferences, profiles, settings, recentDirectories };
+      const favoriteFolderItems = await listAllFavoriteFolderItems(owner);
+      return { preferences, profiles, settings, recentDirectories, favoriteFolders, favoriteFolderItems };
     }
-
     async function importAccountData(accountId, payload = {}, mode = 'merge') {
       const owner = normalizeAccountId(accountId);
       const strategy = mode === 'replace' ? 'replace' : mode === 'merge' ? 'merge' : '';
@@ -1571,6 +1872,27 @@
       const incomingPreferences = payload.preferences;
       const incomingProfiles = payload.profiles;
       const incomingRecent = payload.recentDirectories;
+      if (Object.prototype.hasOwnProperty.call(payload, 'favoriteFolders') && !Array.isArray(payload.favoriteFolders)) {
+        throw new Error('备份中的收藏夹列表格式无效');
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'favoriteFolderItems') && !Array.isArray(payload.favoriteFolderItems)) {
+        throw new Error('备份中的收藏夹视频关系格式无效');
+      }
+      const hasFavoriteFolders = Array.isArray(payload.favoriteFolders);
+      const hasFavoriteFolderItems = Array.isArray(payload.favoriteFolderItems);
+      if (hasFavoriteFolders !== hasFavoriteFolderItems) throw new Error('备份中的收藏夹数据不完整');
+      const incomingFavoriteFolders = hasFavoriteFolders ? payload.favoriteFolders : [{
+        accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, name: '默认收藏夹', isDefault: true
+      }];
+      const incomingFavoriteFolderItems = hasFavoriteFolderItems ? payload.favoriteFolderItems :
+        incomingPreferences.filter(item => item && item.favorite === true).map(item => ({
+          folderId: DEFAULT_FAVORITE_FOLDER_ID,
+          pickcode: item.pickcode,
+          addedAt: Number(item.updatedAt || item.createdAt || Date.now()),
+          snapshot: item.snapshot || null
+        }));
+      if (incomingFavoriteFolders.length > 100) throw new Error('收藏夹数量超过100个上限');
+      if (incomingFavoriteFolderItems.length > 20000) throw new Error('收藏夹视频关系超过20000条上限');
       if (incomingPreferences.length > 5000) throw new Error('收藏/排除记录超过5000条上限');
       if (incomingProfiles.length > 100) throw new Error('筛选方案超过100个上限');
       if (incomingRecent.length > 5) throw new Error('最近目录超过5个上限');
@@ -1593,6 +1915,63 @@
           snapshot: normalizeVideoSnapshot(item.snapshot) || (current && current.snapshot) || null,
           createdAt: Number(item.createdAt || (current && current.createdAt) || now),
           updatedAt: now
+        });
+      }
+
+      const favoriteFolderMap = new Map();
+      const favoriteFolderNames = new Set();
+      favoriteFolderNames.add('默认收藏夹');
+      for (const item of incomingFavoriteFolders) {
+        if (!item || typeof item !== 'object') throw new Error('收藏夹记录格式无效');
+        const folderId = String(item.folderId || '').trim();
+        if (!/^[a-z0-9_-]{1,80}$/i.test(folderId)) throw new Error('收藏夹编号无效');
+        const name = folderId === DEFAULT_FAVORITE_FOLDER_ID ? '默认收藏夹' : normalizeFavoriteFolderName(item.name);
+        if (favoriteFolderMap.has(folderId)) throw new Error('备份中存在重复的收藏夹编号');
+        const nameKey = name.toLocaleLowerCase();
+        if (folderId !== DEFAULT_FAVORITE_FOLDER_ID && favoriteFolderNames.has(nameKey)) throw new Error('备份中存在重名收藏夹');
+        if (folderId !== DEFAULT_FAVORITE_FOLDER_ID) favoriteFolderNames.add(nameKey);
+        favoriteFolderMap.set(folderId, {
+          accountId: owner,
+          folderId,
+          name,
+          isDefault: folderId === DEFAULT_FAVORITE_FOLDER_ID,
+          createdAt: Number(item.createdAt || now),
+          updatedAt: now
+        });
+      }
+      if (!favoriteFolderMap.has(DEFAULT_FAVORITE_FOLDER_ID)) {
+        favoriteFolderMap.set(DEFAULT_FAVORITE_FOLDER_ID, {
+          accountId: owner, folderId: DEFAULT_FAVORITE_FOLDER_ID, name: '默认收藏夹',
+          isDefault: true, createdAt: now, updatedAt: now
+        });
+      }
+
+      const favoriteFolderItemMap = new Map();
+      for (const item of incomingFavoriteFolderItems) {
+        if (!item || typeof item !== 'object') throw new Error('收藏夹视频关系格式无效');
+        const folderId = String(item.folderId || '').trim();
+        if (!favoriteFolderMap.has(folderId)) throw new Error('收藏夹视频关系引用了不存在的收藏夹');
+        const pickcode = normalizePickcode(item.pickcode);
+        const addedAt = Number(item.addedAt || now);
+        if (!Number.isFinite(addedAt) || addedAt < 0) throw new Error('收藏夹视频加入时间无效');
+        const relation = {
+          accountId: owner,
+          folderId,
+          pickcode,
+          addedAt,
+          snapshot: normalizeVideoSnapshot(item.snapshot) || null
+        };
+        favoriteFolderItemMap.set(folderId + ':' + pickcode, relation);
+      }
+      for (const preference of preferenceMap.values()) {
+        if (!preference.favorite) continue;
+        const key = DEFAULT_FAVORITE_FOLDER_ID + ':' + preference.pickcode;
+        if (!favoriteFolderItemMap.has(key)) favoriteFolderItemMap.set(key, {
+          accountId: owner,
+          folderId: DEFAULT_FAVORITE_FOLDER_ID,
+          pickcode: preference.pickcode,
+          addedAt: Number(preference.updatedAt || now),
+          snapshot: normalizeVideoSnapshot(preference.snapshot) || null
         });
       }
 
@@ -1656,17 +2035,18 @@
         recentMap.set(rootCid + ':' + recursiveKey, record);
       }
 
-      const [existingPreferences, existingProfiles, existingSettings] = await Promise.all([
+      const [existingPreferences, existingProfiles, existingSettings, existingFavoriteFolders, existingFavoriteFolderItems] = await Promise.all([
         listVideoPreferences(owner),
         listProfiles(owner),
-        getPlayerSettings(owner)
+        getPlayerSettings(owner),
+        listFavoriteFolders(owner),
+        listAllFavoriteFolderItems(owner)
       ]);
       const db = await openDatabase();
       const recentReadTx = db.transaction('recentDirectories', 'readonly');
       const recentReadDone = transactionPromise(recentReadTx);
       const existingRecent = await requestPromise(recentReadTx.objectStore('recentDirectories').index('byAccount').getAll(only(owner)));
       await recentReadDone;
-
       if (strategy === 'merge') {
         for (const item of existingPreferences) {
           if (!preferenceMap.has(item.pickcode)) preferenceMap.set(item.pickcode, item);
@@ -1691,8 +2071,38 @@
           const incoming = recentMap.get(key);
           if (!incoming || Number(item.lastUsedAt || 0) > Number(incoming.lastUsedAt || 0)) recentMap.set(key, item);
         }
+        for (const item of existingFavoriteFolders) {
+          if (!favoriteFolderMap.has(item.folderId)) favoriteFolderMap.set(item.folderId, item);
+        }
+        for (const item of existingFavoriteFolderItems) {
+          const key = item.folderId + ':' + item.pickcode;
+          if (!favoriteFolderItemMap.has(key)) favoriteFolderItemMap.set(key, item);
+        }
       }
 
+      for (const preference of preferenceMap.values()) {
+        if (!preference.favorite) continue;
+        const key = DEFAULT_FAVORITE_FOLDER_ID + ':' + preference.pickcode;
+        if (!favoriteFolderItemMap.has(key)) favoriteFolderItemMap.set(key, {
+          accountId: owner,
+          folderId: DEFAULT_FAVORITE_FOLDER_ID,
+          pickcode: preference.pickcode,
+          addedAt: Number(preference.updatedAt || now),
+          snapshot: normalizeVideoSnapshot(preference.snapshot) || null
+        });
+      }
+      // 默认收藏夹关联与旧 favorite 布尔字段保持双向一致，保证旧版入口和筛选条件仍可用。
+      for (const relation of favoriteFolderItemMap.values()) {
+        if (relation.folderId !== DEFAULT_FAVORITE_FOLDER_ID) continue;
+        const existing = preferenceMap.get(relation.pickcode);
+        preferenceMap.set(relation.pickcode, Object.assign({}, existing || {
+          accountId: owner, pickcode: relation.pickcode, favorite: false, excluded: false, createdAt: now
+        }, {
+          favorite: true,
+          snapshot: normalizeVideoSnapshot(relation.snapshot) || existing && existing.snapshot || null,
+          updatedAt: now
+        }));
+      }
       const mergedSettings = normalizePlayerSettings(
         strategy === 'merge'
           ? { ...existingSettings, ...settingsInput, filters: settingsInput.filters || existingSettings.filters, updatedAt: now }
@@ -1703,32 +2113,43 @@
       const finalProfiles = Array.from(profileMap.values());
       const finalRecent = Array.from(recentMap.values())
         .sort((a, b) => Number(b.lastUsedAt || 0) - Number(a.lastUsedAt || 0)).slice(0, 5);
+      const finalFavoriteFolders = Array.from(favoriteFolderMap.values());
+      const finalFavoriteFolderItems = Array.from(favoriteFolderItemMap.values());
 
-      const writeTx = db.transaction(['videos', 'profiles', 'settings', 'recentDirectories'], 'readwrite');
+      const writeTx = db.transaction([
+        'videos', 'profiles', 'settings', 'recentDirectories', 'favoriteFolders', 'favoriteFolderItems'
+      ], 'readwrite');
       const writeDone = transactionPromise(writeTx);
       const videosStore = writeTx.objectStore('videos');
       const profilesStore = writeTx.objectStore('profiles');
       const settingsStore = writeTx.objectStore('settings');
       const recentStore = writeTx.objectStore('recentDirectories');
+      const favoriteFoldersStore = writeTx.objectStore('favoriteFolders');
+      const favoriteFolderItemsStore = writeTx.objectStore('favoriteFolderItems');
       for (const item of existingPreferences) videosStore.delete([owner, item.pickcode]);
       for (const item of existingProfiles) profilesStore.delete([owner, item.profileId]);
       settingsStore.delete(owner);
       for (const item of existingRecent) recentStore.delete([owner, item.rootCid, item.recursiveKey]);
+      for (const item of existingFavoriteFolders) favoriteFoldersStore.delete([owner, item.folderId]);
+      for (const item of existingFavoriteFolderItems) favoriteFolderItemsStore.delete([owner, item.folderId, item.pickcode]);
       for (const item of finalPreferences) videosStore.put(item);
       for (const item of finalProfiles) profilesStore.put(item);
       settingsStore.put(mergedSettings);
       for (const item of finalRecent) recentStore.put(item);
+      for (const item of finalFavoriteFolders) favoriteFoldersStore.put(item);
+      for (const item of finalFavoriteFolderItems) favoriteFolderItemsStore.put(item);
       await writeDone;
       return {
         mode: strategy,
         preferences: finalPreferences.length,
-        favorites: finalPreferences.filter(item => item.favorite).length,
+        favorites: finalFavoriteFolderItems.filter(item => item.folderId === DEFAULT_FAVORITE_FOLDER_ID).length,
+        favoriteFolders: finalFavoriteFolders.length,
+        favoriteFolderItems: finalFavoriteFolderItems.length,
         exclusions: finalPreferences.filter(item => item.excluded).length,
         profiles: finalProfiles.length,
         recentDirectories: finalRecent.length
       };
     }
-
     function close() {
       if (!databasePromise) return;
       databasePromise.then(db => db.close()).catch(() => {});
@@ -1738,6 +2159,14 @@
     return Object.freeze({
       listVideoPreferences,
       listFavorites,
+      listFavoriteFolders,
+      createFavoriteFolder,
+      renameFavoriteFolder,
+      deleteFavoriteFolder,
+      listFavoriteFolderItems,
+      listAllFavoriteFolderItems,
+      addVideosToFavoriteFolder,
+      removeVideosFromFavoriteFolder,
       setVideoPreference,
       updateVideoPreferences,
       clearExclusions,
@@ -1762,8 +2191,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.0.1';
-  const HOST_ID = 'local-115-index-verifier';
+  const VERSION = '1.1.0';  const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
   const N115IndexStore = globalThis.N115IndexStore;
@@ -2310,8 +2738,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.1';
-  const CELL_HEADING_AUTO_HIDE_MS = 1000;
+  const VERSION = '1.1.0';  const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
   const HOST_ID = 'local-115-multiview-indexed';
@@ -3208,9 +3635,14 @@
 
   function updateRoundControls(session) {
     const folderMode = session.sameFolderMode && session.sameFolderMode.active ? session.sameFolderMode : null;
-    const remaining = folderMode ? folderMode.availableItems.length : session.availableItems.length;
-    const candidateTotal = folderMode ? folderMode.totalCandidates : session.candidateTotal;
-    const roundPoolSize = folderMode ? folderMode.roundPoolSize : session.roundPoolSize;
+    const favoriteMode = session.favoriteFolderPlayback && session.favoriteFolderPlayback.active
+      ? session.favoriteFolderPlayback : null;
+    const remaining = folderMode ? folderMode.availableItems.length
+      : favoriteMode ? favoriteMode.availableItems.length : session.availableItems.length;
+    const candidateTotal = folderMode ? folderMode.totalCandidates
+      : favoriteMode ? favoriteMode.items.length : session.candidateTotal;
+    const roundPoolSize = folderMode ? folderMode.roundPoolSize
+      : favoriteMode ? favoriteMode.items.length : session.roundPoolSize;
     const favoriteCount = session.preferenceState?.favoritePickcodes?.size || 0;
     if (session.favoritesButton) {
       session.favoritesButton.textContent = '★ 收藏 ' + favoriteCount;
@@ -3230,7 +3662,8 @@
           : session.layoutCount + '格';
     if (session.infoText) session.infoText.textContent = folderMode
       ? '同目录 · ' + folderMode.folderPath + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
-      : '共 ' + candidateTotal + ' 个视频 · ' + layoutLabel;
+      : favoriteMode ? '收藏夹 · ' + favoriteMode.folderName + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
+        : '共 ' + candidateTotal + ' 个视频 · ' + layoutLabel;
     if (session.roundStatus) {
       const compact = '第' + session.roundNumber + '轮 · 剩余' + remaining + '/' + roundPoolSize;
       session.roundStatus.textContent = session.roundMessage ? compact + ' · ' + session.roundMessage : compact;
@@ -3251,8 +3684,7 @@
     }
     if (session.resumeButton) session.resumeButton.hidden = !session.authBlocked;
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
-  }
-  function armCellPlaybackWatchdog(session, cell) {
+  }  function armCellPlaybackWatchdog(session, cell) {
     if (cell.timer || session.closed || cell.failed || cell.hasPlayed ||
         cell.layoutPaused || cell.userPaused || session.globalPaused) return;
     const generation = cell.generation;
@@ -3546,16 +3978,19 @@
   }
 
   function collectNextItem(session) {
-    while (session.availableItems.length) {
-      const item = session.availableItems.shift();
+    const favoritePlayback = session.favoriteFolderPlayback && session.favoriteFolderPlayback.active
+      ? session.favoriteFolderPlayback : null;
+    const pool = favoritePlayback ? favoritePlayback.availableItems : session.availableItems;
+    const used = favoritePlayback ? favoritePlayback.playedPickcodes : session.usedPickcodes;
+    while (pool.length) {
+      const item = pool.shift();
       const key = itemKey(item);
-      if (!key || session.usedPickcodes.has(key)) continue;
-      session.usedPickcodes.add(key);
+      if (!key || used.has(key)) continue;
+      used.add(key);
       return item;
     }
     return null;
   }
-
   function isCellVisible(session, cell) {
     return cell.index < session.layoutCount && (!session.focusSlotId || session.focusSlotId === cell.slotId);
   }
@@ -3862,6 +4297,9 @@
       return;
     }
     if (session.authBlocked || session.roundRefreshing || !cell || !cell.item) return;
+    if (session.favoriteFolderPlayback && session.favoriteFolderPlayback.active) {
+      exitFavoriteFolderPlayback(session, false);
+    }
     const folderId = clickedFolderId;
     if (!/^\d+$/.test(folderId)) {
       setStatus(cell, '无法识别当前视频所在目录');
@@ -4059,6 +4497,76 @@
     updateRoundControls(session);
   }
 
+  function clearFavoritePlaybackCell(session, cell) {
+    disposeCell(cell);
+    cell.item = null;
+    cell.failed = false;
+    cell.hasPlayed = false;
+    cell.loadStarted = false;
+    cell.userPaused = false;
+    cell.layoutPaused = false;
+    cell.deleting = false;
+    cell.deletionUncertain = false;
+    cell.retryCount = 0;
+    cell.authBlocked = false;
+    cell.aspectRatio = DEFAULT_ASPECT_RATIO;
+    cell.name.textContent = '收藏夹候选不足';
+    cell.name.title = '';
+    cell.quality.textContent = '';
+    cell.video.removeAttribute('src');
+    cell.video.load();
+    setStatus(cell, '当前收藏夹没有更多可用视频');
+    updateCellControls(session, cell);
+    applyLayoutPositions(session);
+  }
+
+  function startNewFavoriteFolderRound(session, message = '') {
+    const state = session.favoriteFolderPlayback;
+    if (!state || !state.active || session.closed) return false;
+    const targets = session.cells.filter(cell =>
+      cell && cell.index < session.layoutCount && !cell.locked
+    );
+    if (!targets.length) {
+      session.roundMessage = '当前所有窗口均已锁定，请先解锁一个窗口';
+      updateRoundControls(session);
+      return false;
+    }
+    const activePickcodes = new Set(session.cells
+      .filter(cell => cell && cell.index < session.layoutCount && cell.item)
+      .map(cell => itemKey(cell.item)));
+    const lockedPickcodes = new Set(session.cells
+      .filter(cell => cell && cell.index < session.layoutCount && cell.locked && cell.item)
+      .map(cell => itemKey(cell.item)));
+    const remaining = state.items.filter(item => !activePickcodes.has(itemKey(item)));
+    const pool = remaining.length ? remaining : state.items.filter(item => !lockedPickcodes.has(itemKey(item)));
+    state.playedPickcodes = new Set(remaining.length ? activePickcodes : lockedPickcodes);
+    state.availableItems = shuffleItems(pool);
+    session.roundNumber++;
+    session.failedCount = 0;
+    session.failedPickcodes.clear();    let replaced = 0;
+    for (const cell of targets) {
+      const item = collectNextItem(session);
+      if (!item) {
+        clearFavoritePlaybackCell(session, cell);
+        continue;
+      }
+      replaceCell(session, cell, item);
+      replaced++;
+    }
+    session.roundPoolSize = state.items.length;
+    session.roundMessage = message || ('收藏夹「' + state.folderName + '」第 ' + session.roundNumber + ' 轮：已随机替换 ' + replaced + ' 格');
+    updateRoundControls(session);
+    return replaced > 0;
+  }
+  function exitFavoriteFolderPlayback(session, announce = true) {
+    if (!session || !session.favoriteFolderPlayback) return;
+    const folderName = session.favoriteFolderPlayback.folderName;
+    session.favoriteFolderPlayback = null;
+    if (session.favoriteFolderExitButton) session.favoriteFolderExitButton.hidden = true;
+    if (announce) session.roundMessage = '已退出收藏夹「' + folderName + '」播放，恢复全局随机候选';
+    updateRoundControls(session);
+  }
+
   async function startNewRound(session, message = '') {
     if (session.closed || session.roundRefreshing) return;
     if (session.authBlocked) {
@@ -4068,6 +4576,10 @@
     }
     if (session.sameFolderMode && session.sameFolderMode.active) {
       await startNewSameFolderRound(session, message);
+      return;
+    }
+    if (session.favoriteFolderPlayback && session.favoriteFolderPlayback.active) {
+      startNewFavoriteFolderRound(session, message);
       return;
     }
     session.roundRefreshing = true;
@@ -4277,6 +4789,17 @@
       await preferenceStore.setVideoPreference(session.accountId, key, { favorite: next, snapshot });
       if (next) session.preferenceState.favoritePickcodes.add(key);
       else session.preferenceState.favoritePickcodes.delete(key);
+      const favoritePlayback = session.favoriteFolderPlayback;
+      if (favoritePlayback && favoritePlayback.active && favoritePlayback.folderId === 'default') {
+        if (next) {
+          if (!favoritePlayback.items.some(item => itemKey(item) === key)) favoritePlayback.items.push(Object.assign({}, cell.item));
+          favoritePlayback.playedPickcodes.add(key);
+        } else {
+          favoritePlayback.items = favoritePlayback.items.filter(item => itemKey(item) !== key);
+          favoritePlayback.availableItems = favoritePlayback.availableItems.filter(item => itemKey(item) !== key);
+          favoritePlayback.playedPickcodes.delete(key);
+        }
+      }
       session.roundMessage = next ? '已加入收藏' : '已取消收藏';
       updateRoundControls(session);
       showFavoriteFeedback(session, next
@@ -4916,15 +5439,151 @@
     }
   }
 
+  function syncFavoriteFolderSelectors(session) {
+    const folders = session.favoriteFolders || [];
+    if (!folders.some(folder => folder.folderId === session.activeFavoriteFolderId)) {
+      session.activeFavoriteFolderId = 'default';
+    }
+    const fill = (select, selectedId) => {
+      if (!select) return;
+      select.replaceChildren();
+      for (const folder of folders) {
+        const option = element('option', '', folder.name + (folder.folderId === 'default' ? '（默认）' : ''));
+        option.value = folder.folderId;
+        select.append(option);
+      }
+      select.value = folders.some(folder => folder.folderId === selectedId) ? selectedId : 'default';
+    };
+    fill(session.favoriteFolderSelect, session.activeFavoriteFolderId);
+    const targetId = session.favoriteTargetFolderSelect && session.favoriteTargetFolderSelect.value;
+    fill(session.favoriteTargetFolderSelect, targetId || session.activeFavoriteFolderId);
+    const isDefault = session.activeFavoriteFolderId === 'default';
+    if (session.favoriteRenameButton) session.favoriteRenameButton.disabled = isDefault;
+    if (session.favoriteDeleteButton) session.favoriteDeleteButton.disabled = isDefault;
+    if (session.favoriteRemoveSelectedButton) {
+      session.favoriteRemoveSelectedButton.textContent = isDefault ? '批量取消收藏' : '批量移出此夹';
+    }
+    if (session.favoriteFolderExitButton) {
+      session.favoriteFolderExitButton.hidden = !(session.favoriteFolderPlayback && session.favoriteFolderPlayback.active);
+    }
+  }
+
+  function getFilteredFavoriteEntries(session) {
+    const query = String(session.favoriteFilterInput && session.favoriteFilterInput.value || '')
+      .trim().toLocaleLowerCase();
+    const tokens = query.split(/\s+/).filter(Boolean);
+    const minValue = String(session.favoriteMinSizeInput && session.favoriteMinSizeInput.value || '').trim();
+    const maxValue = String(session.favoriteMaxSizeInput && session.favoriteMaxSizeInput.value || '').trim();
+    const min = minValue === '' ? null : Number(minValue);
+    const max = maxValue === '' ? null : Number(maxValue);
+    return (session.favoriteEntries || []).filter(entry => {
+      const item = entry.item || entry.preference.snapshot || {};
+      const haystack = [item.name || '', item.path || ''].join(' ').toLocaleLowerCase();
+      if (tokens.length && !tokens.every(token => haystack.includes(token))) return false;
+      const size = Number(item.sizeBytes);
+      if (min !== null && (!Number.isFinite(size) || size < min * 1024 * 1024)) return false;
+      if (max !== null && (!Number.isFinite(size) || size > max * 1024 * 1024)) return false;
+      return true;
+    });
+  }
+
+  function renderFavoritesPanelEntries(session) {
+    if (!session.favoriteList) return [];
+    const entries = getFilteredFavoriteEntries(session);
+    session.favoriteVisibleEntries = entries;
+    session.favoriteList.replaceChildren();
+    if (!session.favoriteEntries.length) {
+      session.favoriteList.append(element('p', 'panel-empty', '这个收藏夹还是空的。可以从播放窗口或当前画面加入视频。'));
+    } else if (!entries.length) {
+      session.favoriteList.append(element('p', 'panel-empty', '没有符合当前筛选条件的视频。'));
+    }
+    const folderId = session.activeFavoriteFolderId || 'default';
+    for (const entry of entries) {
+      const preference = entry.preference;
+      const item = entry.item;
+      const row = element('article', 'favorite-row');
+      row.dataset.pickcode = preference.pickcode;
+      const checkbox = element('input', 'favorite-select');
+      checkbox.type = 'checkbox';
+      checkbox.checked = session.favoriteSelected.has(preference.pickcode);
+      checkbox.setAttribute('aria-label', '选择 ' + (item && item.name || preference.pickcode));
+      checkbox.onchange = () => {
+        if (checkbox.checked) session.favoriteSelected.add(preference.pickcode);
+        else session.favoriteSelected.delete(preference.pickcode);
+        updateFavoriteSelectionSummary(session);
+      };
+      const details = element('div', 'favorite-details');
+      const name = item && item.name || ('收藏视频 ' + preference.pickcode);
+      const title = element('strong', 'favorite-name', name);
+      title.title = name;
+      const path = item && item.path || '尚未定位到本地目录索引';
+      const size = item && Number.isFinite(Number(item.sizeBytes))
+        ? ' · ' + (Number(item.sizeBytes) / (1024 * 1024)).toFixed(1) + ' MB' : '';
+      const meta = element('small', 'favorite-meta', path + size +
+        (entry.resolved ? '' : ' · 索引未找到，仍可从收藏夹移出'));
+      details.append(title, meta);
+      const actions = element('div', 'favorite-row-actions');
+      const play = element('button', 'toolbar-button favorite-play', '播放');
+      play.type = 'button';
+      play.disabled = !item || !item.pickcode;
+      play.onclick = () => playFavorite(session, item);
+      const locate = element('button', 'toolbar-button favorite-locate', '打开目录');
+      locate.type = 'button';
+      locate.disabled = !item || !item.rootCid;
+      locate.onclick = () => openRecentDirectory({
+        rootCid: item.rootCid, recursive: item.recursive, path: item.path, videoCount: 0
+      });
+      const remove = element('button', 'toolbar-button favorite-remove', folderId === 'default' ? '取消收藏' : '移出此夹');
+      remove.type = 'button';
+      remove.onclick = async () => {
+        try {
+          if (folderId === 'default') {
+            await preferenceStore.setVideoPreference(session.accountId, preference.pickcode, { favorite: false });
+            session.preferenceState.favoritePickcodes.delete(preference.pickcode);
+          } else {
+            await preferenceStore.removeVideosFromFavoriteFolder(session.accountId, folderId, [preference.pickcode]);
+          }
+          const playback = session.favoriteFolderPlayback;
+          if (playback && playback.active && playback.folderId === folderId) {
+            const key = String(preference.pickcode).toLowerCase();
+            playback.items = playback.items.filter(candidate => itemKey(candidate) !== key);
+            playback.availableItems = playback.availableItems.filter(candidate => itemKey(candidate) !== key);
+            playback.playedPickcodes.delete(key);
+            if (!playback.items.length) exitFavoriteFolderPlayback(session, false);
+          }
+          session.favoriteSelected.delete(preference.pickcode);
+          await refreshFavoritesPanel(session);
+          updateRoundControls(session);
+          if (folderId === 'default' && session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
+        } catch (error) {
+          setFavoriteMessage(session, '移出收藏夹失败：' + String(error?.message || error), true);
+        }
+      };
+      actions.append(play, locate, remove);
+      row.append(checkbox, details, actions);
+      session.favoriteList.append(row);
+    }
+    updateFavoriteSelectionSummary(session);
+    return entries;
+  }
+
   async function refreshFavoritesPanel(session) {
     if (session.closed || !session.favoriteList) return;
-    setFavoriteMessage(session, '正在读取收藏列表…');
+    const refreshToken = (session.favoriteRefreshToken || 0) + 1;
+    session.favoriteRefreshToken = refreshToken;
+    setFavoriteMessage(session, '正在读取收藏夹…');
     try {
-      const favorites = await preferenceStore.listFavorites(session.accountId);
+      const folders = await preferenceStore.listFavoriteFolders(session.accountId);
+      if (session.closed || session.favoriteRefreshToken !== refreshToken) return;
+      session.favoriteFolders = folders;
+      syncFavoriteFolderSelectors(session);
+      const folderId = session.activeFavoriteFolderId || 'default';
+      const favorites = await preferenceStore.listFavoriteFolderItems(session.accountId, folderId);
+      if (session.closed || session.favoriteRefreshToken !== refreshToken) return;
       const records = await indexStore.findVideosByPickcodes(
         session.accountId, favorites.map(item => item.pickcode)
       );
-      if (session.closed) return;
+      if (session.closed || session.favoriteRefreshToken !== refreshToken) return;
       const byPickcode = new Map(records.map(item => [itemKey(item), item]));
       session.favoriteEntries = favorites.map(preference => {
         const resolved = byPickcode.get(String(preference.pickcode).toLowerCase()) || null;
@@ -4939,72 +5598,155 @@
       for (const code of Array.from(session.favoriteSelected)) {
         if (!activeCodes.has(code)) session.favoriteSelected.delete(code);
       }
-      session.favoriteList.replaceChildren();
-      if (!session.favoriteEntries.length) {
-        session.favoriteList.append(element('p', 'panel-empty', '还没有收藏视频。可以在任意播放窗口点击“收藏”加入列表。'));
-      }
-      for (const entry of session.favoriteEntries) {
-        const preference = entry.preference;
-        const item = entry.item;
-        const row = element('article', 'favorite-row');
-        row.dataset.pickcode = preference.pickcode;
-        const checkbox = element('input', 'favorite-select');
-        checkbox.type = 'checkbox';
-        checkbox.checked = session.favoriteSelected.has(preference.pickcode);
-        checkbox.setAttribute('aria-label', '选择 ' + (item && item.name || preference.pickcode));
-        checkbox.onchange = () => {
-          if (checkbox.checked) session.favoriteSelected.add(preference.pickcode);
-          else session.favoriteSelected.delete(preference.pickcode);
-          updateFavoriteSelectionSummary(session);
-        };
-        const details = element('div', 'favorite-details');
-        const name = item && item.name || ('旧版收藏 ' + preference.pickcode);
-        const title = element('strong', 'favorite-name', name);
-        title.title = name;
-        const path = item && item.path || '旧收藏尚未定位到本地目录索引';
-        const size = item && Number.isFinite(Number(item.sizeBytes))
-          ? ' · ' + (Number(item.sizeBytes) / (1024 * 1024)).toFixed(1) + ' MB' : '';
-        const meta = element('small', 'favorite-meta', path + size +
-          (entry.resolved ? '' : ' · 旧收藏/索引未找到，仍可批量取消收藏'));
-        details.append(title, meta);
-        const actions = element('div', 'favorite-row-actions');
-        const play = element('button', 'toolbar-button favorite-play', '播放');
-        play.type = 'button';
-        play.disabled = !item || !item.pickcode;
-        play.onclick = () => playFavorite(session, item);
-        const locate = element('button', 'toolbar-button favorite-locate', '打开目录');
-        locate.type = 'button';
-        locate.disabled = !item || !item.rootCid;
-        locate.onclick = () => openRecentDirectory({
-          rootCid: item.rootCid,
-          recursive: item.recursive,
-          path: item.path,
-          videoCount: 0
-        });
-        const remove = element('button', 'toolbar-button favorite-remove', '取消收藏');
-        remove.type = 'button';
-        remove.onclick = async () => {
-          try {
-            await preferenceStore.setVideoPreference(session.accountId, preference.pickcode, { favorite: false });
-            session.preferenceState.favoritePickcodes.delete(preference.pickcode);
-            session.favoriteSelected.delete(preference.pickcode);
-            await refreshFavoritesPanel(session);
-            updateRoundControls(session);
-            if (session.filters.favoritesOnly) await startNewRound(session, '收藏状态已更新');
-          } catch (error) {
-            setFavoriteMessage(session, '取消收藏失败：' + String(error?.message || error), true);
-          }
-        };
-        actions.append(play, locate, remove);
-        row.append(checkbox, details, actions);
-        session.favoriteList.append(row);
-      }
-      updateFavoriteSelectionSummary(session);
-      setFavoriteMessage(session, '共 ' + session.favoriteEntries.length + ' 条收藏；可跨目录浏览和批量管理');
+      const visible = renderFavoritesPanelEntries(session);
+      const folder = folders.find(item => item.folderId === folderId) || folders[0];
+      setFavoriteMessage(session, '收藏夹「' + (folder && folder.name || '默认收藏夹') + '」共 ' +
+        session.favoriteEntries.length + ' 条 · 当前筛选 ' + visible.length + ' 条；可跨目录收藏和随机播放');
     } catch (error) {
-      setFavoriteMessage(session, '读取收藏列表失败：' + String(error?.message || error), true);
+      setFavoriteMessage(session, '读取收藏夹失败：' + String(error?.message || error), true);
     }
   }
+
+  function favoriteSnapshotFromEntry(entry, session) {
+    const item = entry && entry.item || entry && entry.preference && entry.preference.snapshot || {};
+    return {
+      scanId: String(item.scanId || session.scan && session.scan.scanId || ''),
+      id: String(item.id || ''),
+      rootCid: String(item.rootCid || session.scan && session.scan.rootCid || ''),
+      recursive: item.recursive === true || Boolean(session.scan && session.scan.recursive),
+      name: String(item.name || ''),
+      path: String(item.path || ''),
+      pathSegments: Array.isArray(item.pathSegments) ? item.pathSegments : [],
+      sizeBytes: item.sizeBytes == null ? null : Number(item.sizeBytes)
+    };
+  }
+
+  async function createFavoriteFolderFromPanel(session) {
+    const name = String(session.favoriteFolderNameInput && session.favoriteFolderNameInput.value || '').trim();
+    try {
+      const folder = await preferenceStore.createFavoriteFolder(session.accountId, name);
+      session.favoriteFolderNameInput.value = '';
+      session.activeFavoriteFolderId = folder.folderId;
+      session.favoriteSelected.clear();
+      await refreshFavoritesPanel(session);
+      setFavoriteMessage(session, '已创建收藏夹「' + folder.name + '」');
+    } catch (error) {
+      setFavoriteMessage(session, '创建收藏夹失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function renameFavoriteFolderFromPanel(session) {
+    const folderId = session.activeFavoriteFolderId || 'default';
+    const name = String(session.favoriteFolderNameInput && session.favoriteFolderNameInput.value || '').trim();
+    try {
+      const folder = await preferenceStore.renameFavoriteFolder(session.accountId, folderId, name);
+      session.favoriteFolderNameInput.value = '';
+      await refreshFavoritesPanel(session);
+      setFavoriteMessage(session, '已重命名为「' + folder.name + '」');
+    } catch (error) {
+      setFavoriteMessage(session, '重命名失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function deleteFavoriteFolderFromPanel(session) {
+    const folderId = session.activeFavoriteFolderId || 'default';
+    const folder = (session.favoriteFolders || []).find(item => item.folderId === folderId);
+    if (!folder || folderId === 'default') return;
+    if (!window.confirm('确定删除收藏夹「' + folder.name + '」吗？只会删除收藏夹关系，不会删除115网盘视频。')) return;
+    try {
+      await preferenceStore.deleteFavoriteFolder(session.accountId, folderId);
+      if (session.favoriteFolderPlayback && session.favoriteFolderPlayback.folderId === folderId) {
+        exitFavoriteFolderPlayback(session, false);
+      }
+      session.activeFavoriteFolderId = 'default';
+      session.favoriteSelected.clear();
+      await refreshFavoritesPanel(session);
+      setFavoriteMessage(session, '已删除收藏夹「' + folder.name + '」，网盘原视频未受影响');
+    } catch (error) {
+      setFavoriteMessage(session, '删除收藏夹失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function addSelectedToFavoriteFolder(session) {
+    const targetId = String(session.favoriteTargetFolderSelect && session.favoriteTargetFolderSelect.value || '').trim();
+    const selected = new Set(session.favoriteSelected || []);
+    const entries = (session.favoriteEntries || []).filter(entry => selected.has(entry.preference.pickcode));
+    if (!entries.length) {
+      setFavoriteMessage(session, '请先勾选要加入目标收藏夹的视频');
+      return;
+    }
+    try {
+      const count = await preferenceStore.addVideosToFavoriteFolder(session.accountId, targetId,
+        entries.map(entry => ({ pickcode: entry.preference.pickcode, snapshot: favoriteSnapshotFromEntry(entry, session) })));
+      if (targetId === 'default') {
+        entries.forEach(entry => session.preferenceState.favoritePickcodes.add(entry.preference.pickcode));
+        updateRoundControls(session);
+        if (session.filters.favoritesOnly && !(session.favoriteFolderPlayback && session.favoriteFolderPlayback.active)) {
+          await startNewRound(session, '默认收藏夹已更新');
+        }
+      }
+      session.favoriteSelected.clear();
+      await refreshFavoritesPanel(session);
+      setFavoriteMessage(session, '已将 ' + count + ' 条视频加入目标收藏夹');
+    } catch (error) {
+      setFavoriteMessage(session, '加入目标收藏夹失败：' + String(error?.message || error), true);
+    }
+  }
+
+  async function addCurrentGridToFavoriteFolder(session) {
+    const folderId = session.activeFavoriteFolderId || 'default';
+    const entries = session.cells.filter(cell => cell && cell.index < session.layoutCount && cell.item)
+      .map(cell => ({
+        pickcode: itemKey(cell.item),
+        snapshot: favoriteSnapshotFromEntry({ item: cell.item }, session)
+      })).filter(entry => entry.pickcode);
+    if (!entries.length) {
+      setFavoriteMessage(session, '当前没有可加入收藏夹的视频画面');
+      return;
+    }
+    try {
+      const count = await preferenceStore.addVideosToFavoriteFolder(session.accountId, folderId, entries);
+      if (folderId === 'default') {
+        entries.forEach(entry => session.preferenceState.favoritePickcodes.add(entry.pickcode));
+        updateRoundControls(session);
+        if (session.filters.favoritesOnly && !(session.favoriteFolderPlayback && session.favoriteFolderPlayback.active)) {
+          await startNewRound(session, '默认收藏夹已更新');
+        }
+      }
+      await refreshFavoritesPanel(session);
+      setFavoriteMessage(session, '已将当前画面的 ' + count + ' 个视频加入此收藏夹');
+    } catch (error) {
+      setFavoriteMessage(session, '加入当前画面失败：' + String(error?.message || error), true);
+    }
+  }
+  async function playFavoriteFolder(session) {
+    if (session.closed) return;
+    await refreshFavoritesPanel(session);
+    const entries = getFilteredFavoriteEntries(session);
+    const items = Array.from(new Map(entries.filter(entry => entry.item && entry.item.pickcode)
+      .map(entry => [itemKey(entry.item), Object.assign({}, entry.item, { playable: true, isVideo: true })])).values());
+    if (!items.length) {
+      setFavoriteMessage(session, '当前收藏夹筛选结果中没有可播放视频');
+      return;
+    }
+    if (session.sameFolderMode && session.sameFolderMode.active) exitSameFolderPlayback(session);
+    const folder = (session.favoriteFolders || []).find(item => item.folderId === session.activeFavoriteFolderId);
+    session.favoriteFolderPlayback = {
+      active: true,
+      folderId: session.activeFavoriteFolderId || 'default',
+      folderName: folder && folder.name || '默认收藏夹',
+      items,
+      availableItems: [],
+      playedPickcodes: new Set()
+    };
+    syncFavoriteFolderSelectors(session);
+    const started = startNewFavoriteFolderRound(session, '已开始收藏夹「' + session.favoriteFolderPlayback.folderName + '」随机多宫格播放 · ' + items.length + ' 个视频');
+    if (!started) {
+      exitFavoriteFolderPlayback(session, false);
+      setFavoriteMessage(session, '当前收藏夹没有可供未锁定窗口播放的视频，或所有窗口均已锁定；请解锁窗口或调整收藏夹筛选');
+      return;
+    }
+    setFavoriteMessage(session, '正在从「' + session.favoriteFolderPlayback.folderName + '」随机播放 ' + items.length + ' 个筛选结果；可继续换片或开启新一轮');  }
 
   function setExcludedMessage(session, message, isError = false) {
     if (!session.excludedMessage) return;
@@ -5103,21 +5845,39 @@
     }
     const key = itemKey(item);
     if (!key) return;
-    session.availableItems = session.availableItems.filter(candidate => itemKey(candidate) !== key);
-    session.usedPickcodes.add(key);
+    const playback = session.favoriteFolderPlayback;
+    if (playback && playback.active) {
+      playback.availableItems = playback.availableItems.filter(candidate => itemKey(candidate) !== key);
+      playback.playedPickcodes.add(key);
+    } else {
+      session.availableItems = session.availableItems.filter(candidate => itemKey(candidate) !== key);
+      session.usedPickcodes.add(key);
+    }
     replaceCell(session, cell, Object.assign({}, item, { pickcode: key, playable: true, isVideo: true }));
     session.roundMessage = '已从收藏列表播放：' + String(item.name || key);
     updateRoundControls(session);
   }
-
   async function updateSelectedFavorites(session, patch, message) {
     const codes = Array.from(session.favoriteSelected || []);
     if (!codes.length) {
-      setFavoriteMessage(session, '请先勾选要批量处理的收藏视频');
+      setFavoriteMessage(session, '请先勾选要批量处理的视频');
       return;
     }
     try {
-      await preferenceStore.updateVideoPreferences(session.accountId, codes, patch);
+      const folderId = session.activeFavoriteFolderId || 'default';
+      if (patch.favorite === false && folderId !== 'default' && Object.keys(patch).length === 1) {
+        await preferenceStore.removeVideosFromFavoriteFolder(session.accountId, folderId, codes);
+        const playback = session.favoriteFolderPlayback;
+        if (playback && playback.active && playback.folderId === folderId) {
+          const selected = new Set(codes);
+          playback.items = playback.items.filter(item => !selected.has(itemKey(item)));
+          playback.availableItems = playback.availableItems.filter(item => !selected.has(itemKey(item)));
+          codes.forEach(code => playback.playedPickcodes.delete(code));
+          if (!playback.items.length) exitFavoriteFolderPlayback(session, false);
+        }
+      } else {
+        await preferenceStore.updateVideoPreferences(session.accountId, codes, patch);
+      }
       const preferences = await preferenceStore.listVideoPreferences(session.accountId);
       session.preferenceState.favoritePickcodes.clear();
       session.preferenceState.excludedPickcodes.clear();
@@ -5133,7 +5893,8 @@
       await refreshFavoritesPanel(session);
       if (session.excludedPanel && !session.excludedPanel.hidden) await refreshExclusionsPanel(session);
       updateRoundControls(session);
-      if (patch.excluded === true || patch.excluded === false || session.filters.favoritesOnly) {
+      if (patch.excluded === true || patch.excluded === false || session.filters.favoritesOnly ||
+          (session.favoriteFolderPlayback && session.favoriteFolderPlayback.active && patch.favorite === false)) {
         await startNewRound(session, message);
       } else {
         session.roundMessage = message;
@@ -5143,16 +5904,64 @@
       setFavoriteMessage(session, '批量操作失败：' + String(error?.message || error), true);
     }
   }
-
   function createFavoritesPanel(session) {
     const panel = element('section', 'favorites-panel');
     panel.hidden = true;
-    panel.setAttribute('aria-label', '收藏列表');
+    panel.setAttribute('aria-label', '收藏夹管理');
     const heading = element('div', 'favorites-panel-heading');
     heading.append(
-      element('strong', '', '收藏视频'),
-      element('small', '', '按当前115账号汇总所有已索引目录中的收藏')
+      element('strong', '', '我的收藏夹'),
+      element('small', '', '同一视频可加入多个收藏夹；删除收藏夹不会删除115网盘原视频')
     );
+
+    const folderControls = element('div', 'favorite-folder-toolbar');
+    session.favoriteFolderSelect = element('select', 'favorite-folder-select');
+    session.favoriteFolderSelect.setAttribute('aria-label', '当前收藏夹');
+    session.favoriteFolderNameInput = element('input', 'favorite-folder-name');
+    session.favoriteFolderNameInput.type = 'text';
+    session.favoriteFolderNameInput.maxLength = 40;
+    session.favoriteFolderNameInput.placeholder = '收藏夹名称（最多40字）';
+    session.favoriteFolderNameInput.setAttribute('aria-label', '收藏夹名称');
+    const makeButton = (label, handler) => {
+      const button = element('button', 'toolbar-button', label);
+      button.type = 'button';
+      button.onclick = handler;
+      folderControls.append(button);
+      return button;
+    };
+    session.favoriteCreateButton = makeButton('新建', () => { void createFavoriteFolderFromPanel(session); });
+    session.favoriteRenameButton = makeButton('重命名', () => { void renameFavoriteFolderFromPanel(session); });
+    session.favoriteDeleteButton = makeButton('删除', () => { void deleteFavoriteFolderFromPanel(session); });
+    folderControls.prepend(session.favoriteFolderNameInput);
+    folderControls.prepend(session.favoriteFolderSelect);
+    session.favoriteFolderSelect.onchange = () => {
+      session.activeFavoriteFolderId = session.favoriteFolderSelect.value || 'default';
+      session.favoriteSelected.clear();
+      void refreshFavoritesPanel(session);
+    };
+
+    const filterRow = element('div', 'favorite-filter-row');
+    session.favoriteFilterInput = element('input', 'favorite-filter-keyword');
+    session.favoriteFilterInput.type = 'search';
+    session.favoriteFilterInput.placeholder = '筛选视频名称或文件夹路径';
+    session.favoriteFilterInput.setAttribute('aria-label', '筛选收藏夹视频');
+    session.favoriteMinSizeInput = element('input', 'favorite-filter-size');
+    session.favoriteMinSizeInput.type = 'number';
+    session.favoriteMinSizeInput.min = '0';
+    session.favoriteMinSizeInput.step = '0.1';
+    session.favoriteMinSizeInput.placeholder = '最小 MB';
+    session.favoriteMinSizeInput.setAttribute('aria-label', '最小视频大小 MB');
+    session.favoriteMaxSizeInput = element('input', 'favorite-filter-size');
+    session.favoriteMaxSizeInput.type = 'number';
+    session.favoriteMaxSizeInput.min = '0';
+    session.favoriteMaxSizeInput.step = '0.1';
+    session.favoriteMaxSizeInput.placeholder = '最大 MB';
+    session.favoriteMaxSizeInput.setAttribute('aria-label', '最大视频大小 MB');
+    [session.favoriteFilterInput, session.favoriteMinSizeInput, session.favoriteMaxSizeInput].forEach(input => {
+      input.addEventListener('input', () => renderFavoritesPanelEntries(session));
+      filterRow.append(input);
+    });
+
     const actions = element('div', 'favorites-actions');
     const addAction = (label, handler, className = '') => {
       const button = element('button', 'toolbar-button ' + className, label);
@@ -5162,7 +5971,7 @@
       return button;
     };
     addAction('全选/取消全选', () => {
-      const codes = session.favoriteEntries.map(entry => entry.preference.pickcode);
+      const codes = (session.favoriteVisibleEntries || []).map(entry => entry.preference.pickcode);
       const allSelected = codes.length > 0 && codes.every(code => session.favoriteSelected.has(code));
       session.favoriteSelected = allSelected ? new Set() : new Set(codes);
       session.favoriteList.querySelectorAll('.favorite-select').forEach(checkbox => {
@@ -5172,21 +5981,31 @@
     });
     session.favoriteSelectionLabel = element('small', 'favorite-selection-label', '已选择 0 条');
     actions.append(session.favoriteSelectionLabel);
-    addAction('批量取消收藏', () => {
-      void updateSelectedFavorites(session, { favorite: false }, '已批量取消收藏');
+    session.favoriteRemoveSelectedButton = addAction('批量取消收藏', () => {
+      void updateSelectedFavorites(session, { favorite: false }, '已批量移出当前收藏夹');
     });
+    session.favoriteTargetFolderSelect = element('select', 'favorite-target-folder-select');
+    session.favoriteTargetFolderSelect.setAttribute('aria-label', '加入目标收藏夹');
+    actions.append(session.favoriteTargetFolderSelect);
+    addAction('加入目标夹', () => { void addSelectedToFavoriteFolder(session); });
+    addAction('收藏当前画面到此夹', () => { void addCurrentGridToFavoriteFolder(session); });
+    session.favoriteFolderPlayButton = addAction('随机播放筛选结果', () => { void playFavoriteFolder(session); });
+    session.favoriteFolderExitButton = addAction('退出收藏夹播放', () => exitFavoriteFolderPlayback(session));
+    session.favoriteFolderExitButton.hidden = true;
     addAction('批量排除', () => {
       void updateSelectedFavorites(session, { excluded: true }, '已批量排除；当前播放画面保持不变');
     });
     addAction('批量取消排除', () => {
       void updateSelectedFavorites(session, { excluded: false }, '已批量取消排除');
     });
+
     session.favoriteList = element('div', 'favorites-list');
-    session.favoriteMessage = element('small', 'favorite-message', '打开收藏列表后自动读取');
-    panel.append(heading, actions, session.favoriteList, session.favoriteMessage);
+    session.favoriteMessage = element('small', 'favorite-message', '打开收藏夹后自动读取');
+    panel.append(heading, folderControls, filterRow, actions, session.favoriteList, session.favoriteMessage);
+    session.activeFavoriteFolderId = session.activeFavoriteFolderId || 'default';
+    syncFavoriteFolderSelectors(session);
     return panel;
   }
-
   function closeToolsDrawer(session, restoreFocus = false) {
     if (!session || !session.toolsDrawerLayer) return;
     session.toolsDrawerLayer.hidden = true;
@@ -6443,8 +7262,8 @@
         panel, grid, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
         preferenceState: indexed.preferenceState, profiles: indexed.profiles, filters: indexed.filters,
         settings: indexed.settings, recentDirectories: indexed.recentDirectories,
-        favoriteSelected: new Set(), favoriteEntries: [],
-        cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
+        favoriteSelected: new Set(), favoriteEntries: [], favoriteVisibleEntries: [], favoriteFolders: [],
+        activeFavoriteFolderId: 'default', favoriteFolderPlayback: null, favoriteRefreshToken: 0,        cells: Array(MAX_VIDEOS).fill(null), availableItems: shuffleItems(items), usedPickcodes: new Set(),
         sameFolderMode: null, sameFolderRestore: null,
         roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         failedCount: 0, failedPickcodes: new Set(), authBlocked: false, resumeButton: null,
@@ -6469,7 +7288,10 @@
         recentButton: null, recentPanel: null, recentClearButton: null, recentMessage: null, favoritesButton: null, favoritePanel: null,
         excludedButton: null, excludedPanel: null, excludedList: null, excludedMessage: null, excludedEntries: [],
         favoriteList: null, favoriteMessage: null, favoriteSelectionLabel: null,
-        onKey: event => {
+        favoriteFolderSelect: null, favoriteFolderNameInput: null, favoriteCreateButton: null,
+        favoriteRenameButton: null, favoriteDeleteButton: null, favoriteTargetFolderSelect: null,
+        favoriteRemoveSelectedButton: null, favoriteFolderPlayButton: null, favoriteFolderExitButton: null,
+        favoriteFilterInput: null, favoriteMinSizeInput: null, favoriteMaxSizeInput: null,        onKey: event => {
           if (event.key === 'Tab') revealToolbar(session, false, 'keyboard');
           const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
           const formEditing = eventPath.some(target => target instanceof Element && target.matches('input,textarea,select,[contenteditable="true"]'));
@@ -7012,6 +7834,14 @@
     .recent-path,.favorite-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
     .recent-meta,.favorite-meta,.favorite-message,.favorite-selection-label{font-size:11px;color:#8d9eb4;overflow-wrap:anywhere}
     .favorites-actions,.favorite-row-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .favorite-folder-toolbar,.favorite-filter-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+    .favorite-folder-toolbar select,.favorite-folder-toolbar input,.favorite-filter-row input,.favorite-target-folder-select{min-width:0;padding:7px 8px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
+    .favorite-folder-select{flex:1 1 140px}
+    .favorite-folder-name{flex:1 1 140px}
+    .favorite-filter-keyword{flex:1 1 200px}
+    .favorite-filter-size{width:90px}
+    .favorite-target-folder-select{max-width:170px}
+    .favorite-folder-toolbar button:disabled{opacity:.4;cursor:not-allowed}
     .favorite-select{flex-shrink:0;accent-color:#4f8df5}
     .favorite-message.is-error{color:#ff9c9c}
     .panel-empty{margin:0;padding:8px;color:#aab5c7;font-size:12px}
