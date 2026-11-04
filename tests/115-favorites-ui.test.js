@@ -351,7 +351,7 @@ test('v1.0.0 locked cells are preserved by manual next and batch replacement', (
   const end = source.indexOf('  async function startNewRound(session, message = \'\') {', start);
   assert.ok(start >= 0 && end > start, 'manual and batch replacement handlers can be isolated');
   const swapCode = source.slice(start, end) +
-    '\\nglobalThis.__swapCell = swapCell; globalThis.__swapAllUnlocked = swapAllUnlocked;';
+    '\nglobalThis.__swapCell = swapCell; globalThis.__swapAllUnlocked = swapAllUnlocked;';
 
   let collected = 0;
   const replacements = [];
