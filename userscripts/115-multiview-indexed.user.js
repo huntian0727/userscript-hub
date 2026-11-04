@@ -3327,23 +3327,24 @@
       return;
     }
 
-    if (cell.retryCount < 1 && !alreadyUsedGmFallback) {
+    if (cell.retryCount < 2 && !alreadyUsedGmFallback) {
       cell.retryCount++;
       cell.failed = false;
       cell.hasPlayed = false;
       cell.loadStarted = false;
       cell.userPaused = false;
       disposeCell(cell);
-      setStatus(cell, '播放异常，正在进行最后一次重试…');
+      setStatus(cell, '播放异常，正在进行第 ' + cell.retryCount + '/2 次重试…');
       revealCellHeading(cell, 'programmatic');
-      cell.quality.textContent = '重试 1/1';
+      cell.quality.textContent = '重试 ' + cell.retryCount + '/2';
       const retryItem = failedItem;
+      const retryDelay = 250 * cell.retryCount;
       cell.retryTimer = setTimeout(() => {
         cell.retryTimer = null;
         if (session.closed || session.authBlocked || cell.item !== retryItem || cell.failed || cell.layoutPaused) return;
         cell.loadStarted = true;
         void loadCell(session, cell, retryItem);
-      }, 250);
+      }, retryDelay);
       updateRoundControls(session);
       return;
     }

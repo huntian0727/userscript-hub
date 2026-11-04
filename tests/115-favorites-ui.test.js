@@ -133,3 +133,12 @@ test('v1.0.0 defaults new directory indexes to include all subfolders, with manu
 test('v1.0.0 registers exactly one loadedmetadata handler per video cell', () => {
   assert.equal((source.match(/video\.addEventListener\('loadedmetadata'/g) || []).length, 1);
 });
+
+
+test('v1.0.0 retries transient playback failures at most twice before skipping', () => {
+  assert.match(source, /if \(cell\.retryCount < 2 && !alreadyUsedGmFallback\)/);
+  assert.match(source, /正在进行第 ' \+ cell\.retryCount \+ '\/2 次重试/);
+  assert.match(source, /cell\.quality\.textContent = '重试 ' \+ cell\.retryCount \+ '\/2'/);
+  assert.match(source, /const retryDelay = 250 \* cell\.retryCount/);
+  assert.match(source, /该视频已在本轮跳过，不会加入永久排除列表/);
+});
