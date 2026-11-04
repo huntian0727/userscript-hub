@@ -162,7 +162,7 @@ test('v1.0.0 smart aspect layout produces non-overlapping, in-bounds tiles for m
   const end = source.indexOf('  function applySmartGridLayout(session) {', start);
   assert.ok(start >= 0 && end > start, 'smart layout implementation can be isolated for geometry tests');
   const layoutCode = source.slice(start, end) +
-    '\\nglobalThis.__applyOptimalAspectGridLayout = applyOptimalAspectGridLayout;';
+    '\nglobalThis.__applyOptimalAspectGridLayout = applyOptimalAspectGridLayout;';
 
   const context = {
     DEFAULT_ASPECT_RATIO: 16 / 9,
