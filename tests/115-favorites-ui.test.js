@@ -230,3 +230,115 @@ test('v1.0.0 smart aspect layout produces non-overlapping, in-bounds tiles for m
     assert.ok(Number(session.grid.dataset.aspectFill) > 0);
   }
 });
+
+
+test('v1.0.0 transient playback failures retry twice, then skip without permanent exclusion', () => {
+  const start = source.indexOf('  function isManualPlaybackFailure(message) {');
+  const end = source.indexOf('  function resumeAfterAuth(session) {', start);
+  assert.ok(start >= 0 && end > start, 'playback failure handler can be isolated for runtime tests');
+  const failureCode = source.slice(start, end) + '\\nglobalThis.__failCell = failCell;';
+
+  const timers = [];
+  let loadCalls = 0;
+  let replacements = 0;
+  const nextItem = { pickcode: 'next-2', name: 'next video' };
+  const context = {
+    console: { warn() {} },
+    isAuthBlockedFailure: message => /115验证|登录受阻/.test(String(message)),
+    disposeCell() {},
+    setStatus() {},
+    revealCellHeading() {},
+    updateRoundControls() {},
+    itemKey: item => String(item && item.pickcode || ''),
+    collectNextItem: () => nextItem,
+    loadCell() { loadCalls++; },
+    replaceCell(session, cell, item) {
+      replacements++;
+      cell.item = item;
+      cell.failed = false;
+    },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(failureCode, context);
+
+  const failedItem = { pickcode: 'failed-1', name: 'failed video' };
+  const cell = {
+    item: failedItem, failed: false, retryCount: 0, quality: { textContent: '' },
+    loadStarted: true, hasPlayed: false, userPaused: false, layoutPaused: false,
+    locked: false
+  };
+  const session = {
+    closed: false, authBlocked: false, cells: [cell],
+    failedPickcodes: new Set(), failedCount: 0, roundMessage: ''
+  };
+
+  context.__failCell(session, cell, '网络请求超时');
+  assert.equal(cell.retryCount, 1);
+  assert.equal(cell.failed, false);
+  assert.equal(timers[0].delay, 250);
+  timers.shift().callback();
+  assert.equal(loadCalls, 1);
+
+  context.__failCell(session, cell, '播放流连接中断');
+  assert.equal(cell.retryCount, 2);
+  assert.equal(cell.failed, false);
+  assert.equal(timers[0].delay, 500);
+  timers.shift().callback();
+  assert.equal(loadCalls, 2);
+
+  context.__failCell(session, cell, '播放流再次超时');
+  assert.equal(cell.failed, true);
+  assert.equal(session.failedCount, 1);
+  assert.equal(session.failedPickcodes.has('failed-1'), true);
+  assert.match(session.roundMessage, /已跳过失败视频/);
+  assert.equal(timers[0].delay, 280);
+  timers.shift().callback();
+  assert.equal(replacements, 1);
+  assert.equal(cell.item, nextItem);
+});
+
+test('v1.0.0 authentication failures pause取流 immediately without consuming retry attempts', () => {
+  const start = source.indexOf('  function isManualPlaybackFailure(message) {');
+  const end = source.indexOf('  function resumeAfterAuth(session) {', start);
+  const failureCode = source.slice(start, end) + '\\nglobalThis.__failCell = failCell;';
+  const timers = [];
+  const context = {
+    console: { warn() {} },
+    isAuthBlockedFailure: message => /115验证|登录受阻/.test(String(message)),
+    disposeCell() {},
+    setStatus() {},
+    revealCellHeading() {},
+    updateRoundControls() {},
+    itemKey: item => String(item && item.pickcode || ''),
+    collectNextItem: () => null,
+    loadCell() {},
+    replaceCell() {},
+    setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }
+  };
+  vm.createContext(context);
+  vm.runInContext(failureCode, context);
+
+  const cell = {
+    item: { pickcode: 'auth-1' }, failed: false, retryCount: 0,
+    quality: { textContent: '' }, loadStarted: true, hasPlayed: false,
+    userPaused: false, layoutPaused: false, locked: false
+  };
+  const session = {
+    closed: false, authBlocked: false, cells: [cell],
+    failedPickcodes: new Set(), failedCount: 0, roundMessage: ''
+  };
+  context.__failCell(session, cell, '115验证或登录受阻');
+
+  assert.equal(session.authBlocked, true);
+  assert.equal(cell.failed, true);
+  assert.equal(cell.authBlocked, true);
+  assert.equal(cell.retryCount, 0);
+  assert.equal(cell.quality.textContent, '等待验证');
+  assert.equal(timers.length, 0);
+  assert.equal(session.failedCount, 0);
+  assert.equal(session.failedPickcodes.size, 0);
+});
