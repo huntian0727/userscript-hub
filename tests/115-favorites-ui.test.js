@@ -395,3 +395,78 @@ test('v1.0.0 locked cells are preserved by manual next and batch replacement', (
   assert.equal(collected, 1);
   assert.match(session.roundMessage, /没有可换片的未锁定窗口/);
 });
+
+
+test('v1.0.0 same-folder candidate pool de-duplicates videos and respects locked slots', () => {
+  const start = source.indexOf('  function sameFolderCells(session, state = session.sameFolderMode) {');
+  const middle = source.indexOf('  async function appendSameFolderCandidates(session, state, scanId) {', start);
+  const swapStart = source.indexOf('  function swapSameFolderCell(session, cell) {');
+  const swapEnd = source.indexOf('  async function startNewSameFolderRound(session, message = \'\') {', swapStart);
+  assert.ok(start >= 0 && middle > start && swapStart > middle && swapEnd > swapStart);
+  const code = source.slice(start, middle) + String.fromCharCode(10) +
+    source.slice(swapStart, swapEnd) + String.fromCharCode(10) +
+    'globalThis.__fillSameFolderCells = fillSameFolderCells; globalThis.__swapSameFolderCell = swapSameFolderCell; globalThis.__swapAllSameFolderUnlocked = swapAllSameFolderUnlocked;';
+
+  const replacements = [];
+  const context = {
+    DEFAULT_ASPECT_RATIO: 16 / 9,
+    disposeCell() {},
+    isCellVisible() { return true; },
+    setStatus() {},
+    updateCellControls() {},
+    updateRoundControls() {},
+    itemKey: item => String(item && item.pickcode || ''),
+    replaceCell(session, cell, item) {
+      replacements.push({ slotId: cell.slotId, pickcode: item.pickcode });
+      cell.item = item;
+      return true;
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(code, context);
+
+  const lockedCell = {
+    index: 0, slotId: 'slot-1', locked: true,
+    item: null, name: { textContent: '', title: '' }, quality: { textContent: '' }
+  };
+  const openCell = {
+    index: 1, slotId: 'slot-2', locked: false,
+    item: null, name: { textContent: '', title: '' }, quality: { textContent: '' }
+  };
+  const first = { pickcode: 'same-1', parentId: '123' };
+  const duplicate = { pickcode: 'same-1', parentId: '123' };
+  const second = { pickcode: 'same-2', parentId: '123' };
+  const third = { pickcode: 'same-3', parentId: '123' };
+  const state = {
+    active: true, folderId: '123', folderPath: '/测试目录',
+    targetSlotIds: new Set(['slot-1', 'slot-2']),
+    pendingSlotIds: new Set(['slot-1', 'slot-2']),
+    availableItems: [first, duplicate, second, third],
+    playedPickcodes: new Set(), replacedThisRound: 0,
+    scanning: false, scanFinished: false, scanError: ''
+  };
+  const session = {
+    closed: false, sameFolderMode: state, layoutCount: 2,
+    cells: [lockedCell, openCell], filters: { replaceCount: 0 },
+    roundMessage: ''
+  };
+
+  assert.equal(context.__fillSameFolderCells(session, state), 2);
+  assert.deepEqual(replacements.map(item => item.pickcode), ['same-1', 'same-2']);
+  assert.equal(new Set(replacements.map(item => item.pickcode)).size, 2);
+  assert.equal(state.playedPickcodes.has('same-1'), true);
+  assert.equal(state.playedPickcodes.has('same-2'), true);
+  assert.equal(state.availableItems.length, 1);
+  assert.equal(state.roundPoolSize, 3);
+
+  const beforeLocked = lockedCell.item;
+  assert.equal(context.__swapSameFolderCell(session, lockedCell), false);
+  assert.equal(lockedCell.item, beforeLocked);
+  assert.equal(state.pendingSlotIds.size, 0);
+
+  assert.equal(context.__swapAllSameFolderUnlocked(session), undefined);
+  assert.equal(replacements.length, 3);
+  assert.equal(replacements[2].slotId, 'slot-2');
+  assert.equal(replacements[2].pickcode, 'same-3');
+  assert.equal(lockedCell.item, beforeLocked);
+});
