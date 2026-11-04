@@ -476,8 +476,8 @@ test('v1.0.0 smart layout reflow is debounced and coalesced through animation fr
   const start = source.indexOf('  function scheduleLayoutReflow(session, delay = 90) {');
   const end = source.indexOf('  function classifyAspectRatio(value) {', start);
   assert.ok(start >= 0 && end > start, 'layout reflow scheduler can be isolated');
-  const code = source.slice(start, end) +
-    '\\nglobalThis.__scheduleLayoutReflow = scheduleLayoutReflow;';
+  const code = source.slice(start, end) + String.fromCharCode(10) +
+    'globalThis.__scheduleLayoutReflow = scheduleLayoutReflow;';
 
   let nextTimerId = 0;
   let nextFrameId = 0;
