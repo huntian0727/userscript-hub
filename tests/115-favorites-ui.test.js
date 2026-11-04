@@ -544,7 +544,9 @@ test('v1.0.0 smart layout reflow is debounced and coalesced through animation fr
   const latestFrameId = session.layoutReflowFrame;
   assert.notEqual(latestFrameId, firstFrameId);
 
-  frames.get(latestFrameId)();
+  const latestFrame = frames.get(latestFrameId);
+  frames.delete(latestFrameId);
+  latestFrame();
   assert.equal(session.reflowCount, 1);
   assert.equal(session.layoutReflowFrame, 0);
 
