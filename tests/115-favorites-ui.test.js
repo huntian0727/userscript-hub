@@ -526,13 +526,19 @@ test('v1.0.0 smart layout reflow is debounced and coalesced through animation fr
   assert.equal(timers.has(firstTimerId), false);
   assert.equal(timers.get(debouncedTimerId).delay, 120);
 
-  timers.get(debouncedTimerId).callback();
+  const runTimer = id => {
+    const timer = timers.get(id);
+    assert.ok(timer, 'scheduled timer exists');
+    timers.delete(id);
+    timer.callback();
+  };
+  runTimer(debouncedTimerId);
   assert.equal(frames.size, 1);
   const firstFrameId = session.layoutReflowFrame;
 
   context.__scheduleLayoutReflow(session, 60);
   const secondTimerId = session.layoutReflowTimer;
-  timers.get(secondTimerId).callback();
+  runTimer(secondTimerId);
   assert.deepEqual(cancelledFrames, [firstFrameId]);
   assert.equal(frames.size, 1);
   const latestFrameId = session.layoutReflowFrame;
@@ -543,8 +549,10 @@ test('v1.0.0 smart layout reflow is debounced and coalesced through animation fr
   assert.equal(session.layoutReflowFrame, 0);
 
   session.closed = true;
+  const pendingTimers = timers.size;
   context.__scheduleLayoutReflow(session, 40);
-  timers.get(session.layoutReflowTimer).callback();
+  assert.equal(session.layoutReflowTimer, null);
+  assert.equal(timers.size, pendingTimers);
   assert.equal(frames.size, 0);
   assert.equal(session.reflowCount, 1);
 });
