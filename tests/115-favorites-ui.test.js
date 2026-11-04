@@ -344,3 +344,54 @@ test('v1.0.0 authentication failures pause取流 immediately without consuming r
   assert.equal(session.failedCount, 0);
   assert.equal(session.failedPickcodes.size, 0);
 });
+
+
+test('v1.0.0 locked cells are preserved by manual next and batch replacement', () => {
+  const start = source.indexOf('  function swapCell(session, cell) {');
+  const end = source.indexOf('  async function startNewRound(session, message = \'\') {', start);
+  assert.ok(start >= 0 && end > start, 'manual and batch replacement handlers can be isolated');
+  const swapCode = source.slice(start, end) +
+    '\\nglobalThis.__swapCell = swapCell; globalThis.__swapAllUnlocked = swapAllUnlocked;';
+
+  let collected = 0;
+  const replacements = [];
+  const queue = [{ pickcode: 'replacement-1' }, { pickcode: 'replacement-2' }];
+  const context = {
+    updateRoundControls() {},
+    collectNextItem() { collected++; return queue.shift() || null; },
+    replaceCell(session, cell, item) {
+      replacements.push({ cell, item });
+      cell.item = item;
+    },
+    swapSameFolderCell() { throw new Error('same-folder path should not be used in this test'); },
+    swapAllSameFolderUnlocked() { throw new Error('same-folder path should not be used in this test'); }
+  };
+  vm.createContext(context);
+  vm.runInContext(swapCode, context);
+
+  const lockedCell = { locked: true, item: { pickcode: 'keep-locked' } };
+  const openCell = { locked: false, item: { pickcode: 'replace-open' } };
+  const session = {
+    closed: false, roundRefreshing: false, authBlocked: false,
+    sameFolderMode: null, cells: [lockedCell, openCell], layoutCount: 2,
+    filters: { replaceCount: 0 }, roundMessage: ''
+  };
+
+  context.__swapCell(session, lockedCell);
+  assert.equal(collected, 0);
+  assert.equal(replacements.length, 0);
+  assert.match(session.roundMessage, /已锁定/);
+
+  context.__swapAllUnlocked(session);
+  assert.equal(collected, 1);
+  assert.equal(replacements.length, 1);
+  assert.equal(replacements[0].cell, openCell);
+  assert.equal(lockedCell.item.pickcode, 'keep-locked');
+  assert.equal(openCell.item.pickcode, 'replacement-1');
+
+  session.cells = [lockedCell];
+  session.layoutCount = 1;
+  context.__swapAllUnlocked(session);
+  assert.equal(collected, 1);
+  assert.match(session.roundMessage, /没有可换片的未锁定窗口/);
+});
