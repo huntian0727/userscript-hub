@@ -142,3 +142,16 @@ test('v1.0.0 retries transient playback failures at most twice before skipping',
   assert.match(source, /const retryDelay = 250 \* cell\.retryCount/);
   assert.match(source, /该视频已在本轮跳过，不会加入永久排除列表/);
 });
+
+
+test('v1.0.0 lock protects cells from manual-next, batch replacement and automatic advance', () => {
+  assert.match(source, /function swapCell\(session, cell\) \{[\s\S]*?if \(cell\.locked\) \{[\s\S]*?该窗口已锁定/);
+  assert.match(source, /const unlocked = session\.cells\.filter\(cell =>[\s\S]*?cell && cell\.index < session\.layoutCount && !cell\.locked/);
+  assert.match(source, /video\.addEventListener\('ended',[\s\S]*?if \(cell\.locked\) \{[\s\S]*?播放结束；该窗口已锁定/);
+  assert.match(source, /if \(!cell\.locked && !session\.authBlocked\) nextItem = collectNextItem\(session\)/);
+});
+
+test('v1.0.0 same-folder entry remains an explicit page-wide switch across every visible cell', () => {
+  assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
+  assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
+});
