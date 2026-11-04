@@ -1,0 +1,43 @@
+name: Validate v1.0.0 development
+
+on:
+  push:
+    branches: [develop/v1.0.0]
+    paths:
+      - 'registry.json'
+      - 'userscripts/**'
+      - 'history/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/validate-v1.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'registry.json'
+      - 'userscripts/**'
+      - 'history/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/validate-v1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Run tests
+        run: node --test tests/*.test.js
+      - name: Verify build and committed history
+        env:
+          PAGES_BASE_URL: https://huntian0727.github.io/userscript-hub
+        run: node scripts/build-pages.js --check-history

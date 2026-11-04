@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      0.12.4
+// @version      1.0.0
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '0.12.4';
+  const VERSION = '1.0.0';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2310,7 +2310,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.12.4';
+  const VERSION = '1.0.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5443,12 +5443,6 @@
     video.addEventListener('seeked', () => updateCellProgress(cell));
     video.addEventListener('emptied', () => updateCellProgress(cell));
     video.addEventListener('loadedmetadata', () => {
-      updateCellProgress(cell);
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        cell.aspectRatio = video.videoWidth / video.videoHeight;
-        scheduleLayoutReflow(session, 120);
-      }
-    });    video.addEventListener('loadedmetadata', () => {
       updateCellProgress(cell);
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         cell.aspectRatio = video.videoWidth / video.videoHeight;
