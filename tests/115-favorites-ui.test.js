@@ -244,6 +244,7 @@ test('v1.0.0 transient playback failures retry twice, then skip without permanen
   const nextItem = { pickcode: 'next-2', name: 'next video' };
   const context = {
     console: { warn() {} },
+    VERSION: '1.0.0',
     isAuthBlockedFailure: message => /115验证|登录受阻/.test(String(message)),
     disposeCell() {},
     setStatus() {},
@@ -308,6 +309,7 @@ test('v1.0.0 authentication failures pause取流 immediately without consuming r
   const timers = [];
   const context = {
     console: { warn() {} },
+    VERSION: '1.0.0',
     isAuthBlockedFailure: message => /115验证|登录受阻/.test(String(message)),
     disposeCell() {},
     setStatus() {},
