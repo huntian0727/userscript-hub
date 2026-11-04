@@ -236,7 +236,7 @@ test('v1.0.0 transient playback failures retry twice, then skip without permanen
   const start = source.indexOf('  function isManualPlaybackFailure(message) {');
   const end = source.indexOf('  function resumeAfterAuth(session) {', start);
   assert.ok(start >= 0 && end > start, 'playback failure handler can be isolated for runtime tests');
-  const failureCode = source.slice(start, end) + '\\nglobalThis.__failCell = failCell;';
+  const failureCode = source.slice(start, end) + '\nglobalThis.__failCell = failCell;';
 
   const timers = [];
   let loadCalls = 0;
@@ -304,7 +304,7 @@ test('v1.0.0 transient playback failures retry twice, then skip without permanen
 test('v1.0.0 authentication failures pause取流 immediately without consuming retry attempts', () => {
   const start = source.indexOf('  function isManualPlaybackFailure(message) {');
   const end = source.indexOf('  function resumeAfterAuth(session) {', start);
-  const failureCode = source.slice(start, end) + '\\nglobalThis.__failCell = failCell;';
+  const failureCode = source.slice(start, end) + '\nglobalThis.__failCell = failCell;';
   const timers = [];
   const context = {
     console: { warn() {} },
