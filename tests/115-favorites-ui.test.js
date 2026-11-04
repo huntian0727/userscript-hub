@@ -155,3 +155,78 @@ test('v1.0.0 same-folder entry remains an explicit page-wide switch across every
   assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
   assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
 });
+
+
+test('v1.0.0 smart aspect layout produces non-overlapping, in-bounds tiles for mixed video ratios', () => {
+  const start = source.indexOf('  const ASPECT_GRID_TRACKS = 240;');
+  const end = source.indexOf('  function applySmartGridLayout(session) {', start);
+  assert.ok(start >= 0 && end > start, 'smart layout implementation can be isolated for geometry tests');
+  const layoutCode = source.slice(start, end) +
+    '\\nglobalThis.__applyOptimalAspectGridLayout = applyOptimalAspectGridLayout;';
+
+  const context = {
+    DEFAULT_ASPECT_RATIO: 16 / 9,
+    window: {
+      innerWidth: 1920,
+      innerHeight: 1080,
+      getComputedStyle: () => ({
+        paddingLeft: '0px', paddingRight: '0px',
+        paddingTop: '0px', paddingBottom: '0px',
+        columnGap: '4px', rowGap: '4px'
+      })
+    },
+    mediaAspectRatio: cell => cell.aspectRatio,
+    setCellGridPosition: (cell, column, columnSpan, row, rowSpan) => {
+      cell.gridPosition = { column, columnSpan, row, rowSpan };
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(layoutCode, context);
+
+  const scenarios = [
+    { width: 1920, height: 900, ratios: [16/9, 16/9] },
+    { width: 1920, height: 900, ratios: [9/16, 16/9, 1, 2.4] },
+    { width: 900, height: 1400, ratios: [9/16, 9/16, 16/9, 16/9, 1, 2.4] },
+    { width: 1365, height: 768, ratios: [9/16, 16/9, 1, 2.4, 16/9, 9/16, 1, 16/9, 2.4] },
+    { width: 2560, height: 1080, ratios: [9/16, 9/16, 16/9, 16/9, 1, 1, 2.4, 2.4, 16/9, 9/16, 1, 16/9] }
+  ];
+
+  for (const scenario of scenarios) {
+    const cells = scenario.ratios.map((aspectRatio, index) => ({
+      index, aspectRatio, box: { style: {} }
+    }));
+    const session = {
+      layoutCount: cells.length,
+      grid: {
+        clientWidth: scenario.width,
+        clientHeight: scenario.height,
+        style: {},
+        dataset: {}
+      },
+      panel: { clientWidth: scenario.width, clientHeight: scenario.height }
+    };
+
+    assert.equal(context.__applyOptimalAspectGridLayout(session, cells), true);
+    assert.equal(cells.filter(cell => cell.gridPosition).length, cells.length);
+    for (const cell of cells) {
+      const p = cell.gridPosition;
+      assert.ok(p.column >= 1 && p.row >= 1);
+      assert.ok(p.columnSpan >= 1 && p.rowSpan >= 1);
+      assert.ok(p.column + p.columnSpan - 1 <= 240);
+      assert.ok(p.row + p.rowSpan - 1 <= 240);
+    }
+    for (let left = 0; left < cells.length; left++) {
+      const a = cells[left].gridPosition;
+      for (let right = left + 1; right < cells.length; right++) {
+        const b = cells[right].gridPosition;
+        const overlaps = a.column < b.column + b.columnSpan &&
+          b.column < a.column + a.columnSpan &&
+          a.row < b.row + b.rowSpan &&
+          b.row < a.row + a.rowSpan;
+        assert.equal(overlaps, false, 'smart layout must not overlap tiles');
+      }
+    }
+    assert.ok(Number(session.grid.dataset.aspectCoverage) > 0);
+    assert.ok(Number(session.grid.dataset.aspectFill) > 0);
+  }
+});
