@@ -369,8 +369,8 @@ test('v1.0.0 locked cells are preserved by manual next and batch replacement', (
   vm.createContext(context);
   vm.runInContext(swapCode, context);
 
-  const lockedCell = { locked: true, item: { pickcode: 'keep-locked' } };
-  const openCell = { locked: false, item: { pickcode: 'replace-open' } };
+  const lockedCell = { index: 0, locked: true, item: { pickcode: 'keep-locked' } };
+  const openCell = { index: 1, locked: false, item: { pickcode: 'replace-open' } };
   const session = {
     closed: false, roundRefreshing: false, authBlocked: false,
     sameFolderMode: null, cells: [lockedCell, openCell], layoutCount: 2,
