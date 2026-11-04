@@ -9,12 +9,11 @@ const { test } = require('node:test');
 const source = fs.readFileSync(
   path.join(__dirname, '..', 'userscripts', '115-multiview-indexed.user.js'),
   'utf8'
-);
-
+).replace(/\r\n/g, '\n');
 test('115 multiview v1.0.0 userscript parses and exposes clear favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.match(source, /^\/\/\s*@version\s+1\.0\.0$/m);
-  assert.equal((source.match(/const VERSION = '1\.0\.0';/g) || []).length, 2);
+  assert.match(source, /^\/\/\s*@version\s+1\.0\.1$/m);
+  assert.equal((source.match(/const VERSION = '1\.0\.1';/g) || []).length, 2);
   assert.match(source, /favorite-feedback-toast/);
   assert.match(source, /aria-live', 'polite'/);
   assert.match(source, /id = 'btnFavorites'/);
@@ -148,7 +147,7 @@ test('v1.0.0 lock protects cells from manual-next, batch replacement and automat
   assert.match(source, /function swapCell\(session, cell\) \{[\s\S]*?if \(cell\.locked\) \{[\s\S]*?该窗口已锁定/);
   assert.match(source, /const unlocked = session\.cells\.filter\(cell =>[\s\S]*?cell && cell\.index < session\.layoutCount && !cell\.locked/);
   assert.match(source, /video\.addEventListener\('ended',[\s\S]*?if \(cell\.locked\) \{[\s\S]*?播放结束；该窗口已锁定/);
-  assert.match(source, /if \(!cell\.locked && !session\.authBlocked\) nextItem = collectNextItem\(session\)/);
+  assert.match(source, /if \(cell\.locked\) \{\s*session\.roundMessage = '播放失败；该窗口已锁定/);
 });
 
 test('v1.0.0 same-folder entry remains an explicit page-wide switch across every visible cell', () => {
@@ -300,6 +299,76 @@ test('v1.0.0 transient playback failures retry twice, then skip without permanen
   timers.shift().callback();
   assert.equal(replacements, 1);
   assert.equal(cell.item, nextItem);
+});
+
+test('v1.0.1 failure auto-skip stays inside the active same-folder candidate pool and respects locks', () => {
+  const start = source.indexOf('  function isManualPlaybackFailure(message) {');
+  const end = source.indexOf('  function resumeAfterAuth(session) {', start);
+  const failureCode = source.slice(start, end) + '\nglobalThis.__failCell = failCell;';
+  let sameFolderSwaps = 0;
+  let globalPicks = 0;
+  const sameFolderItem = { pickcode: 'same-folder-next', name: '同目录下一个视频', parentId: '123' };
+  const failedItem = { pickcode: 'same-folder-failed', name: '失败视频', parentId: '123' };
+  const timers = [];
+  const context = {
+    console: { warn() {} },
+    VERSION: '1.0.0',
+    isAuthBlockedFailure: () => false,
+    disposeCell() {},
+    setStatus() {},
+    revealCellHeading() {},
+    updateRoundControls() {},
+    itemKey: item => String(item && item.pickcode || ''),
+    collectNextItem() {
+      globalPicks++;
+      return { pickcode: 'global-pool-leak', name: '全局候选' };
+    },
+    swapSameFolderCell(session, cell) {
+      sameFolderSwaps++;
+      cell.item = sameFolderItem;
+      cell.failed = false;
+      return true;
+    },
+    replaceCell() { throw new Error('same-folder failure must not use the global replacement timer'); },
+    setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; }
+  };
+  vm.createContext(context);
+  vm.runInContext(failureCode, context);
+
+  const makeCell = locked => ({
+    item: failedItem, failed: false, retryCount: 2, quality: { textContent: '' },
+    loadStarted: true, hasPlayed: false, userPaused: false, layoutPaused: false,
+    locked, slotId: 'slot-1'
+  });
+  const sameFolderMode = {
+    active: true, targetSlotIds: new Set(['slot-1']), scanning: true, scanError: ''
+  };
+  const session = {
+    closed: false, authBlocked: false, cells: [], sameFolderMode,
+    failedPickcodes: new Set(), failedCount: 0, roundMessage: ''
+  };
+  const cell = makeCell(false);
+  session.cells = [cell];
+  context.__failCell(session, cell, '播放流第三次超时');
+
+  assert.equal(sameFolderSwaps, 1);
+  assert.equal(globalPicks, 0);
+  assert.equal(cell.item, sameFolderItem);
+  assert.equal(cell.failed, false);
+  assert.match(session.roundMessage, /当前目录/);
+  assert.equal(timers.length, 0);
+
+  const lockedCell = makeCell(true);
+  const lockedSession = {
+    closed: false, authBlocked: false, cells: [lockedCell], sameFolderMode,
+    failedPickcodes: new Set(), failedCount: 0, roundMessage: ''
+  };
+  context.__failCell(lockedSession, lockedCell, '播放流第三次超时');
+  assert.equal(sameFolderSwaps, 1);
+  assert.equal(globalPicks, 0);
+  assert.equal(lockedCell.item, failedItem);
+  assert.equal(lockedCell.failed, true);
+  assert.match(lockedSession.roundMessage, /已锁定/);
 });
 
 test('v1.0.0 authentication failures pause取流 immediately without consuming retry attempts', () => {

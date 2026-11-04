@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（索引版）
 // @namespace    local.115.multiview
-// @version      1.0.0
+// @version      1.0.1
 // @description  115目录索引与多宫格播放一体化，支持整页同目录随机切换、智能优先扫描、分页增量索引及收藏管理。
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
@@ -1762,7 +1762,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const HOST_ID = 'local-115-index-verifier';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -2310,7 +2310,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 2500;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3360,18 +3360,34 @@
       session.failedPickcodes.add(failedKey);
       session.failedCount++;
     }
-    let nextItem = null;
-    if (!cell.locked && !session.authBlocked) nextItem = collectNextItem(session);
-    if (nextItem) {
-      session.roundMessage = '已跳过失败视频 ' + session.failedCount + ' 个，继续播放下一个候选';
-      cell.skipTimer = setTimeout(() => {
-        cell.skipTimer = null;
-        if (!session.closed && !session.authBlocked && !cell.locked && cell.item === failedItem && cell.failed) {
-          replaceCell(session, cell, nextItem);
-        }
-      }, 280);
+    if (cell.locked) {
+      session.roundMessage = '播放失败；该窗口已锁定，保留当前视频，请先解锁再换片';
+    } else if (session.sameFolderMode && session.sameFolderMode.active) {
+      const sameFolderMode = session.sameFolderMode;
+      const inTargetLayout = sameFolderMode.targetSlotIds && sameFolderMode.targetSlotIds.has(cell.slotId);
+      const queued = inTargetLayout ? swapSameFolderCell(session, cell) : false;
+      if (queued) {
+        session.roundMessage = '已跳过失败视频 ' + session.failedCount + ' 个，正在当前目录寻找下一个候选';
+      } else if (!inTargetLayout) {
+        session.roundMessage = '失败视频已跳过；该窗口不在当前同目录布局范围内';
+      } else if (sameFolderMode.scanError) {
+        session.roundMessage = '同目录索引未完成：' + sameFolderMode.scanError;
+      } else {
+        session.roundMessage = '失败视频已跳过；当前目录本轮没有更多可用候选，请开启新一轮';
+      }
     } else {
-      session.roundMessage = '失败视频已跳过；本轮没有更多可用候选时请开启新一轮';
+      const nextItem = collectNextItem(session);
+      if (nextItem) {
+        session.roundMessage = '已跳过失败视频 ' + session.failedCount + ' 个，继续播放下一个候选';
+        cell.skipTimer = setTimeout(() => {
+          cell.skipTimer = null;
+          if (!session.closed && !session.authBlocked && !cell.locked && cell.item === failedItem && cell.failed) {
+            replaceCell(session, cell, nextItem);
+          }
+        }, 280);
+      } else {
+        session.roundMessage = '失败视频已跳过；本轮没有更多可用候选时请开启新一轮';
+      }
     }
     updateRoundControls(session);
     console.warn('[115多画面 ' + VERSION + '] ' + cell.slotId + '：' + message);
