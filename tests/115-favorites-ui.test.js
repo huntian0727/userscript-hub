@@ -470,3 +470,81 @@ test('v1.0.0 same-folder candidate pool de-duplicates videos and respects locked
   assert.equal(replacements[2].pickcode, 'same-3');
   assert.equal(lockedCell.item, beforeLocked);
 });
+
+
+test('v1.0.0 smart layout reflow is debounced and coalesced through animation frames', () => {
+  const start = source.indexOf('  function scheduleLayoutReflow(session, delay = 90) {');
+  const end = source.indexOf('  function classifyAspectRatio(value) {', start);
+  assert.ok(start >= 0 && end > start, 'layout reflow scheduler can be isolated');
+  const code = source.slice(start, end) +
+    '\\nglobalThis.__scheduleLayoutReflow = scheduleLayoutReflow;';
+
+  let nextTimerId = 0;
+  let nextFrameId = 0;
+  const timers = new Map();
+  const frames = new Map();
+  const cancelledFrames = [];
+  const context = {
+    window: {
+      setTimeout(callback, delay) {
+        const id = ++nextTimerId;
+        timers.set(id, { callback, delay });
+        return id;
+      }
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    requestAnimationFrame(callback) {
+      const id = ++nextFrameId;
+      frames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) {
+      cancelledFrames.push(id);
+      frames.delete(id);
+    },
+    applyLayoutPositions(session) {
+      session.reflowCount++;
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(code, context);
+
+  const session = {
+    closed: false,
+    layoutReflowTimer: null,
+    layoutReflowFrame: 0,
+    reflowCount: 0
+  };
+
+  context.__scheduleLayoutReflow(session, 80);
+  const firstTimerId = session.layoutReflowTimer;
+  context.__scheduleLayoutReflow(session, 120);
+  const debouncedTimerId = session.layoutReflowTimer;
+  assert.notEqual(debouncedTimerId, firstTimerId);
+  assert.equal(timers.has(firstTimerId), false);
+  assert.equal(timers.get(debouncedTimerId).delay, 120);
+
+  timers.get(debouncedTimerId).callback();
+  assert.equal(frames.size, 1);
+  const firstFrameId = session.layoutReflowFrame;
+
+  context.__scheduleLayoutReflow(session, 60);
+  const secondTimerId = session.layoutReflowTimer;
+  timers.get(secondTimerId).callback();
+  assert.deepEqual(cancelledFrames, [firstFrameId]);
+  assert.equal(frames.size, 1);
+  const latestFrameId = session.layoutReflowFrame;
+  assert.notEqual(latestFrameId, firstFrameId);
+
+  frames.get(latestFrameId)();
+  assert.equal(session.reflowCount, 1);
+  assert.equal(session.layoutReflowFrame, 0);
+
+  session.closed = true;
+  context.__scheduleLayoutReflow(session, 40);
+  timers.get(session.layoutReflowTimer).callback();
+  assert.equal(frames.size, 0);
+  assert.equal(session.reflowCount, 1);
+});
