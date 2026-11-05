@@ -1,6 +1,6 @@
 # Full-disk random explorer — algorithm lab v0.1
 
-Status: development candidate v1.6.0 / delivery FDX-160-01. The streaming adapter, bounded global-sample core, dedicated IndexedDB store and resumable runner are bundled into the main userscript. A separate “全盘随机探索” launcher and scan dialog are wired into the existing multi-grid player. Synthetic end-to-end coverage is passing; no real 115 account scan has been run and this build has not been published.
+Status: public test candidate v1.6.1 / delivery FDX-161-01. The streaming adapter, bounded global-sample core, dedicated IndexedDB store and resumable runner are bundled into the independent userscript. The standalone release now declares separate, collision-free DOM host IDs for the index-manager UI and player UI; this fixes the v1.6.0 startup ReferenceError that prevented both launchers from appearing. Synthetic end-to-end coverage is passing; no real 115 account scan has been run.
 
 ## What the current code already proves
 

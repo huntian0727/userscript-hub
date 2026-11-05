@@ -10,6 +10,17 @@ const source = fs.readFileSync(
   'utf8'
 );
 
+test('standalone full-disk release declares separate DOM host IDs for both launchers', () => {
+  const hostIds = [...source.matchAll(/const HOST_ID = '([^']+)';/g)].map(match => match[1]);
+  assert.deepEqual(hostIds, [
+    'local-115-index-verifier-full-disk-v1-6',
+    'local-115-multiview-full-disk-v1-6'
+  ]);
+  assert.equal(new Set(hostIds).size, 2);
+  assert.match(source, /const VERSION = '1\.6\.1';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
+});
+
 test('full-disk exploration has a separate launcher and does not replace indexed playback', () => {
   assert.match(source, /const fullDiskLauncher = element\('button', 'full-disk-launcher', '🌐 全盘随机探索'\)/);
   assert.match(source, /launcher\.onclick = \(\) => \{ void openPlayer\(\); \}/);
