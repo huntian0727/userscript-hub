@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(
-  path.join(__dirname, '..', 'userscripts', '115-multiview-indexed.user.js'),
+  path.join(__dirname, '..', 'userscripts', '115-multiview-indexed-v1-6.user.js'),
   'utf8'
 ).replace(/\r\n/g, '\n');
 test('115 multiview v1.6.0 userscript parses and exposes multi-folder favorite controls', () => {

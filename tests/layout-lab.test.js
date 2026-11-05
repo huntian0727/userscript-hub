@@ -83,7 +83,7 @@ test('v1.5 slicing-tree geometry remains valid for 2–25 videos, mixed ratios a
 });
 
 test('v1.5 benchmark seed exactly matches the production player seed implementation', () => {
-  const productionSource = fs.readFileSync(path.join(__dirname, '../userscripts/115-multiview-indexed.user.js'), 'utf8');
+  const productionSource = fs.readFileSync(path.join(__dirname, '../userscripts/115-multiview-indexed-v1-6.user.js'), 'utf8');
   const seedStart = productionSource.indexOf('    let seed = 2166136261;');
   const seedEndMarker = '    seed = seed >>> 0 || 1;';
   const seedEnd = productionSource.indexOf(seedEndMarker, seedStart);

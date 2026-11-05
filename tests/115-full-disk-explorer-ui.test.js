@@ -6,7 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(
-  path.join(__dirname, '..', 'userscripts', '115-multiview-indexed.user.js'),
+  path.join(__dirname, '..', 'userscripts', '115-multiview-indexed-v1-6.user.js'),
   'utf8'
 );
 
