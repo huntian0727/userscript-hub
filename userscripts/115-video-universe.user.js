@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.1
-// @description  115独立3D视频宇宙：WebGL球体、自由旋转、缩放、镜头飞行、星球迷雾、真实目录只读探索与随机跃迁。
+// @version      0.2.2
+// @description  115独立3D视频宇宙：星球聚焦展开子星球、分页漫游、视频信息预览与115原生播放入口；保留3D旋转、只读扫描与随机跃迁。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -14,8 +14,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.1';
-  const DELIVERY = 'VU-021-01';
+  const VERSION = '0.2.2';
+  const DELIVERY = 'VU-022-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -24,6 +24,8 @@
   const MAX_DEPTH = 3;
   const MAX_VISIBLE_PLANETS = 170;
   const MAX_SAMPLE_PER_PLANET = 16;
+  const ORBIT_PAGE_SIZE = 12;
+  const ORBIT_TRANSITION_MS = 750;
   const VIDEO_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;
   const DEMO = [
     ['影像星云', 142, 7], ['旧时光', 86, 5], ['银河档案', 203, 9],
@@ -159,6 +161,56 @@
         (screen.x - x) ** 2 + (screen.y - y) ** 2 <= Math.max(12, screen.radius + 7) ** 2)
       .sort((a, b) => a.screen.depth - b.screen.depth)[0]?.node || null;
   }
+  // Focused neighborhood: children take precedence; leaf planets expose their siblings.
+  function orbitNeighborhood(nodes, selectedId, page = 0, pageSize = ORBIT_PAGE_SIZE) {
+    const selected = nodes.get(selectedId);
+    if (!selected) return { members: [], total: 0, page: 0, pages: 1, kind: '子星球' };
+    const children = selected.childIds.filter(id => nodes.has(id));
+    const parent = selected.parentId && nodes.get(selected.parentId);
+    const candidates = children.length ? children :
+      (parent ? parent.childIds.filter(id => id !== selectedId && nodes.has(id)) : []);
+    const pages = Math.max(1, Math.ceil(candidates.length / pageSize));
+    const safePage = clamp(Number.isInteger(page) ? page : 0, 0, pages - 1);
+    return {
+      members: candidates.slice(safePage * pageSize, (safePage + 1) * pageSize),
+      total: candidates.length, page: safePage, pages,
+      kind: children.length ? '子星球' : '同级星球'
+    };
+  }
+
+  function orbitTarget(node, selected, neighborhood) {
+    const original = { x: node.x, y: node.y, z: node.z || 0 };
+    if (!selected || !neighborhood) return original;
+    const index = neighborhood.members.indexOf(node.id);
+    if (index < 0) return original;
+    const theta = -Math.PI / 2 + index * (Math.PI * 2 / Math.max(1, neighborhood.members.length));
+    const radius = neighborhood.members.length <= 5 ? 205 : 275;
+    return {
+      x: selected.x + Math.cos(theta) * radius,
+      y: selected.y + Math.sin(theta) * radius * .82,
+      z: (selected.z || 0) + Math.sin(theta * 1.7) * 80
+    };
+  }
+
+  function videoPlaybackUrl(record) {
+    const pickcode = String(record && record.pickcode || '').trim();
+    if (!/^[A-Za-z0-9]{4,128}$/.test(pickcode)) return null;
+    const url = new URL('https://115.com/');
+    url.searchParams.set('ct', 'play');
+    url.searchParams.set('ac', 'location');
+    url.searchParams.set('pickcode', pickcode);
+    url.searchParams.set('hls', '1');
+    return url.href;
+  }
+
+  function humanFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '大小未知';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = bytes, unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+    return size.toFixed(unit && size < 10 ? 1 : 0) + ' ' + units[unit];
+  }
+
   const CSS = [
     ':host{all:initial;font-family:Inter,system-ui,"Microsoft YaHei",sans-serif;color:#e9efff;}',
     '*{box-sizing:border-box;}button,input{font:inherit;}button{cursor:pointer;}',
@@ -195,6 +247,18 @@
     '.video-card:hover{border-color:#87c9ff}.video-icon{color:#b6cdfb;font-size:19px}',
     '.video-label{font-size:10px;color:#c9d5ef;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{flex:1}.foot{color:#7388aa;font-size:11px;line-height:1.6;}',
+    '.orbit-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.orbit-heading .btn{padding:6px 10px;}',
+    '.orbit-neighbors{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;}',
+    '.orbit-neighbors button{text-align:left;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+    'background:#1b3055;border:1px solid #537aae66;color:#d5ecff;border-radius:9px;padding:8px;font-size:11px;}',
+    '.orbit-neighbors button:hover{background:#294775}.orbit-status{font-size:11px;color:#9bb5d7;}',
+    '.video-preview{background:linear-gradient(145deg,#233869,#141e3d);border:1px solid #7ab6ee66;',
+    'border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:9px;}',
+    '.video-preview[hidden]{display:none!important}.preview-stage{min-height:112px;border-radius:10px;',
+    'background:radial-gradient(circle at 40% 30%,#4875a9,#171735 78%);display:flex;align-items:center;justify-content:center;}',
+    '.preview-stage span{font-size:46px;color:#d6f4ff}.preview-name{font-size:13px;font-weight:750;word-break:break-word;}',
+    '.preview-detail{font-size:11px;color:#aec5e7;line-height:1.6}.preview-actions{display:flex;gap:6px;flex-wrap:wrap;}',
+    '.preview-actions button{flex:1;min-width:90px;}',
     '.message{font-size:12px;min-height:22px;color:#b1cbed;line-height:1.6;}',
     '.banner{font-size:11px;color:#edd998;background:#927b2d22;border:1px solid #ae985755;border-radius:9px;padding:8px 10px;}',
     '.toolbar-input{border:1px solid #6c92c855;background:#0b1930;color:#e8f1ff;border-radius:9px;padding:9px;width:132px;font-size:12px;}',
@@ -244,11 +308,27 @@
           '<div class="actions"><button class="btn primary" id="jump" type="button">⚡ 随机跃迁</button>',
           '<button class="btn" id="focus-planet" type="button">◎ 聚焦星球</button>',
           '<button class="btn" id="open-folder" type="button">在115打开目录</button></div>',
+          '<div class="orbit-heading"><div class="title-sm" id="orbit-title">✦ 星球邻域</div><div>',
+            '<button class="btn" id="orbit-prev" type="button" title="上一组星球">‹</button> ',
+            '<button class="btn" id="orbit-next" type="button" title="下一组星球">›</button>',
+          '</div></div>',
+          '<div class="orbit-status" id="orbit-status">点击一颗星球，展开它的星系</div>',
+          '<div class="orbit-neighbors" id="orbit-neighbors"></div>',
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
+          '<div class="video-preview" id="video-preview" hidden>',
+            '<div class="preview-stage"><span aria-hidden="true">▶</span></div>',
+            '<div class="preview-name" id="preview-name"></div>',
+            '<div class="preview-detail" id="preview-detail"></div>',
+            '<div class="preview-actions">',
+              '<button class="btn primary" id="preview-play" type="button">▶ 在115播放</button>',
+              '<button class="btn" id="preview-folder" type="button">打开所在目录</button>',
+              '<button class="btn" id="preview-close" type="button">收起</button>',
+            '</div>',
+          '</div>',
           '<div class="banner" id="source-note">演示数据，不代表真实115文件。</div>',
           '<div class="message" id="scan-message">点击「探索真实115宇宙」开始只读扫描，或先漫游演示星图。</div>',
-          '<div class="foot">试点上限：最多80个目录、向下3层；仅按已经读取到的文件数放大星球。点击视频卡片会在115中打开对应目录，当前试点不内嵌视频解码。</div>',
+          '<div class="foot">最多只读探索80个目录、向下3层。单击星球将其居中，周围展开子星球或同级星球。点击视频样本可先看文件信息，再交给115官方页面播放；不在宇宙中解码视频。</div>',
         '</aside>',
       '</div>',
     '</section>'
@@ -260,7 +340,11 @@
     scan: $('#scan'), pause: $('#pause'), demo: $('#demo'), close: $('#close'),
     cid: $('#start-cid'), jump: $('#jump'), folder: $('#open-folder'),
     list: $('#video-grid'), msg: $('#scan-message'), note: $('#source-note'),
-    kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary')
+    kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
+    orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
+    orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), preview: $('#video-preview'),
+    previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
+    previewPlay: $('#preview-play')
   };
   const labelCanvas = $('#universe-label-layer');
   const overlay = labelCanvas.getContext('2d');
@@ -270,7 +354,8 @@
     camera: cameraDefaults(),
     scanAbort: null, scanEpoch: 0, running: false, paused: false, scanningCount: 0,
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
-    pointer: null, hoverId: null, projected: [], seed: 1
+    pointer: null, hoverId: null, projected: [], seed: 1,
+    orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null
   };
   const starfield = Array.from({ length: 230 }, (_, i) => ({
     x: ((hashId('star-x-' + i) % 10000) / 10000),
@@ -303,6 +388,9 @@
     state.selected = rootCid;
     state.rootId = rootCid;
     state.camera = cameraDefaults();
+    state.orbitActive = false; state.orbitPage = 0;
+    state.orbitFrom = null; state.orbitStarted = 0; state.previewRecord = null;
+    ui.preview.hidden = true;
     $('#spin').textContent = '⏸ 停止自转';
     $('#spin').setAttribute('aria-pressed', 'true');
     state.scanningCount = 0;
@@ -516,10 +604,75 @@
     runScan();
   }
 
+  function currentOrbitPosition(node, neighborhood, timestamp) {
+    const selected = state.orbitActive && state.nodes.get(state.selected);
+    const target = orbitTarget(node, selected, neighborhood);
+    const from = state.orbitFrom && state.orbitFrom.get(node.id);
+    if (!from) return target;
+    const t = clamp((timestamp - state.orbitStarted) / ORBIT_TRANSITION_MS, 0, 1);
+    const eased = t * t * (3 - 2 * t);
+    return {
+      x: from.x + (target.x - from.x) * eased,
+      y: from.y + (target.y - from.y) * eased,
+      z: from.z + (target.z - from.z) * eased
+    };
+  }
+
+  function transitionOrbit(change) {
+    const now = performance.now();
+    const previous = state.orbitActive ?
+      orbitNeighborhood(state.nodes, state.selected, state.orbitPage) : null;
+    const from = new Map();
+    for (const node of state.nodes.values()) {
+      from.set(node.id, currentOrbitPosition(node, previous, now));
+    }
+    change();
+    state.orbitFrom = from;
+    state.orbitStarted = now;
+  }
+
+  function resetOverview() {
+    transitionOrbit(() => {
+      state.orbitActive = false;
+      state.orbitPage = 0;
+      state.selected = state.rootId;
+    });
+    state.previewRecord = null;
+    ui.preview.hidden = true;
+    flyToPlanet(state.nodes.get(state.rootId), 950, true);
+    refreshPanel();
+  }
+
+  function changeOrbitPage(direction) {
+    if (!state.orbitActive) return;
+    const neighborhood = orbitNeighborhood(state.nodes, state.selected, state.orbitPage);
+    const nextPage = clamp(neighborhood.page + direction, 0, neighborhood.pages - 1);
+    if (nextPage === neighborhood.page) return;
+    transitionOrbit(() => { state.orbitPage = nextPage; });
+    refreshPanel();
+  }
+
+  function showVideoPreview(record) {
+    state.previewRecord = record;
+    ui.preview.hidden = false;
+    ui.previewName.textContent = record.name;
+    ui.previewDetail.textContent = humanFileSize(record.size) +
+      ' · ' + (state.mode === 'demo' ? '演示数据（无法播放）' : '真实115文件 · 从115官方页面播放');
+    ui.previewPlay.disabled = state.mode !== 'real' || !videoPlaybackUrl(record);
+    ui.previewPlay.title = ui.previewPlay.disabled ? '缺少有效提取码，无法直接打开播放页' : '交由115官方播放器播放';
+    $('#preview-folder').disabled = state.mode !== 'real';
+  }
+
   function selectPlanet(id, focus = true) {
     const node = state.nodes.get(id);
     if (!node) return;
-    state.selected = id;
+    transitionOrbit(() => {
+      state.selected = id;
+      state.orbitActive = true;
+      state.orbitPage = 0;
+    });
+    state.previewRecord = null;
+    ui.preview.hidden = true;
     state.visited.add(id);
     if (state.mode === 'real' && !node.scanned && node.depth <= MAX_DEPTH) {
       const existing = state.queue.indexOf(id);
@@ -539,6 +692,13 @@
     const planet = pool[Math.floor(Math.random() * pool.length)];
     selectPlanet(planet.id);
     // selectPlanet already prioritizes an unvisited planet.
+  }
+
+  function open115Video() {
+    if (state.mode !== 'real' || !state.previewRecord) return;
+    const url = videoPlaybackUrl(state.previewRecord);
+    if (!url) { state.notice = '该文件缺少有效播放标识，请打开目录手动播放。'; refreshPanel(); return; }
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   function open115Folder(id) {
@@ -572,6 +732,27 @@
     ui.msg.textContent = state.notice || '点击星球深入探索，或点击「随机跃迁」。';
     ui.folder.disabled = state.mode === 'demo';
     ui.scan.textContent = state.paused && state.mode === 'real' && state.queue.length ? '继续探索' : '探索真实115宇宙';
+    const neighborhood = state.orbitActive ?
+      orbitNeighborhood(state.nodes, node.id, state.orbitPage) : null;
+    ui.orbitList.textContent = '';
+    ui.orbitTitle.textContent = neighborhood ? '✦ 周围' + neighborhood.kind : '✦ 星球邻域';
+    ui.orbitStatus.textContent = !neighborhood ? '单击星球后，将展开它附近的星球。' :
+      (neighborhood.total ? '共 ' + neighborhood.total + ' 颗 · 第 ' +
+        (neighborhood.page + 1) + '/' + neighborhood.pages + ' 组' : '暂无已发现的邻近星球');
+    ui.orbitPrev.disabled = !neighborhood || neighborhood.page <= 0;
+    ui.orbitNext.disabled = !neighborhood || neighborhood.page >= neighborhood.pages - 1;
+    if (neighborhood) {
+      for (const id of neighborhood.members) {
+        const neighbor = state.nodes.get(id);
+        if (!neighbor) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '✦ ' + neighbor.name;
+        button.title = neighbor.name + ' · 点击成为中心星球';
+        button.addEventListener('click', () => selectPlanet(neighbor.id, true));
+        ui.orbitList.appendChild(button);
+      }
+    }
     ui.list.textContent = '';
     const sample = node.sample.slice(0, 9);
     if (!sample.length) {
@@ -593,9 +774,9 @@
         const label = document.createElement('span');
         label.className = 'video-label';
         label.textContent = record.name;
-        card.title = record.name + ' · 点击打开所属目录';
+        card.title = record.name + ' · 点击查看视频信息和播放入口';
         card.append(icon, label);
-        card.addEventListener('click', () => open115Folder(node.id));
+        card.addEventListener('click', () => showVideoPreview(record));
         ui.list.appendChild(card);
       }
     }
@@ -785,14 +966,24 @@
     if (w <= 1 || h <= 1) { requestAnimationFrame(drawFrame); return; }
     tickCamera(timestamp);
     overlay.clearRect(0, 0, w, h);
-    const entries = Array.from(state.nodes.values()).map(node =>
-      ({ node, screen: projectedPlanet(node, state.camera, w, h) }));
+    const neighborhood = state.orbitActive ?
+      orbitNeighborhood(state.nodes, state.selected, state.orbitPage) : null;
+    const included = neighborhood && new Set([state.selected, ...neighborhood.members]);
+    const entries = Array.from(state.nodes.values())
+      .filter(node => !included || included.has(node.id))
+      .map(node => {
+        const position = currentOrbitPosition(node, neighborhood, timestamp);
+        const visual = { ...node, ...position };
+        return { node, screen: projectedPlanet(visual, state.camera, w, h) };
+      });
     state.projected = entries;
     const lookup = new Map(entries.map(entry => [entry.node.id, entry.screen]));
     const links = [];
     for (const { node, screen } of entries) {
-      if (!screen.visible || !node.parentId) continue;
-      const parent = lookup.get(node.parentId);
+      if (!screen.visible) continue;
+      const linkedParentId = neighborhood && node.id !== state.selected ? state.selected : node.parentId;
+      if (!linkedParentId) continue;
+      const parent = lookup.get(linkedParentId);
       if (parent && parent.visible) links.push({ start: parent, end: screen });
     }
     if (renderer) renderer.draw(entries, links, w, h, dpr);
@@ -844,7 +1035,7 @@
           0, Math.PI * 2); overlay.stroke();
         overlay.setLineDash([]);
       }
-      if (node.depth > 1 && !selected && !hovered && state.camera.distance > 980) continue;
+      if (!neighborhood && node.depth > 1 && !selected && !hovered && state.camera.distance > 980) continue;
       const label = node.name.length > 15 ? node.name.slice(0, 14) + '…' : node.name;
       overlay.textAlign = 'center';
       overlay.font = (selected ? '700 ' : '500 ') + '12px "Microsoft YaHei",sans-serif';
@@ -903,11 +1094,7 @@
     if (!dragged && event.button === 0) {
       const planet = hitPlanet(event.clientX, event.clientY);
       if (planet) selectPlanet(planet.id, true);
-      else {
-        state.selected = state.rootId;
-        flyToPlanet(state.nodes.get(state.rootId), 900, true);
-        refreshPanel();
-      }
+      else resetOverview();
     }
   });
   ui.canvas.addEventListener('pointercancel', () => {
@@ -917,7 +1104,7 @@
     event.preventDefault();
     const planet = hitPlanet(event.clientX, event.clientY);
     if (planet) selectPlanet(planet.id, true);
-    else flyToPlanet(state.nodes.get(state.rootId), 900, true);
+    else resetOverview();
   });
   ui.canvas.addEventListener('wheel', event => {
     event.preventDefault();
@@ -938,6 +1125,13 @@
   ui.demo.addEventListener('click', populateDemo);
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
+  ui.orbitPrev.addEventListener('click', () => changeOrbitPage(-1));
+  ui.orbitNext.addEventListener('click', () => changeOrbitPage(1));
+  ui.previewPlay.addEventListener('click', open115Video);
+  $('#preview-folder').addEventListener('click', () => open115Folder(state.selected));
+  $('#preview-close').addEventListener('click', () => {
+    state.previewRecord = null; ui.preview.hidden = true;
+  });
   $('#focus-planet').addEventListener('click', () => selectPlanet(state.selected, true));
   $('#spin').addEventListener('click', () => {
     state.camera.autoSpin = !state.camera.autoSpin;
@@ -953,11 +1147,7 @@
     stopAutoSpin(); state.camera.glide = null;
     state.camera.distance = clamp(state.camera.distance * 1.25, 300, 3500);
   });
-  $('#reset-camera').addEventListener('click', () => {
-    state.selected = state.rootId;
-    flyToPlanet(state.nodes.get(state.rootId), 1050, true);
-    refreshPanel();
-  });
+  $('#reset-camera').addEventListener('click', resetOverview);
   window.addEventListener('keydown', event => { if (event.key === 'Escape' && !ui.shell.hidden) toggle(false); });
   const currentCid = new URLSearchParams(window.location.search).get('cid');
   if (currentCid && /^\d{1,30}$/.test(currentCid)) ui.cid.value = currentCid;

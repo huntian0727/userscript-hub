@@ -16,9 +16,9 @@ function coreOf(script = source) {
   assert.ok(a >= 0 && b > a, 'pure video-universe model function boundary');
   return new Function(
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
-    "const MAX_SAMPLE_PER_PLANET = 16;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
+    "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.1');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.2');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-021-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-022-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /演示数据，不代表真实115文件/);
@@ -105,11 +105,11 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /const MAX_VISIBLE_PLANETS = 170;/);
   assert.match(source, /已达到试点扫描上限/);
   assert.match(source, /数量不代表网盘全盘/);
-  assert.match(source, /当前试点不内嵌视频解码/);
+  assert.match(source, /不在宇宙中解码视频/);
 });
 
-test('v0.2.1 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.1.user.js');
+test('v0.2.2 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.2.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -156,7 +156,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-021-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-022-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -171,4 +171,44 @@ test('v0.2.0 is retained and single-click must focus rather than only select', (
   assert.match(source, /if \(planet\) selectPlanet\(planet\.id, true\);/);
   assert.doesNotMatch(source, /if \(planet\) selectPlanet\(planet\.id, false\);/);
   assert.match(source, /单击星球即成为画面与旋转中心/);
+});
+
+test('focused planets expand to a deterministic paginated neighborhood and leaf shows siblings', () => {
+  const nodes = new Map();
+  const root = { id: '0', childIds: [], parentId: null, x: 0, y: 0, z: 0 };
+  nodes.set('0', root);
+  for (let i = 1; i <= 25; i++) {
+    const id = String(i);
+    root.childIds.push(id);
+    nodes.set(id, { id, parentId: '0', childIds: [], x: i, y: i, z: i });
+  }
+  const page0 = core.orbitNeighborhood(nodes, '0', 0);
+  const page2 = core.orbitNeighborhood(nodes, '0', 2);
+  assert.equal(page0.members.length, 12);
+  assert.deepEqual(page2.members, ['25']);
+  assert.equal(page2.pages, 3);
+  assert.equal(core.orbitNeighborhood(nodes, '0', 99).page, 2);
+  const ring = core.orbitTarget(nodes.get('1'), root, page0);
+  assert.notDeepEqual(ring, { x: 1, y: 1, z: 1 });
+  assert.deepEqual(ring, core.orbitTarget(nodes.get('1'), root, page0));
+  const sibling = core.orbitNeighborhood(nodes, '1', 0);
+  assert.equal(sibling.kind, '同级星球');
+  assert.equal(sibling.total, 24);
+  assert.ok(!sibling.members.includes('1'));
+  assert.equal(core.orbitNeighborhood(nodes, 'missing', 0).total, 0);
+});
+
+test('native playback URL accepts only valid pickcodes and uses the 115 domain', () => {
+  const url = new URL(core.videoPlaybackUrl({ pickcode: 'Abc12345' }));
+  assert.equal(url.origin, 'https://115.com');
+  assert.equal(url.searchParams.get('ct'), 'play');
+  assert.equal(url.searchParams.get('ac'), 'location');
+  assert.equal(url.searchParams.get('pickcode'), 'Abc12345');
+  for (const bad of ['','../bad','abc?x=1','http://other.site','中文']) {
+    assert.equal(core.videoPlaybackUrl({ pickcode: bad }), null);
+  }
+  assert.equal(core.humanFileSize(1024 * 1024), '1.0 MB');
+  assert.equal(core.humanFileSize(0), '大小未知');
+  assert.match(source, /ui\.previewPlay\.addEventListener\('click', open115Video\)/);
+  assert.match(source, /changeOrbitPage\(-1\)/);
 });
