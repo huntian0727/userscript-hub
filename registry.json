@@ -36,9 +36,9 @@
     {
       "id": "115-multiview-full-disk",
       "displayName": "115 多画面播放器 · 随机探索",
-      "description": "快速探索显示收录总数和当前筛选可抽取数。可按文件名、收录目录查看视频，分页浏览抽取状态。多画面播放可直接打开当前目录，全盘探索支持边扫描边播放。",
+      "description": "全盘探索从 115 视频列表随机直抽，首格就绪就播，后台补充换片候选。快速探索可查看收录视频，多画面播放可直接打开当前目录。",
       "source": "userscripts/115-multiview-full-disk.user.js",
-      "channel": "公开测试版 · v1.8.2",
+      "channel": "公开测试版 · v1.8.3",
       "enabled": true
     },
     {

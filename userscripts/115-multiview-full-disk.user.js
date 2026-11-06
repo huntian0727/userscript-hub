@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.2
+// @version      1.8.3
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -681,6 +681,43 @@
       return { payload, totalCount, effectivePageSize, pathSegments };
     }
 
+    async function readGlobalVideo(offset, { signal }) {
+      const url = new URL('/files', API_ORIGIN);
+      url.search = new URLSearchParams({
+        aid: '1', cid: '0', cur: '0', type: '4', show_dir: '0', count_folders: '0',
+        record_open_time: '0', o: 'user_ptime', asc: '0', custom_order: '2',
+        limit: '1', offset: String(offset)
+      });
+      const payload = parseApiResponse(await request(url.href, { signal }));
+      throwIfAborted(signal);
+      const count = integerValue(payload.count, 'count');
+      if (count === null || integerValue(payload.offset, 'offset') !== offset) {
+        throw new N115DataError('115 未能确认视频总数或随机位置，请重试');
+      }
+      if (payload.data.length !== Number(offset < count)) {
+        throw new N115DataError('115 随机位置返回的记录数不一致，请重试');
+      }
+      const row = payload.data[0];
+      const segments = normalizePathSegments(payload.path);
+      const item = row?.fid != null
+        ? normalizeRecord(row, '0', segments.at(-1)?.id === String(row.cid) ? segments : [])
+        : null;
+      return { count, item: item?.isVideo ? item : null };
+    }
+
+    async function readVideoFolder(parentId, { signal }) {
+      const url = new URL('/files', API_ORIGIN);
+      url.search = new URLSearchParams({
+        aid: '1', cid: normalizeId(parentId), cur: '1', show_dir: '1',
+        count_folders: '0', record_open_time: '0', limit: '1', offset: '0'
+      });
+      const payload = parseApiResponse(await request(url.href, { signal }));
+      throwIfAborted(signal);
+      const segments = normalizePathSegments(payload.path);
+      if (segments.at(-1)?.id !== parentId) throw new N115DataError('115 未返回该视频所在文件夹的路径');
+      return segments;
+    }
+
     async function listDirectory(cid, config = {}) {
       const folderId = normalizeId(cid, 'cid');
       const signal = config.signal;
@@ -1241,6 +1278,8 @@
       buildListUrl,
       listDirectory,
       streamDirectory,
+      readGlobalVideo,
+      readVideoFolder,
       scanTree,      defaultPageSize: DEFAULT_PAGE_SIZE
     });
   }
@@ -2815,7 +2854,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.8.2';
+  const VERSION = '1.8.3';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -3361,1252 +3400,11 @@
 
 })();
 
-/* N115_FULL_DISK_EXPLORER_BUNDLE_START */
-
-(function attachN115FullDiskExplorerCore() {
-
-  'use strict';
-
-  const module = { exports: {} };
-
-const STATE_VERSION = 1;
-
-function fail(message, code) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function safeInteger(value, field, minimum = 0) {
-  const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < minimum) {
-    throw new TypeError(field + ' must be a safe integer >= ' + minimum);
-  }
-  return number;
-}
-
-function normalizeId(value, field = 'directory ID') {
-  const id = String(value == null ? '' : value).trim();
-  if (!/^\d+$/.test(id)) throw new TypeError(field + ' must be a numeric string');
-  return id;
-}
-
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-/**
- * Online reservoir sampling.
- * Every accepted item has exactly min(K, N) / N inclusion probability after N unique inputs.
- * The caller is responsible for ensuring that each logical file is submitted exactly once.
- */
-function createReservoirSampler(limit = 100, random = Math.random, snapshot = null) {
-  const sampleLimit = safeInteger(limit, 'limit', 1);
-  if (sampleLimit > 1000) throw new RangeError('limit must be <= 1000');
-  if (typeof random !== 'function') throw new TypeError('random must be a function');
-
-  let seen = 0;
-  let items = [];
-  if (snapshot !== null) {
-    if (!snapshot || snapshot.version !== STATE_VERSION) throw new TypeError('unsupported reservoir snapshot version');
-    if (snapshot.limit !== sampleLimit) throw new TypeError('reservoir snapshot limit mismatch');
-    seen = safeInteger(snapshot.seen, 'snapshot.seen');
-    if (!Array.isArray(snapshot.items) || snapshot.items.length !== Math.min(seen, sampleLimit)) {
-      throw new TypeError('reservoir snapshot item count is inconsistent');
-    }
-    items = clone(snapshot.items);
-  }
-
-  function nextRandom() {
-    const value = Number(random());
-    if (!Number.isFinite(value) || value < 0 || value >= 1) {
-      throw new RangeError('random() must return a finite value in [0, 1)');
-    }
-    return value;
-  }
-
-  function add(item) {
-    if (item === undefined || item === null) return false;
-    seen += 1;
-    if (!Number.isSafeInteger(seen)) throw new RangeError('reservoir input count exceeded safe integer range');
-    if (items.length < sampleLimit) {
-      items.push(item);
-      return true;
-    }
-    const slot = Math.floor(nextRandom() * seen);
-    if (slot < sampleLimit) {
-      items[slot] = item;
-      return true;
-    }
-    return false;
-  }
-
-  function toJSON() {
-    return { version: STATE_VERSION, limit: sampleLimit, seen, items: clone(items) };
-  }
-
-  return Object.freeze({
-    add,
-    get seen() { return seen; },
-    get size() { return items.length; },
-    get items() { return clone(items); },
-    toJSON
-  });
-}
-
-function createScanState(options = {}) {
-  const accountId = String(options.accountId || '').trim();
-  if (!accountId) throw new TypeError('accountId is required');
-  const rootCid = normalizeId(options.rootCid === undefined ? '0' : options.rootCid, 'rootCid');
-  const recursive = options.recursive !== false;
-  const maxDepth = safeInteger(options.maxDepth === undefined ? 20 : options.maxDepth, 'maxDepth');
-  const maxDirectories = safeInteger(options.maxDirectories === undefined ? 20000 : options.maxDirectories, 'maxDirectories', 1);
-  const sampleLimit = safeInteger(options.sampleLimit === undefined ? 100 : options.sampleLimit, 'sampleLimit', 1);
-  if (sampleLimit > 1000) throw new RangeError('sampleLimit must be <= 1000');
-
-  return {
-    version: STATE_VERSION,
-    accountId,
-    rootCid,
-    recursive,
-    limits: { maxDepth, maxDirectories, sampleLimit },
-    filters: options.filters && typeof options.filters === 'object' ? clone(options.filters) : null,
-    preferenceSnapshot: options.preferenceSnapshot && typeof options.preferenceSnapshot === 'object'
-      ? clone(options.preferenceSnapshot) : null,
-    status: 'running',
-    pauseReason: null,
-    queue: [{ cid: rootCid, depth: 0, pathSegments: [] }],
-    queueHead: 0,
-    discoveredDirectoryIds: { [rootCid]: true },
-    directoriesDiscovered: 1,
-    currentDirectory: null,
-    directoriesVisited: 0,
-    directoriesCompleted: 0,
-    depthLimitedDirectories: 0,
-    pagesFetched: 0,
-    recordsScanned: 0,
-    matchedVideos: 0,
-    unknownRecords: 0,
-    duplicateRecords: 0,
-    integrityOk: true,
-    truncated: false,
-    reservoir: { version: STATE_VERSION, limit: sampleLimit, seen: 0, items: [] }
-  };
-}
-/**
- * Starts the next queued directory in place. A queue cursor avoids Array.shift()
- * copying the remaining directory backlog on every directory transition.
- */
-function beginNextDirectory(checkpoint) {
-  if (!checkpoint || checkpoint.version !== STATE_VERSION) throw new TypeError('unsupported scan checkpoint');
-  if (checkpoint.status !== 'running') throw new Error('scan is not running');
-  if (checkpoint.currentDirectory) return checkpoint;
-  const queueHead = safeInteger(checkpoint.queueHead || 0, 'queueHead');
-  if (queueHead >= checkpoint.queue.length) {
-    checkpoint.status = checkpoint.truncated || !checkpoint.integrityOk ? 'incomplete' : 'complete';
-    return checkpoint;
-  }
-  const directory = checkpoint.queue[queueHead];
-  checkpoint.queueHead = queueHead + 1;
-  if (checkpoint.queueHead >= 256 && checkpoint.queueHead * 2 >= checkpoint.queue.length) {
-    checkpoint.queue = checkpoint.queue.slice(checkpoint.queueHead);
-    checkpoint.queueHead = 0;
-  }
-  checkpoint.currentDirectory = {
-    cid: normalizeId(directory.cid),
-    depth: safeInteger(directory.depth, 'directory.depth'),
-    pathSegments: Array.isArray(directory.pathSegments) ? directory.pathSegments : [],
-    offset: 0,
-    totalCount: null,
-    pagesFetched: 0,
-    recentKeys: [],
-    recordsStored: 0,
-    filesFound: 0,
-    foldersFound: 0,
-    videosFound: 0,
-    unknownCount: 0,
-    duplicateCount: 0
-  };
-  checkpoint.directoriesVisited += 1;
-  return checkpoint;
-}
-/**
- * Validates and applies one page in place. The persistent store must write the resulting
- * task state, page offset and newly queued folders in one IndexedDB transaction. If that
- * transaction fails, discard this in-memory draft and reload the last committed checkpoint.
- */
-function commitDirectoryPage(checkpoint, page, options = {}) {
-  if (!checkpoint || checkpoint.version !== STATE_VERSION) throw new TypeError('unsupported scan checkpoint');
-  if (checkpoint.status !== 'running' || !checkpoint.currentDirectory) {
-    throw new Error('no active directory is waiting for a page');
-  }
-  const current = checkpoint.currentDirectory;
-  const cid = normalizeId(page && page.cid, 'page.cid');
-  if (cid !== current.cid) throw fail('page directory does not match the active directory', 'N115_PAGE_DIRECTORY_MISMATCH');
-
-  const offset = safeInteger(page.offset, 'page.offset');
-  if (offset !== current.offset) {
-    throw fail('page offset is stale or already committed', 'N115_PAGE_OFFSET_MISMATCH');
-  }
-  const totalCount = safeInteger(page.totalCount, 'page.totalCount');
-  if (current.totalCount !== null && totalCount !== current.totalCount) {
-    throw fail('directory contents changed during scan; restart the full scan to preserve sampling fairness', 'N115_DIRECTORY_CHANGED');
-  }
-
-  const rawCount = safeInteger(page.rawCount, 'page.rawCount');
-  const unknownCount = safeInteger(page.unknownCount === undefined ? 0 : page.unknownCount, 'page.unknownCount');
-  const duplicateCount = safeInteger(page.duplicateCount === undefined ? 0 : page.duplicateCount, 'page.duplicateCount');
-  const nextOffset = page.nextOffset === undefined ? offset + rawCount : safeInteger(page.nextOffset, 'page.nextOffset');
-  if (nextOffset !== offset + rawCount || nextOffset > totalCount) {
-    throw fail('page offset progression is invalid', 'N115_PAGE_RANGE_INVALID');
-  }
-  if (!Array.isArray(page.records)) throw new TypeError('page.records must be an array');
-  const recentKeys = page.recentKeys === undefined ? (current.recentKeys || []) : page.recentKeys;
-  if (!Array.isArray(recentKeys) || recentKeys.length > 4096 ||
-      recentKeys.some(key => typeof key !== 'string' || key.length > 80)) {
-    throw new TypeError('page.recentKeys must be a bounded array of record keys');
-  }
-  if (page.records.length + unknownCount + duplicateCount !== rawCount) {
-    throw fail('page record accounting is incomplete; refusing to claim a globally fair sample', 'N115_PAGE_RECORD_COUNT_MISMATCH');
-  }
-  if (rawCount === 0 && offset < totalCount) {
-    throw fail('directory returned an empty page before its reported total', 'N115_EMPTY_PAGE');
-  }
-  const sampler = createReservoirSampler(
-    checkpoint.limits.sampleLimit,
-    options.random || Math.random,
-    checkpoint.reservoir
-  );
-  const matchesVideo = typeof options.matchesVideo === 'function' ? options.matchesVideo : () => true;
-  const pageFolderIds = new Set();
-  const newFolders = [];
-  let matchedVideos = 0;
-  let pageFilesFound = 0;
-  let pageFoldersFound = 0;
-  let pageVideosFound = 0;
-  let depthLimitedDirectories = 0;
-  let duplicateRecords = duplicateCount;
-  let internalDuplicateCount = 0;
-  let truncated = false;
-
-  // Build the page delta first. A bad record, filter or random source cannot partially
-  // mutate the checkpoint before the page has passed validation.
-  for (const record of page.records) {
-    if (!record || typeof record !== 'object') throw new TypeError('page.records must contain normalized records only');
-    if (record.type === 'folder') {
-      const childCid = normalizeId(record.id, 'folder.id');
-      if (Object.prototype.hasOwnProperty.call(checkpoint.discoveredDirectoryIds, childCid) || pageFolderIds.has(childCid)) {
-        duplicateRecords += 1;
-        internalDuplicateCount += 1;
-        continue;
-      }
-      pageFolderIds.add(childCid);
-      pageFoldersFound += 1;
-      if (!checkpoint.recursive) continue;
-      const childDepth = current.depth + 1;
-      if (childDepth > checkpoint.limits.maxDepth) {
-        depthLimitedDirectories += 1;
-        truncated = true;
-        continue;
-      }
-      if (checkpoint.directoriesDiscovered + newFolders.length >= checkpoint.limits.maxDirectories) {
-        truncated = true;
-        continue;
-      }
-      newFolders.push({
-        cid: childCid,
-        depth: childDepth,
-        pathSegments: Array.isArray(record.pathSegments) ? record.pathSegments : []
-      });
-      continue;
-    }
-
-    pageFilesFound += 1;
-    if (record.isVideo === true || record.type === 'video') {
-      pageVideosFound += 1;
-      if (matchesVideo(record)) {
-        matchedVideos += 1;
-        sampler.add(record);
-      }
-    }
-  }
-  for (const folder of newFolders) {
-    checkpoint.discoveredDirectoryIds[folder.cid] = true;
-    checkpoint.directoriesDiscovered += 1;
-    checkpoint.queue.push(folder);
-  }
-  checkpoint.depthLimitedDirectories += depthLimitedDirectories;
-  checkpoint.duplicateRecords += duplicateRecords;
-  checkpoint.unknownRecords += unknownCount;
-  if (duplicateRecords > 0 || unknownCount > 0) checkpoint.integrityOk = false;
-  checkpoint.truncated = checkpoint.truncated || truncated;
-  checkpoint.matchedVideos += matchedVideos;
-  checkpoint.reservoir = sampler.toJSON();
-  checkpoint.pagesFetched += 1;
-  checkpoint.recordsScanned += rawCount;
-  if (Array.isArray(page.pathSegments)) current.pathSegments = page.pathSegments.slice();
-  current.offset = nextOffset;
-  current.totalCount = totalCount;
-  current.pagesFetched += 1;
-  current.recentKeys = recentKeys.slice();
-  current.recordsStored = page.recordsStored === undefined
-    ? current.recordsStored + page.records.length - internalDuplicateCount
-    : safeInteger(page.recordsStored, 'page.recordsStored');
-  current.filesFound = page.filesFound === undefined
-    ? current.filesFound + pageFilesFound : safeInteger(page.filesFound, 'page.filesFound');
-  current.foldersFound = page.foldersFound === undefined
-    ? current.foldersFound + pageFoldersFound : safeInteger(page.foldersFound, 'page.foldersFound');
-  current.videosFound = page.videosFound === undefined
-    ? current.videosFound + pageVideosFound : safeInteger(page.videosFound, 'page.videosFound');
-  current.unknownCount += unknownCount;
-  current.duplicateCount += duplicateCount + internalDuplicateCount;
-  if (nextOffset === totalCount) {
-    checkpoint.currentDirectory = null;
-    checkpoint.directoriesCompleted += 1;
-  }
-  return checkpoint;
-}
-function pauseScan(checkpoint, reason = 'paused') {
-  if (!checkpoint || checkpoint.version !== STATE_VERSION) throw new TypeError('unsupported scan checkpoint');
-  if (checkpoint.status !== 'running') throw new Error('only a running scan can be paused');
-  const next = clone(checkpoint);
-  next.status = 'paused';
-  next.pauseReason = String(reason).slice(0, 240);
-  return next;
-}
-
-function resumeScan(checkpoint, accountId) {
-  if (!checkpoint || checkpoint.version !== STATE_VERSION) throw new TypeError('unsupported scan checkpoint');
-  if (String(accountId || '').trim() !== checkpoint.accountId) {
-    throw fail('115 account changed; refusing to mix scan data across accounts', 'N115_ACCOUNT_CHANGED');
-  }
-  if (checkpoint.status !== 'paused') throw new Error('only a paused scan can be resumed');
-  const next = clone(checkpoint);
-  next.status = 'running';
-  next.pauseReason = null;
-  return next;
-}
-
-module.exports = Object.freeze({
-  STATE_VERSION,
-  beginNextDirectory,
-  commitDirectoryPage,
-  createReservoirSampler,
-  createScanState,
-  pauseScan,
-  resumeScan
-});
-
-  globalThis.N115FullDiskExplorerCore = module.exports;
-
-})();
-
-(function attachN115FullDiskExplorerStore() {
-
-  'use strict';
-
-  const module = { exports: {} };
-
-const DB_NAME = '115-multiview-explorer';
-const DB_VERSION = 1;
-const STATE_VERSION = 1;
-
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-function fail(message, code) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
-function createExplorerIndexedDbStore(options = {}) {
-  const indexedDBRef = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
-  const keyRangeRef = options.IDBKeyRange || (typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : null);
-  const dbName = String(options.dbName || DB_NAME);
-  let databasePromise = null;
-
-  function requestPromise(request) {
-    return new Promise((resolve, reject) => {
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error || new Error('Explorer IndexedDB request failed'));
-    });
-  }
-
-  function transactionPromise(transaction) {
-    return new Promise((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(transaction.error || new Error('Explorer IndexedDB transaction aborted'));
-      transaction.onerror = () => reject(transaction.error || new Error('Explorer IndexedDB transaction failed'));
-    });
-  }
-
-  function openDatabase() {
-    if (!indexedDBRef) return Promise.reject(new Error('IndexedDB is unavailable; full-disk scan cannot be resumed safely'));
-    if (databasePromise) return databasePromise;
-    databasePromise = new Promise((resolve, reject) => {
-      let request;
-      try {
-        request = indexedDBRef.open(dbName, DB_VERSION);
-      } catch (error) {
-        databasePromise = null;
-        reject(error);
-        return;
-      }
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        let tasks;
-        if (db.objectStoreNames.contains('tasks')) {
-          tasks = request.transaction.objectStore('tasks');
-        } else {
-          tasks = db.createObjectStore('tasks', { keyPath: 'taskId' });
-        }
-        let directories;
-        if (db.objectStoreNames.contains('directories')) {
-          directories = request.transaction.objectStore('directories');
-        } else {
-          directories = db.createObjectStore('directories', { keyPath: ['taskId', 'cid'] });
-        }
-        if (!directories.indexNames.contains('byTask')) {
-          directories.createIndex('byTask', 'taskId', { unique: false });
-        }
-      };
-      request.onsuccess = () => {
-        const db = request.result;
-        db.onversionchange = () => db.close();
-        resolve(db);
-      };
-      request.onerror = () => {
-        databasePromise = null;
-        reject(request.error || new Error('Unable to open explorer database'));
-      };
-      request.onblocked = () => {
-        databasePromise = null;
-        reject(new Error('Explorer database upgrade is blocked by another open page'));
-      };
-    });
-    return databasePromise;
-  }
-
-  function only(value) {
-    if (!keyRangeRef) throw new Error('IDBKeyRange is unavailable');
-    return keyRangeRef.only(value);
-  }
-
-  function taskFromCheckpoint(taskId, checkpoint) {
-    if (!checkpoint || checkpoint.version !== STATE_VERSION || checkpoint.currentDirectory) {
-      throw new TypeError('createTask requires a fresh scan checkpoint');
-    }
-    const queueHead = Number(checkpoint.queueHead || 0);
-    const root = checkpoint.queue[queueHead];
-    if (!root || String(root.cid) !== String(checkpoint.rootCid)) {
-      throw new TypeError('fresh checkpoint must contain the root directory at the queue head');
-    }
-    return {
-      taskId,
-      accountId: checkpoint.accountId,
-      rootCid: checkpoint.rootCid,
-      recursive: checkpoint.recursive,
-      limits: clone(checkpoint.limits),
-      filters: clone(checkpoint.filters || null),
-      preferenceSnapshot: clone(checkpoint.preferenceSnapshot || null),
-      status: 'running',
-      pauseReason: null,
-      activeDirectoryCid: null,
-      nextSequence: 1,
-      directoriesDiscovered: 1,
-      directoriesVisited: 0,
-      directoriesCompleted: 0,
-      depthLimitedDirectories: 0,
-      pagesFetched: 0,
-      recordsScanned: 0,
-      matchedVideos: 0,
-      unknownRecords: 0,
-      duplicateRecords: 0,
-      integrityOk: true,
-      truncated: false,
-      reservoir: clone(checkpoint.reservoir),
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-  }
-
-  function copyProgress(task, checkpoint) {
-    const fields = [
-      'directoriesDiscovered', 'directoriesVisited', 'directoriesCompleted',
-      'depthLimitedDirectories', 'pagesFetched', 'recordsScanned', 'matchedVideos',
-      'unknownRecords', 'duplicateRecords', 'integrityOk', 'truncated'
-    ];
-    for (const field of fields) task[field] = checkpoint[field];
-    task.reservoir = clone(checkpoint.reservoir);
-    task.updatedAt = Date.now();
-    return task;
-  }
-
-  async function createTask(taskIdValue, checkpoint) {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId) throw new TypeError('taskId is required');
-    if (!checkpoint || !String(checkpoint.accountId || '').trim()) throw new TypeError('account-bound checkpoint is required');
-    const root = checkpoint.queue[Number(checkpoint.queueHead || 0)];
-    const task = taskFromCheckpoint(taskId, checkpoint);
-    const rootDirectory = {
-      taskId,
-      cid: String(root.cid),
-      depth: Number(root.depth || 0),
-      pathSegments: clone(Array.isArray(root.pathSegments) ? root.pathSegments : []),
-      status: 'queued',
-      sequence: 0,
-      offset: 0,
-      totalCount: null,
-      pagesFetched: 0,
-      recentKeys: [],
-      recordsStored: 0,
-      filesFound: 0,
-      foldersFound: 0,
-      videosFound: 0,
-      unknownCount: 0,
-      duplicateCount: 0
-    };
-    const db = await openDatabase();
-    const tx = db.transaction(['tasks', 'directories'], 'readwrite');
-    const done = transactionPromise(tx);
-    tx.objectStore('tasks').add(task);
-    tx.objectStore('directories').add(rootDirectory);
-    await done;
-    return taskId;
-  }
-
-  async function getTask(taskIdValue) {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId) throw new TypeError('taskId is required');
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readonly');
-    const done = transactionPromise(tx);
-    const task = await requestPromise(tx.objectStore('tasks').get(taskId));
-    await done;
-    return task ? clone(task) : null;
-  }
-
-  async function listTasks(accountIdValue) {
-    const accountId = String(accountIdValue || '').trim();
-    if (!accountId) throw new TypeError('accountId is required');
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readonly');
-    const done = transactionPromise(tx);
-    const tasks = await requestPromise(tx.objectStore('tasks').getAll());
-    await done;
-    return tasks.filter(task => String(task.accountId) === accountId)
-      .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
-      .map(clone);
-  }
-
-  async function loadTask(taskIdValue) {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId) throw new TypeError('taskId is required');
-    const db = await openDatabase();
-    const tx = db.transaction(['tasks', 'directories'], 'readonly');
-    const done = transactionPromise(tx);
-    const taskRequest = tx.objectStore('tasks').get(taskId);
-    const directoryRequest = tx.objectStore('directories').index('byTask').getAll(only(taskId));
-    const [task, directories] = await Promise.all([
-      requestPromise(taskRequest),
-      requestPromise(directoryRequest)
-    ]);
-    await done;
-    if (!task) return null;
-
-    directories.sort((left, right) => Number(left.sequence) - Number(right.sequence));
-    const discoveredDirectoryIds = {};
-    const queue = [];
-    let active = null;
-    let scanningCount = 0;
-    for (const directory of directories) {
-      discoveredDirectoryIds[String(directory.cid)] = true;
-      if (directory.status === 'queued') {
-        queue.push({
-          cid: String(directory.cid),
-          depth: Number(directory.depth || 0),
-          pathSegments: Array.isArray(directory.pathSegments) ? directory.pathSegments : []
-        });
-      } else if (directory.status === 'scanning') {
-        scanningCount += 1;
-        if (String(directory.cid) === String(task.activeDirectoryCid)) {
-          active = {
-            cid: String(directory.cid),
-            depth: Number(directory.depth || 0),
-            pathSegments: Array.isArray(directory.pathSegments) ? directory.pathSegments : [],
-            offset: Number(directory.offset || 0),
-            totalCount: directory.totalCount == null ? null : Number(directory.totalCount),
-            pagesFetched: Number(directory.pagesFetched || 0),
-            recentKeys: Array.isArray(directory.recentKeys) ? directory.recentKeys : [],
-            recordsStored: Number(directory.recordsStored || 0),
-            filesFound: Number(directory.filesFound || 0),
-            foldersFound: Number(directory.foldersFound || 0),
-            videosFound: Number(directory.videosFound || 0),
-            unknownCount: Number(directory.unknownCount || 0),
-            duplicateCount: Number(directory.duplicateCount || 0)
-          };
-      }
-    }
-    }
-    if ((task.activeDirectoryCid && (!active || scanningCount !== 1)) ||
-        (!task.activeDirectoryCid && scanningCount > 0)) {
-      throw new Error('Explorer active-directory checkpoint is inconsistent; refusing to resume');
-    }
-    return {
-      taskId,
-      version: STATE_VERSION,
-      accountId: String(task.accountId),
-      rootCid: String(task.rootCid),
-      recursive: task.recursive === true,
-      limits: clone(task.limits),
-      filters: clone(task.filters || null),
-      preferenceSnapshot: clone(task.preferenceSnapshot || null),
-      status: task.status,
-      pauseReason: task.pauseReason || null,
-      queue,
-      queueHead: 0,
-      discoveredDirectoryIds,
-      directoriesDiscovered: Number(task.directoriesDiscovered || directories.length),
-      currentDirectory: active,
-      directoriesVisited: Number(task.directoriesVisited || 0),
-      directoriesCompleted: Number(task.directoriesCompleted || 0),
-      depthLimitedDirectories: Number(task.depthLimitedDirectories || 0),
-      pagesFetched: Number(task.pagesFetched || 0),
-      recordsScanned: Number(task.recordsScanned || 0),
-      matchedVideos: Number(task.matchedVideos || 0),
-      unknownRecords: Number(task.unknownRecords || 0),
-      duplicateRecords: Number(task.duplicateRecords || 0),
-      integrityOk: task.integrityOk !== false,
-      truncated: task.truncated === true,
-      reservoir: clone(task.reservoir)
-    };
-  }
-
-  async function markDirectoryStarted(taskIdValue, checkpoint) {
-    const taskId = String(taskIdValue || '').trim();
-    const current = checkpoint && checkpoint.currentDirectory;
-    if (!taskId || !current) throw new TypeError('an active directory checkpoint is required');
-    const cid = String(current.cid);
-    const db = await openDatabase();
-    const tx = db.transaction(['tasks', 'directories'], 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const directories = tx.objectStore('directories');
-
-    const operation = new Promise((resolve, reject) => {
-      let task;
-      let directory;
-      let ready = 0;
-      let committed = false;
-      const maybeCommit = () => {
-        if (ready !== 2 || committed) return;
-        committed = true;
-        try {
-          if (!task || !directory) throw fail('scan task or queued directory is missing', 'N115_TASK_NOT_FOUND');
-          if (task.status !== 'running' || task.activeDirectoryCid) {
-            throw fail('another directory is already active for this scan task', 'N115_DIRECTORY_ALREADY_ACTIVE');
-          }
-          if (directory.status !== 'queued') {
-            throw fail('directory is no longer queued', 'N115_DIRECTORY_NOT_QUEUED');
-          }
-          task.activeDirectoryCid = cid;
-          task.directoriesVisited = checkpoint.directoriesVisited;
-          task.updatedAt = Date.now();
-          directory.status = 'scanning';
-          tasks.put(task);
-          directories.put(directory);
-          resolve(true);
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      const taskRequest = tasks.get(taskId);
-      const directoryRequest = directories.get([taskId, cid]);
-      taskRequest.onsuccess = () => { task = taskRequest.result; ready += 1; maybeCommit(); };
-      directoryRequest.onsuccess = () => { directory = directoryRequest.result; ready += 1; maybeCommit(); };
-      taskRequest.onerror = () => reject(taskRequest.error || new Error('Unable to read scan task'));
-      directoryRequest.onerror = () => reject(directoryRequest.error || new Error('Unable to read queued directory'));
-    });
-
-    try {
-      await Promise.all([operation, done]);
-      return true;
-    } catch (error) {
-      try { tx.abort(); } catch { /* transaction may already be ending */ }
-      throw error;
-    }
-  }
-
-  async function commitPage(taskIdValue, page, checkpoint, newFolders = []) {
-    const taskId = String(taskIdValue || '').trim();
-    const cid = String(page && page.cid || '').trim();
-    if (!taskId || !/^\d+$/.test(cid)) throw new TypeError('taskId and numeric page.cid are required');
-    if (!checkpoint || checkpoint.version !== STATE_VERSION) throw new TypeError('updated scan checkpoint is required');
-    if (!Array.isArray(newFolders)) throw new TypeError('newFolders must be an array');
-    const db = await openDatabase();
-    const tx = db.transaction(['tasks', 'directories'], 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const directories = tx.objectStore('directories');
-
-    const operation = new Promise((resolve, reject) => {
-      let task;
-      let directory;
-      let ready = 0;
-      let committed = false;
-      const maybeCommit = () => {
-        if (ready !== 2 || committed) return;
-        committed = true;
-        try {
-          if (!task || !directory) throw fail('scan task or active directory is missing', 'N115_TASK_NOT_FOUND');
-          if (task.status !== 'running' || String(task.activeDirectoryCid) !== cid) {
-            throw fail('scan task no longer owns this active directory', 'N115_ACTIVE_DIRECTORY_CHANGED');
-          }
-          if (directory.status !== 'scanning' || Number(directory.offset || 0) !== Number(page.offset)) {
-            throw fail('page offset is stale or already committed', 'N115_PAGE_OFFSET_MISMATCH');
-          }
-          if (directory.totalCount != null && Number(directory.totalCount) !== Number(page.totalCount)) {
-            throw fail('directory total changed during scan', 'N115_DIRECTORY_CHANGED');
-          }
-          if (Number(page.nextOffset) !== Number(page.offset) + Number(page.rawCount) ||
-              Number(page.nextOffset) > Number(page.totalCount)) {
-            throw fail('page offset progression is invalid', 'N115_PAGE_RANGE_INVALID');
-          }
-
-          const isDirectoryComplete = Number(page.nextOffset) === Number(page.totalCount);
-          directory.offset = Number(page.nextOffset);
-          directory.totalCount = Number(page.totalCount);
-          directory.pagesFetched = Number(directory.pagesFetched || 0) + 1;
-          directory.recentKeys = Array.isArray(page.recentKeys) ? page.recentKeys.slice() : [];
-          const pageRecords = Array.isArray(page.records) ? page.records : [];
-          directory.recordsStored = page.recordsStored === undefined
-            ? Number(directory.recordsStored || 0) + pageRecords.length
-            : Number(page.recordsStored);
-          directory.filesFound = page.filesFound === undefined
-            ? Number(directory.filesFound || 0) + pageRecords.filter(record => record.type !== 'folder').length
-            : Number(page.filesFound);
-          directory.foldersFound = page.foldersFound === undefined
-            ? Number(directory.foldersFound || 0) + pageRecords.filter(record => record.type === 'folder').length
-            : Number(page.foldersFound);
-          directory.videosFound = page.videosFound === undefined
-            ? Number(directory.videosFound || 0) + pageRecords.filter(record => record.isVideo || record.type === 'video').length
-            : Number(page.videosFound);
-          directory.unknownCount = Number(directory.unknownCount || 0) + Number(page.unknownCount || 0);
-          directory.duplicateCount = Number(directory.duplicateCount || 0) + Number(page.duplicateCount || 0);
-          directory.pathSegments = Array.isArray(page.pathSegments)
-            ? clone(page.pathSegments) : directory.pathSegments;
-          if (isDirectoryComplete) directory.status = 'complete';
-
-          let sequence = Number(task.nextSequence || 1);
-          for (const folder of newFolders) {
-            const childCid = String(folder.cid || '').trim();
-            if (!/^\d+$/.test(childCid)) throw new TypeError('new folder CID is invalid');
-            directories.add({
-              taskId,
-              cid: childCid,
-              depth: Number(folder.depth || 0),
-              pathSegments: clone(Array.isArray(folder.pathSegments) ? folder.pathSegments : []),
-              status: 'queued',
-              sequence: sequence++,
-              offset: 0,
-              totalCount: null,
-              pagesFetched: 0,
-              recentKeys: [],
-              recordsStored: 0,
-              filesFound: 0,
-              foldersFound: 0,
-              videosFound: 0,
-              unknownCount: 0,
-              duplicateCount: 0
-            });
-          }
-          task.nextSequence = sequence;
-          copyProgress(task, checkpoint);
-          if (isDirectoryComplete) task.activeDirectoryCid = null;
-          tasks.put(task);
-          directories.put(directory);
-          resolve({ directoryComplete: isDirectoryComplete, nextSequence: sequence });
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      const taskRequest = tasks.get(taskId);
-      const directoryRequest = directories.get([taskId, cid]);
-      taskRequest.onsuccess = () => { task = taskRequest.result; ready += 1; maybeCommit(); };
-      directoryRequest.onsuccess = () => { directory = directoryRequest.result; ready += 1; maybeCommit(); };
-      taskRequest.onerror = () => reject(taskRequest.error || new Error('Unable to read scan task'));
-      directoryRequest.onerror = () => reject(directoryRequest.error || new Error('Unable to read active directory'));
-    });
-
-    try {
-      const [result] = await Promise.all([operation, done]);
-      return result;
-    } catch (error) {
-      try { tx.abort(); } catch { /* transaction may already be ending */ }
-      throw error;
-    }
-  }
-
-  async function invalidateTask(taskIdValue, errorValue) {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId) throw new TypeError('taskId is required');
-    const message = String(errorValue && errorValue.message || errorValue || 'scan invalidated').slice(0, 240);
-    const db = await openDatabase();
-    const tx = db.transaction(['tasks', 'directories'], 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const directories = tx.objectStore('directories');
-
-    const operation = new Promise((resolve, reject) => {
-      const taskRequest = tasks.get(taskId);
-      taskRequest.onsuccess = () => {
-        try {
-          const task = taskRequest.result;
-          if (!task) throw fail('scan task not found', 'N115_TASK_NOT_FOUND');
-          const finish = directory => {
-            if (directory) {
-              directory.status = 'invalid';
-              directories.put(directory);
-            }
-            task.activeDirectoryCid = null;
-            task.status = 'incomplete';
-            task.lastError = message;
-            task.pauseReason = '扫描数据一致性无法确认，请重新开始全盘扫描';
-            task.updatedAt = Date.now();
-            tasks.put(task);
-            resolve(true);
-          };
-          if (task.activeDirectoryCid) {
-            const directoryRequest = directories.get([taskId, String(task.activeDirectoryCid)]);
-            directoryRequest.onsuccess = () => finish(directoryRequest.result);
-            directoryRequest.onerror = () => reject(directoryRequest.error || new Error('Unable to invalidate active directory'));
-          } else {
-            finish(null);
-          }
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      taskRequest.onerror = () => reject(taskRequest.error || new Error('Unable to read scan task'));
-    });
-
-    await Promise.all([operation, done]);
-    return true;
-  }
-
-  async function pauseTask(taskIdValue, checkpoint, reason = 'paused') {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId || !checkpoint) throw new TypeError('taskId and checkpoint are required');
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const operation = new Promise((resolve, reject) => {
-      const request = tasks.get(taskId);
-      request.onsuccess = () => {
-        try {
-          const task = request.result;
-          if (!task) throw fail('scan task not found', 'N115_TASK_NOT_FOUND');
-          copyProgress(task, checkpoint);
-          task.status = 'paused';
-          task.pauseReason = String(reason).slice(0, 240);
-          tasks.put(task);
-          resolve(true);
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      request.onerror = () => reject(request.error || new Error('Unable to pause scan task'));
-    });
-    await Promise.all([operation, done]);
-    return true;
-  }
-
-  async function recoverInterruptedTask(taskIdValue, accountIdValue, staleAfterMs = 30000) {
-    const taskId = String(taskIdValue || '').trim();
-    const owner = String(accountIdValue || '').trim();
-    const staleAfter = Number.isSafeInteger(staleAfterMs) && staleAfterMs >= 0 ? staleAfterMs : 30000;
-    if (!taskId || !owner) throw new TypeError('taskId and accountId are required');
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const operation = new Promise((resolve, reject) => {
-      const request = tasks.get(taskId);
-      request.onsuccess = () => {
-        try {
-          const task = request.result;
-          if (!task) throw fail('scan task not found', 'N115_TASK_NOT_FOUND');
-          if (String(task.accountId) !== owner) {
-            throw fail('115 account changed; refusing to recover another account scan', 'N115_ACCOUNT_CHANGED');
-          }
-          if (task.status === 'paused') { resolve(true); return; }
-          if (task.status !== 'running' || Date.now() - Number(task.updatedAt || 0) < staleAfter) {
-            resolve(false);
-            return;
-          }
-          task.status = 'paused';
-          task.pauseReason = '检测到上次页面已中断，已恢复到最近一次成功保存的分页';
-          task.updatedAt = Date.now();
-          tasks.put(task);
-          resolve(true);
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      request.onerror = () => reject(request.error || new Error('Unable to recover interrupted scan task'));
-    });
-    const [recovered] = await Promise.all([operation, done]);
-    return recovered;
-  }
-
-  async function resumeTask(taskIdValue, accountId) {
-    const taskId = String(taskIdValue || '').trim();
-    const owner = String(accountId || '').trim();
-    if (!taskId || !owner) throw new TypeError('taskId and accountId are required');
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const operation = new Promise((resolve, reject) => {
-      const request = tasks.get(taskId);
-      request.onsuccess = () => {
-        try {
-          const task = request.result;
-          if (!task) throw fail('scan task not found', 'N115_TASK_NOT_FOUND');
-          if (String(task.accountId) !== owner) {
-            throw fail('115 account changed; refusing to mix scan data across accounts', 'N115_ACCOUNT_CHANGED');
-          }
-          if (task.status !== 'paused') throw new Error('only a paused scan task can be resumed');
-          task.status = 'running';
-          task.pauseReason = null;
-          task.updatedAt = Date.now();
-          tasks.put(task);
-          resolve(true);
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      request.onerror = () => reject(request.error || new Error('Unable to resume scan task'));
-    });
-    await Promise.all([operation, done]);
-    return loadTask(taskId);
-  }
-
-  async function finalizeTask(taskIdValue, checkpoint) {
-    const taskId = String(taskIdValue || '').trim();
-    if (!taskId || !checkpoint) throw new TypeError('taskId and checkpoint are required');
-    if (checkpoint.currentDirectory || Number(checkpoint.queueHead || 0) < checkpoint.queue.length) {
-      throw new Error('cannot finalize a scan while directories remain');
-    }
-    const db = await openDatabase();
-    const tx = db.transaction('tasks', 'readwrite');
-    const done = transactionPromise(tx);
-    const tasks = tx.objectStore('tasks');
-    const operation = new Promise((resolve, reject) => {
-      const request = tasks.get(taskId);
-      request.onsuccess = () => {
-        try {
-          const task = request.result;
-          if (!task) throw fail('scan task not found', 'N115_TASK_NOT_FOUND');
-          if (task.activeDirectoryCid) throw new Error('cannot finalize while a directory is active');
-          copyProgress(task, checkpoint);
-          task.status = checkpoint.truncated || !checkpoint.integrityOk ? 'incomplete' : 'complete';
-          task.pauseReason = null;
-          tasks.put(task);
-          resolve(task.status);
-        } catch (error) {
-          try { tx.abort(); } catch { /* transaction may already be ending */ }
-          reject(error);
-        }
-      };
-      request.onerror = () => reject(request.error || new Error('Unable to finalize scan task'));
-    });
-    const [status] = await Promise.all([operation, done]);
-    return status;
-  }
-
-  function close() {
-    if (!databasePromise) return;
-    void databasePromise.then(database => database.close()).catch(() => {});
-    databasePromise = null;
-  }
-
-  return Object.freeze({
-    close,
-    commitPage,
-    createTask,
-    finalizeTask,
-    getTask,
-    invalidateTask,
-    listTasks,
-    loadTask,
-    markDirectoryStarted,
-    pauseTask,
-    resumeTask,
-    recoverInterruptedTask
-  });}
-
-module.exports = Object.freeze({
-  DB_NAME,
-  DB_VERSION,
-  createExplorerIndexedDbStore
-});
-
-  globalThis.N115FullDiskExplorerStore = module.exports;
-
-})();
-
-(function attachN115FullDiskExplorerRunner() {
-
-  'use strict';
-
-  const module = { exports: {} };
-
-  const require = name => name === './explorer-core' ? globalThis.N115FullDiskExplorerCore : (() => { throw new Error('Unsupported explorer module: ' + name); })();
-
-const {
-  beginNextDirectory,
-  commitDirectoryPage,
-  createScanState,
-  pauseScan
-} = require('./explorer-core');
-
-const INVALIDATING_CODES = new Set([
-  'N115_DIRECTORY_CHANGED',
-  'N115_PAGE_RANGE_INVALID',
-  'N115_PAGE_SHORT',
-  'N115_EMPTY_PAGE',
-  'N115_PAGE_RECORD_COUNT_MISMATCH',
-  'N115_STREAM_RESUME_STATE_MISSING',
-  'N115_STREAM_RESUME_KEYS_INVALID'
-]);
-
-function errorSummary(error) {
-  if (!error) return null;
-  return {
-    code: error.code == null ? null : String(error.code),
-    message: String(error.message || error).slice(0, 240)
-  };
-}
-
-function progressSummary(checkpoint) {
-  return {
-    directoriesDiscovered: checkpoint.directoriesDiscovered,
-    directoriesVisited: checkpoint.directoriesVisited,
-    directoriesCompleted: checkpoint.directoriesCompleted,
-    directoriesQueued: Math.max(0, checkpoint.queue.length - Number(checkpoint.queueHead || 0)),
-    pagesFetched: checkpoint.pagesFetched,
-    recordsScanned: checkpoint.recordsScanned,
-    matchedVideos: checkpoint.matchedVideos,
-    sampleSeen: checkpoint.reservoir.seen,
-    sampleSize: checkpoint.reservoir.items.length,
-    unknownRecords: checkpoint.unknownRecords,
-    duplicateRecords: checkpoint.duplicateRecords,
-    integrityOk: checkpoint.integrityOk,
-    truncated: checkpoint.truncated
-  };
-}
-
-function createExplorerRunner(options = {}) {
-  const adapter = options.adapter;
-  const store = options.store;
-  if (!adapter || typeof adapter.streamDirectory !== 'function') {
-    throw new TypeError('createExplorerRunner requires adapter.streamDirectory');
-  }
-  if (!store || !['createTask', 'loadTask', 'markDirectoryStarted', 'commitPage',
-    'pauseTask', 'resumeTask', 'finalizeTask', 'invalidateTask'].every(name => typeof store[name] === 'function')) {
-    throw new TypeError('createExplorerRunner requires the explorer IndexedDB store contract');
-  }
-
-  function makeResult(taskId, checkpoint, error = null) {
-    return {
-      taskId,
-      status: checkpoint.status,
-      accountId: checkpoint.accountId,
-      rootCid: checkpoint.rootCid,
-      recursive: checkpoint.recursive,
-      progress: progressSummary(checkpoint),
-      sample: checkpoint.reservoir.items.slice(),
-      error: errorSummary(error)
-    };
-  }
-
-  async function runTask(config) {
-    const taskId = String(config.taskId || '').trim();
-    const accountId = String(config.accountId || '').trim();
-    if (!taskId || !accountId) throw new TypeError('taskId and accountId are required');
-
-    let checkpoint = config.checkpoint || await store.loadTask(taskId);
-    if (!checkpoint) throw new Error('full-disk scan task not found');
-    if (String(checkpoint.accountId) !== accountId) {
-      throw Object.assign(new Error('115 account changed; refusing to mix scan data across accounts'), {
-        code: 'N115_ACCOUNT_CHANGED'
-      });
-    }
-    if (checkpoint.status !== 'running') return makeResult(taskId, checkpoint);
-
-    const matchesVideo = typeof config.matchesVideo === 'function' ? config.matchesVideo : () => true;
-    const random = typeof config.random === 'function' ? config.random : Math.random;
-    const report = value => {
-      if (typeof config.onProgress !== 'function') return;
-      try { config.onProgress(Object.assign({ taskId }, value)); } catch { /* progress UI must not break scanning */ }
-    };
-
-    try {
-      while (checkpoint.status === 'running') {
-        if (!checkpoint.currentDirectory) {
-          checkpoint = beginNextDirectory(checkpoint);
-          if (checkpoint.status !== 'running') {
-            const status = await store.finalizeTask(taskId, checkpoint);
-            checkpoint.status = status;
-            return makeResult(taskId, checkpoint);
-          }
-          await store.markDirectoryStarted(taskId, checkpoint);
-        }
-
-        const current = checkpoint.currentDirectory;
-        const startingOffset = current.offset;
-        const startingPages = current.pagesFetched;
-        await adapter.streamDirectory(current.cid, {
-          signal: config.signal,
-          fallbackPath: current.pathSegments,
-          startOffset: current.offset,
-          expectedCount: current.totalCount === null ? undefined : current.totalCount,
-          initialPagesFetched: current.pagesFetched,
-          initialRecordsStored: current.recordsStored,
-          initialFilesFound: current.filesFound,
-          initialFoldersFound: current.foldersFound,
-          initialVideosFound: current.videosFound,
-          initialDuplicateCount: current.duplicateCount,
-          initialUnknownCount: current.unknownCount,
-          initialPathSegments: current.pathSegments,
-          initialRecentKeys: current.recentKeys,
-          shouldYield: config.shouldYield,
-          shouldPause: config.shouldPause,
-          backgroundYieldMs: config.backgroundYieldMs,
-          onProgress: progress => {
-            report(Object.assign({
-              phase: progress.phase,
-              directoryId: progress.directoryId,
-              directoryOffset: progress.offset,
-              directoryTotal: progress.total
-            }, progressSummary(checkpoint)));
-          },
-          onPage: async page => {
-            const previousQueueLength = checkpoint.queue.length;
-            if (typeof config.beforePage === 'function') await config.beforePage(page, checkpoint, config.signal);
-            if (config.signal && config.signal.aborted) {
-              const abortError = new Error('scan paused before committing the next page');
-              abortError.name = 'AbortError';
-              throw abortError;
-            }
-            commitDirectoryPage(checkpoint, page, { matchesVideo, random });
-            const newFolders = checkpoint.queue.slice(previousQueueLength);
-            await store.commitPage(taskId, page, checkpoint, newFolders);
-            report({
-              phase: 'page-committed',
-              directoryId: page.cid,
-              directoryOffset: page.nextOffset,
-              directoryTotal: page.totalCount,
-              // Only publish a provisional sample after the matching IndexedDB transaction commits.
-              // It is uniform over the scanned prefix, not the entire disk until completion.
-              sample: checkpoint.reservoir.items.slice(),
-              ...progressSummary(checkpoint)
-            });          }
-        });
-
-        if (checkpoint.currentDirectory &&
-            checkpoint.currentDirectory.offset === startingOffset &&
-            checkpoint.currentDirectory.pagesFetched === startingPages) {
-          throw new Error('115 adapter returned without committing a page; scan paused to avoid a stuck cursor');
-        }
-      }
-      return makeResult(taskId, checkpoint);
-    } catch (error) {
-      if (INVALIDATING_CODES.has(String(error && error.code || ''))) {
-        await store.invalidateTask(taskId, error);
-        checkpoint = await store.loadTask(taskId);
-        report({ phase: 'scan-invalidated', ...progressSummary(checkpoint) });
-        return makeResult(taskId, checkpoint, error);
-      }
-
-      // The page reducer updates memory before IndexedDB commits. Always reload the
-      // durable checkpoint after any failure so a failed transaction is never replayed.
-      checkpoint = await store.loadTask(taskId);
-      if (checkpoint && checkpoint.status === 'running') {
-        const paused = pauseScan(checkpoint, String(error && error.message || error));
-        await store.pauseTask(taskId, paused, String(error && error.message || error));
-        checkpoint = await store.loadTask(taskId);
-      }
-      report({ phase: 'scan-paused', ...progressSummary(checkpoint) });
-      return makeResult(taskId, checkpoint, error);
-    }
-  }
-
-  async function startScan(config = {}) {
-    const taskId = String(config.taskId || '').trim();
-    const accountId = String(config.accountId || '').trim();
-    if (!taskId || !accountId) throw new TypeError('taskId and accountId are required');
-    const checkpoint = createScanState({
-      accountId,
-      rootCid: config.rootCid == null ? '0' : config.rootCid,
-      recursive: config.recursive !== false,
-      maxDepth: config.maxDepth,
-      maxDirectories: config.maxDirectories,
-      sampleLimit: config.sampleLimit,
-      filters: config.filters,
-      preferenceSnapshot: config.preferenceSnapshot
-    });
-    await store.createTask(taskId, checkpoint);
-    reportInitial(config, taskId, checkpoint);
-    return runTask(Object.assign({}, config, { taskId, accountId, checkpoint }));
-  }
-
-  function reportInitial(config, taskId, checkpoint) {
-    if (typeof config.onProgress !== 'function') return;
-    try {
-      config.onProgress({
-        taskId,
-        phase: 'scan-started',
-        rootCid: checkpoint.rootCid,
-        ...progressSummary(checkpoint)
-      });
-    } catch { /* progress UI must not break scanning */ }
-  }
-
-  async function resumeScan(config = {}) {
-    const taskId = String(config.taskId || '').trim();
-    const accountId = String(config.accountId || '').trim();
-    if (!taskId || !accountId) throw new TypeError('taskId and accountId are required');
-    const checkpoint = await store.resumeTask(taskId, accountId);
-    return runTask(Object.assign({}, config, { taskId, accountId, checkpoint }));
-  }
-
-  return Object.freeze({ resumeScan, runTask, startScan });
-}
-
-module.exports = Object.freeze({ createExplorerRunner });
-
-  globalThis.N115FullDiskExplorerRunner = module.exports;
-
-})();
-
-/* N115_FULL_DISK_EXPLORER_BUNDLE_END */
-
 /* global Hls, GM_xmlhttpRequest */
 (() => {
   'use strict';
 
-  const VERSION = '1.8.2';
+  const VERSION = '1.8.3';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -4620,30 +3418,18 @@ module.exports = Object.freeze({ createExplorerRunner });
   const N115IndexStore = globalThis.N115IndexStore;
   const N115PlayerPreferenceStore = globalThis.N115PlayerPreferenceStore;
   const N115DataAdapter = globalThis.N115DataAdapter;
-  const N115FullDiskExplorerStore = globalThis.N115FullDiskExplorerStore;
-  const N115FullDiskExplorerRunner = globalThis.N115FullDiskExplorerRunner;
-  if (!N115IndexStore || !N115PlayerPreferenceStore || !N115DataAdapter ||
-      !N115FullDiskExplorerStore || !N115FullDiskExplorerRunner) return;
+  if (!N115IndexStore || !N115PlayerPreferenceStore || !N115DataAdapter) return;
   const indexStore = N115IndexStore.create115IndexStore();
   const preferenceStore = N115PlayerPreferenceStore.create115PlayerPreferenceStore();
-  const fullDiskStore = N115FullDiskExplorerStore.createExplorerIndexedDbStore();
   const fullDiskAdapter = N115DataAdapter.create115DataAdapter({
-    request: (url, options) => requestText(url, options && options.signal)
+    request: (url, { signal }) => requestText(url, signal, 30000)
   });
-  const fullDiskRunner = N115FullDiskExplorerRunner.createExplorerRunner({
-    adapter: fullDiskAdapter,
-    store: fullDiskStore
-  });
+  const FULL_DISK_RESERVE = 6;
+  const FULL_DISK_BATCH_ATTEMPTS = 24;
   let active = null;
   let opening = false;
-  let fullDiskController = null;
-  let fullDiskActivePromise = null;
-  let fullDiskTaskId = null;
   let fullDiskAccountId = null;
-  let fullDiskLatestTask = null;
-  let fullDiskLastError = null;
-  let fullDiskAutoPlay = null;
-  let fullDiskOpening = false;
+  let preparedFullDisk = null;
   let exploreScope = 'quick';
   let exploreDialogRevision = 0;
   let recycleBinMutationQueue = Promise.resolve();
@@ -5152,7 +3938,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     throw new Error('播放列表为空，视频可能尚未完成转码');
   }
 
-  function requestText(url, signal) {
+  function requestText(url, signal, timeout = 20000) {
     return new Promise((resolve, reject) => {
       let handle;
       let settled = false;
@@ -5170,7 +3956,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       signal.addEventListener('abort', cancel, { once: true });
       try {
         handle = GM_xmlhttpRequest({
-          method: 'GET', url: trustedUrl(url), timeout: 20000, responseType: 'text',
+          method: 'GET', url: trustedUrl(url), timeout, responseType: 'text',
           headers: { Referer: 'https://115.com/' },
           onload: response => {
             if (response.status < 200 || response.status >= 300) {
@@ -5181,7 +3967,7 @@ module.exports = Object.freeze({ createExplorerRunner });
             }
           },
           onerror: () => finish(new Error('播放列表请求失败，请检查网络或油猴的域名访问授权')),
-          ontimeout: () => finish(new Error('获取播放列表超时（20秒）')),
+          ontimeout: () => finish(new Error('115 请求超时（' + timeout / 1000 + '秒）')),
           onabort: () => finish(new DOMException('请求已取消', 'AbortError'))
         });
       } catch (error) { finish(error); }
@@ -5508,7 +4294,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       const localHasNext = localMode && folderMode.availableItems.length > 0;
       const localScanning = localMode && folderMode.scanning;
       cell.nextButton.disabled = !cell.item || cell.locked || session.roundRefreshing || session.authBlocked ||
-        (localMode ? !localHasNext && !localScanning : !session.availableItems.length);
+        (localMode ? !localHasNext && !localScanning : !session.availableItems.length &&
+          !(session.fullDiskSource && !session.favoriteFolderPlayback?.active));
     }
     if (cell.lockIndicator) cell.lockIndicator.hidden = !cell.locked;
     if (cell.favoriteIndicator) cell.favoriteIndicator.hidden = !favorite;
@@ -5632,13 +4419,9 @@ module.exports = Object.freeze({ createExplorerRunner });
     if (session.infoText) session.infoText.textContent = folderMode
       ? '同目录 · ' + folderMode.folderPath + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
       : favoriteMode ? '收藏夹 · ' + favoriteMode.folderName + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
-        : '共 ' + candidateTotal + ' 个视频 · ' + layoutLabel;
-    const scopeLabel = session.fullDiskSource ? '全盘探索 · ' + ({
-      scanning: '扫描中，仅已扫描范围',
-      complete: '扫描完成',
-      paused: '扫描已暂停，仅已扫描范围',
-      incomplete: '扫描未完成，仅已扫描范围'
-    }[session.scan.status] || '准备扫描')
+        : (session.fullDiskSource && !session.fullDiskSource.filters.favoritesOnly ? '115 视频范围 ' : '共 ') +
+          candidateTotal + ' 个视频 · ' + layoutLabel;
+    const scopeLabel = session.fullDiskSource ? '全盘探索 · ' + fullDiskStateLabel(session.fullDiskSource)
       : session.quickExplore ? '快速探索 · 已收录的视频'
         : '当前目录' + (session.scan?.recursive ? '及子目录' : '') + ' · 多画面播放';
     const playbackSourceLabel = folderMode
@@ -5670,7 +4453,7 @@ module.exports = Object.freeze({ createExplorerRunner });
         cell && cell.index < session.layoutCount && !cell.locked
       );
       session.swapAllButton.disabled = session.closed || session.roundRefreshing || session.authBlocked ||
-        (!remaining && !(folderMode && folderMode.scanning)) || !hasTarget;
+        (!remaining && !(folderMode && folderMode.scanning) && !(session.fullDiskSource && !favoriteMode)) || !hasTarget;
     }
     if (session.newRoundButton) {
       session.newRoundButton.disabled = session.closed || session.roundRefreshing || session.authBlocked;
@@ -5833,6 +4616,9 @@ module.exports = Object.freeze({ createExplorerRunner });
             cancelPendingSkip(cell);
           }
         }, 280);
+        if (session.fullDiskSource) refillSessionFullDisk(session);
+      } else if (session.fullDiskSource && queueFullDiskSwap(session, cell)) {
+        session.roundMessage = '正在抽取替换失败视频的候选';
       } else {
         session.roundMessage = '失败视频已跳过；本轮没有更多可用候选时请开启新一轮';
       }
@@ -5857,6 +4643,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     });
     processPendingAutoAdvances(session);
     updateRoundControls(session);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
   }
 
   async function tryPlay(session, cell) {
@@ -6573,14 +5360,14 @@ module.exports = Object.freeze({ createExplorerRunner });
     }
     const item = collectNextItem(session);
     if (!item) {
-      session.roundMessage = session.fullDiskSource && session.scan.status === 'scanning'
-        ? '当前候选已用完，扫描仍在继续'
-        : '本轮候选已用完，请开启新一轮';
+      if (session.fullDiskSource && queueFullDiskSwap(session, cell)) return;
+      session.roundMessage = '本轮候选已用完，请开启新一轮';
       updateRoundControls(session);
       return;
     }
     session.roundMessage = '';
     replaceCell(session, cell, item);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
   }
 
   function handleCellEnded(session, cell) {
@@ -6643,7 +5430,10 @@ module.exports = Object.freeze({ createExplorerRunner });
     let replaced = 0;
     for (const cell of targets) {
       const item = collectNextItem(session);
-      if (!item) break;
+      if (!item) {
+        if (session.fullDiskSource && queueFullDiskSwap(session, cell)) continue;
+        break;
+      }
       replaceCell(session, cell, item);
       replaced++;
     }
@@ -6651,6 +5441,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       ? '候选不足，已替换 ' + replaced + '/' + targets.length + ' 格'
       : (requestedCount > 0 ? '按设置替换 ' + replaced + ' 格' : '已替换 ' + replaced + ' 格');
     updateRoundControls(session);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
   }
 
   function clearFavoritePlaybackCell(session, cell) {
@@ -6726,7 +5517,10 @@ module.exports = Object.freeze({ createExplorerRunner });
         if (key) session.usedPickcodes.add(key);
       }
     }
-    if (restoreGlobal) restoreGlobalCandidatesIntoCells(session);
+    if (restoreGlobal) {
+      restoreGlobalCandidatesIntoCells(session);
+      if (session.fullDiskSource) refillSessionFullDisk(session);
+    }
     if (session.favoriteFolderExitButton) session.favoriteFolderExitButton.hidden = true;
     if (announce) session.roundMessage = '已退出收藏夹「' + folderName + '」播放，恢复全局随机候选';
     updateRoundControls(session);
@@ -6747,23 +5541,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       return;
     }
     if (session.fullDiskSource) {
-      const previousSource = session.fullDiskSource;
-      session.roundRefreshing = true;
-      session.roundMessage = '正在准备全盘新一轮…';
-      updateRoundControls(session);
-      try {
-        if (fullDiskActivePromise) {
-          fullDiskController?.abort();
-          await fullDiskActivePromise;
-        }
-        if (!session.closed) await runFullDiskScan(false, { session, message });
-      } finally {
-        if (!session.closed && session.fullDiskSource === previousSource) {
-          session.roundRefreshing = false;
-          processPendingAutoAdvances(session);
-          updateRoundControls(session);
-        }
-      }
+      restartFullDiskRound(session, message);
       return;
     }
     session.roundRefreshing = true;
@@ -7093,6 +5871,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     const nextItem = collectNextItem(session);
     if (nextItem) replaceCell(session, cell, nextItem);
     else clearDeletedCell(session, cell);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
     session.roundMessage = cleanupWarnings.length
       ? '已移入115回收站，但' + cleanupWarnings.join('；') + '。建议重新扫描该目录'
       : '已移入115回收站，并已同步清理本地索引：' + String(item.name || '视频');
@@ -8297,6 +7076,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     }
     replaceCell(session, cell, Object.assign({}, item, { pickcode: key, playable: true, isVideo: true }));
     session.roundMessage = '已从收藏列表播放：' + String(item.name || key);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
     updateRoundControls(session);
   }
   async function updateSelectedFavorites(session, patch, message) {
@@ -8562,7 +7342,8 @@ module.exports = Object.freeze({ createExplorerRunner });
     video.loop = session.videoEndMode === 'loop';
     video.playsInline = true;
     video.preload = 'metadata';
-    const status = element('div', 'status', item ? '正在获取播放地址…' : '可播放视频不足4个 · 本轮候选已用完，请开启新一轮');
+    const status = element('div', 'status', item ? '正在获取播放地址…' :
+      session.fullDiskSource ? '正在从115抽取视频…' : '本轮候选已用完，请开启新一轮');
     const cell = {
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
@@ -9895,6 +8676,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     updateAudioSourceOptions(session);
     applyAudioSource(session, session.audioSourceIndex, false);
     applyCellVisibility(session);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
     void saveSessionSettings(session).catch(error => {
       if (!session.closed) setFilterMessage(session, '布局已切换，但记忆保存失败：' + String(error?.message || error), true);
     });
@@ -9973,216 +8755,293 @@ module.exports = Object.freeze({ createExplorerRunner });
     fullDiskFavoritesOnlyInput.checked = value.favoritesOnly;
   }
 
-  function updateFullDiskMetrics(progress = {}) {
-    fullDiskMetricValues.directories.textContent = formatFullDiskCount(progress.directoriesVisited);
-    fullDiskMetricValues.records.textContent = formatFullDiskCount(progress.recordsScanned);
-    fullDiskMetricValues.videos.textContent = formatFullDiskCount(progress.matchedVideos);
-    fullDiskMetricValues.samples.textContent = formatFullDiskCount(progress.sampleSize ??
-      (progress.reservoir && progress.reservoir.items ? progress.reservoir.items.length : 0));
+  function createFullDiskRange(count) {
+    return { count, remaining: count, positions: new Map(), retry: [] };
   }
 
-  // Only committed pages can replenish live playback. Never replace active or locked cells.
-  function syncLiveFullDiskCandidates(update, completed = false) {
-    const session = active;
-    if (!session || session.closed || !session.fullDiskSource ||
-        session.fullDiskSource.taskId !== String(update.taskId || '') ||
-        session.accountId !== fullDiskAccountId) return 0;
-    const source = session.fullDiskSource;
-    const allowed = createPlayablePredicate(new Set(), session.filters, session.preferenceState, { trackSeen: false });
-    const known = new Set(source.items.map(itemKey));
-    const queued = new Set(session.availableItems.map(itemKey));
-    const visible = new Set(session.cells.filter(cell => cell && cell.item).map(cell => itemKey(cell.item)));
-    // At completion the persisted reservoir is the authoritative uniform whole-disk sample.
-    // Discard older provisional queue entries but never interrupt the current video cells.
-    if (update.status === 'complete' || completed) {
-      const finalItems = [];
-      const finalKeys = new Set();
-      for (const item of Array.isArray(update.sample) ? update.sample : []) {
-        const key = itemKey(item);
-        if (!key || finalKeys.has(key) || !allowed(item)) continue;
-        finalKeys.add(key);
-        finalItems.push(item);
-        if (finalItems.length >= MAX_CANDIDATES) break;
-      }
-      source.items = finalItems;
-      session.availableItems = shuffleItems(finalItems.filter(item => {
-        const key = itemKey(item);
-        return !session.usedPickcodes.has(key) && !visible.has(key);
-      }));
-      source.sampleSeen = Math.max(Number(source.sampleSeen || 0), Number(update.sampleSeen || 0));
-      source.isComplete = true;
-      session.scan.complete = true;
-      session.scan.status = 'complete';
-      session.candidateTotal = Math.max(Number(session.candidateTotal || 0), Number(update.matchedVideos || 0));
-      session.roundPoolSize = finalItems.length;
-      session.roundMessage = '全盘扫描完成，已切换到最终均匀随机候选池';
+  function takeRandomFullDiskOffset(range) {
+    if (range.retry.length) return range.retry.pop();
+    if (!range.remaining) return null;
+    // A sparse shuffle draws positions without retaining the full list.
+    const index = Math.floor(Math.random() * range.remaining);
+    const offset = range.positions.get(index) ?? index;
+    const last = --range.remaining;
+    if (index !== last) range.positions.set(index, range.positions.get(last) ?? last);
+    range.positions.delete(last);
+    return offset;
+  }
+
+  function createFullDiskSource(accountId, filters, ready, range = null) {
+    return {
+      taskId: 'direct-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
+      accountId, filters, ready, range,
+      controller: new AbortController(),
+      items: [], pendingSwaps: new Map(), folderPaths: new Map(),
+      favoriteItems: null, count: range?.count ?? null, accepted: 0,
+      refilling: null, starting: false, exhausted: false, limited: false, error: '', accountChanged: false
+    };
+  }
+
+  function fullDiskSession(source) {
+    return active?.fullDiskSource === source && !active.closed ? active : null;
+  }
+
+  function fullDiskStateLabel(source) {
+    if (source.accountChanged) return '账号已切换，请重新打开探索';
+    if (source.refilling) return '正在抽取视频';
+    if (source.error) return '抽取遇到问题，可重试';
+    if (source.exhausted) return '本轮已抽完';
+    if (source.limited) return '本批已结束，可继续抽取';
+    return source.count === null ? '等待抽取' : '随机直抽';
+  }
+
+  function renderFullDiskSource(source = active?.fullDiskSource || preparedFullDisk) {
+    const session = source && fullDiskSession(source);
+    const remaining = session ? session.availableItems.length : (source?.items.length || 0);
+    fullDiskStartButton.textContent = session ? '继续抽取' : '开始全盘探索';
+    fullDiskStartButton.disabled = session
+      ? Boolean(source.refilling || source.exhausted || source.accountChanged || session.authBlocked ||
+          session.favoriteFolderPlayback?.active)
+      : !fullDiskAccountId || Boolean(active || opening || source?.starting);
+    fullDiskMetricValues.videos.textContent = source?.count == null ? '—' : formatFullDiskCount(source.count);
+    fullDiskMetricValues.videoLabel.textContent = source?.filters.favoritesOnly ? '可抽取收藏' : '115 视频范围';
+    fullDiskMetricValues.samples.textContent = formatFullDiskCount(remaining);
+    fullDiskProgressBar.classList.toggle('is-active', Boolean(source?.refilling));
+    fullDiskStatus.textContent = source
+      ? fullDiskStateLabel(source) + (remaining ? ' · 待播 ' + formatFullDiskCount(remaining) + ' 个' : '')
+      : '开始后从 115 的视频列表抽取，第一格就绪即播放。';
+    fullDiskWarning.textContent = source?.error || '';
+    fullDiskWarning.hidden = !fullDiskWarning.textContent;
+  }
+
+  function cancelPreparedFullDisk() {
+    preparedFullDisk?.controller.abort();
+    preparedFullDisk = null;
+  }
+
+  async function confirmFullDiskAccount(source) {
+    const accountId = await resolveAccountId(source.controller.signal);
+    if (accountId === source.accountId) return;
+    source.accountChanged = true;
+    source.items.length = 0;
+    source.pendingSwaps.clear();
+    const session = fullDiskSession(source);
+    if (session) session.availableItems.length = 0;
+    throw new Error('当前 115 账号已切换，请退出并重新打开全盘探索。');
+  }
+
+  async function loadFullDiskPreferences(accountId) {
+    const [settings, preferenceRecords, profiles, recentDirectories] = await Promise.all([
+      preferenceStore.getPlayerSettings(accountId),
+      preferenceStore.listVideoPreferences(accountId),
+      preferenceStore.listProfiles(accountId),
+      preferenceStore.listRecentDirectories(accountId, 5)
+    ]);
+    return { settings, preferenceRecords, profiles, recentDirectories,
+      preferenceState: quickExplorePreferences(preferenceRecords) };
+  }
+
+  function prepareFullDisk(filters) {
+    if (preparedFullDisk?.accountId === fullDiskAccountId &&
+        JSON.stringify(preparedFullDisk.filters) === JSON.stringify(filters)) return preparedFullDisk;
+    cancelPreparedFullDisk();
+    const source = createFullDiskSource(fullDiskAccountId, filters, loadFullDiskPreferences(fullDiskAccountId));
+    preparedFullDisk = source;
+    void refillFullDisk(source);
+    return source;
+  }
+
+  async function loadFullDiskFavorites(source, preferenceRecords, allowed) {
+    const favorites = preferenceRecords.filter(record => record.favorite);
+    const unresolved = favorites.filter(record => !record.snapshot || (
+      (source.filters.folderPath || source.filters.keyword || source.filters.excludeKeyword) &&
+      !recordFolderNames(record.snapshot).length && String(record.snapshot.parentId) !== '0'
+    ));
+    const resolved = new Map((await indexStore.findVideosByPickcodes(source.accountId,
+      unresolved.map(record => record.pickcode))).map(item => [itemKey(item), item]));
+    const favoritesWithDetails = favorites.map(record => resolved.get(itemKey(record)) ||
+      (record.snapshot ? { ...record.snapshot, pickcode: record.pickcode, playable: true, isVideo: true } : null));
+    return shuffleItems(favoritesWithDetails.filter(allowed));
+  }
+
+  async function resolveFullDiskItemPath(source, item) {
+    if (!item.parentId || item.parentId === '0' || item.pathSegments.length ||
+        !(source.filters.folderPath || source.filters.keyword || source.filters.excludeKeyword)) return item;
+    let lookup = source.folderPaths.get(item.parentId);
+    if (!lookup) {
+      if (source.folderPaths.size >= 128) source.folderPaths.delete(source.folderPaths.keys().next().value);
+      lookup = fullDiskAdapter.readVideoFolder(item.parentId, { signal: source.controller.signal });
+      source.folderPaths.set(item.parentId, lookup);
+    }
+    try {
+      const segments = await lookup;
+      return { ...item, pathSegments: segments, path: '/' + segments.map(folder => folder.name).concat(item.name).join('/') };
+    } catch (error) {
+      source.folderPaths.delete(item.parentId);
+      throw error;
+    }
+  }
+
+  function updateFullDiskPlayer(source) {
+    const session = fullDiskSession(source);
+    if (!session) return;
+    session.candidateTotal = source.count ?? 0;
+    session.roundPoolSize = source.accepted;
+    if (!session.authBlocked && !session.favoriteFolderPlayback?.active) {
       for (const cell of session.cells) {
-        if (!cell || cell.index >= session.layoutCount || cell.item || cell.locked) continue;
-        const next = collectNextItem(session);
-        if (!next) break;
-        replaceCell(session, cell, next);
+        if (!cell || cell.index >= session.layoutCount || cell.locked || cell.deleting) {
+          if (cell) source.pendingSwaps.delete(cell);
+          continue;
+        }
+        const waiting = source.pendingSwaps.get(cell) === cell.generation;
+        if (!waiting) source.pendingSwaps.delete(cell);
+        if (cell.item && !waiting) continue;
+        const item = collectNextItem(session);
+        if (item) {
+          source.pendingSwaps.delete(cell);
+          replaceCell(session, cell, item);
+        } else {
+          setStatus(cell, source.refilling ? '正在从115抽取视频…'
+            : source.error || (source.exhausted ? '本轮暂无其他符合条件的视频'
+              : '本批暂无更多候选，可继续抽取或调整筛选'));
+        }
       }
-      updateRoundControls(session);
-      return 0;
     }
-    let added = 0;
-    for (const item of shuffleItems(Array.isArray(update.sample) ? update.sample : [])) {
-      const key = itemKey(item);
-      if (!key || !allowed(item) || session.usedPickcodes.has(key) ||
-          known.has(key) || queued.has(key) || visible.has(key)) continue;
-      if (session.availableItems.length >= MAX_CANDIDATES) break;
-      if (source.items.length >= MAX_CANDIDATES) {
-        const stale = source.items.findIndex(previous => {
-          const previousKey = itemKey(previous);
-          return !queued.has(previousKey) && !visible.has(previousKey);
-        });
-        if (stale < 0) break;
-        known.delete(itemKey(source.items[stale]));
-        source.items.splice(stale, 1);
-      }
-      source.items.push(item);
-      session.availableItems.push(item);
-      queued.add(key);
-      known.add(key);
-      added++;
-    }
-    source.sampleSeen = Math.max(Number(source.sampleSeen || 0), Number(update.sampleSeen || 0));
-    const status = String(update.status || (completed ? 'complete' : 'running'));
-    source.isComplete = status === 'complete';
-    session.scan.complete = source.isComplete;
-    session.scan.status = status === 'running' ? 'scanning' : status;
-    session.candidateTotal = Math.max(Number(session.candidateTotal || 0), Number(update.matchedVideos || 0));
-    session.roundPoolSize = source.items.length;
-    if (added) {
-      session.roundMessage = '后台扫描新增 ' + added + ' 个临时候选（仅已扫描范围）';
-      for (const cell of session.cells) {
-        if (!cell || cell.index >= session.layoutCount || cell.item || cell.locked) continue;
-        const next = collectNextItem(session);
-        if (!next) break;
-        replaceCell(session, cell, next);
-      }
-    } else if (status === 'complete') {
-      session.roundMessage = '全盘扫描完成；后续换片使用当前随机候选池';
-    } else if (status === 'paused' || status === 'incomplete') {
-      session.roundMessage = status === 'paused' ? '扫描已暂停，当前仅播放已扫描范围' : '扫描未完整结束，当前仅播放已扫描范围';
-    }
-    if (added || status !== 'running') updateRoundControls(session);
-    return added;
+    updateRoundControls(session);
   }
 
-  function renderFullDiskProgress(update = {}) {
-    const progress = update.progress || update;
-    const phase = String(update.phase || progress.phase || 'scanning');
-    if (phase === 'page-committed' && Array.isArray(update.sample)) {
-      syncLiveFullDiskCandidates(update);
-      maybeAutoPlayFullDisk(update.taskId, update.sample.length);
-    }
-    updateFullDiskMetrics(progress);
-    fullDiskProgressBar.classList.toggle('is-active', !['scan-paused', 'scan-invalidated'].includes(phase));
-    fullDiskPauseButton.disabled = !fullDiskController;
-    fullDiskResumeButton.hidden = true;
-    fullDiskPlayButton.hidden = !(Number(progress.sampleSize) > 0) || Boolean(active) || opening;
-    fullDiskPlayButton.textContent = '边扫边播（仅已扫描范围）';    fullDiskStartButton.disabled = true;
-    fullDiskBackgroundButton.disabled = false;
-    fullDiskBadge.hidden = false;
-    fullDiskBadge.textContent = '● 全盘扫描中 · ' + formatFullDiskCount(progress.matchedVideos) + ' 个视频';
-    if (phase === 'scan-started') {
-      fullDiskStatus.textContent = '正在连接115网盘，从根目录开始递归扫描…';
-    } else {
-      fullDiskStatus.textContent = '正在扫描网盘根目录及全部子文件夹\n' +
-        '已访问目录：' + formatFullDiskCount(progress.directoriesVisited) +
-        ' · 待处理目录：' + formatFullDiskCount(progress.directoriesQueued) +
-        '\n已检查记录：' + formatFullDiskCount(progress.recordsScanned) +
-        ' · 匹配视频：' + formatFullDiskCount(progress.matchedVideos) +
-        ' · 随机候选：' + formatFullDiskCount(progress.sampleSize);
-    }
+  function refreshFullDiskView(source) {
+    updateFullDiskPlayer(source);
+    if (fullDiskSession(source) || preparedFullDisk === source) renderFullDiskSource(source);
   }
 
-  function renderFullDiskTask(task, note = '') {
-    fullDiskLatestTask = task || null;
-    if (!task) {
-      updateFullDiskMetrics({});
-      fullDiskStatus.textContent = note || '尚未扫描。扫描只读取115目录信息，不下载或修改网盘文件。';
-      fullDiskWarning.hidden = true;
-      fullDiskWarning.textContent = '';
-      fullDiskProgressBar.classList.remove('is-active');
-      fullDiskPauseButton.disabled = true;
-      fullDiskResumeButton.hidden = true;
-      fullDiskPlayButton.hidden = true;
-      fullDiskStartButton.disabled = Boolean(fullDiskActivePromise);
-      fullDiskStartButton.textContent = '开始全盘扫描';
-      fullDiskBackgroundButton.disabled = true;
-      fullDiskBadge.hidden = true;
+  function acceptFullDiskItem(source, item, allowed) {
+    if (source.accountChanged || !allowed(item)) return;
+    const session = fullDiskSession(source);
+    if (!session && preparedFullDisk !== source) return;
+    const queue = session ? session.availableItems : source.items;
+    const key = itemKey(item);
+    if (session && (session.filters !== source.filters || session.usedPickcodes.has(key))) return;
+    if (queue.some(candidate => itemKey(candidate) === key)) return;
+    queue.push(item);
+    source.accepted++;
+    refreshFullDiskView(source);
+  }
+
+  function fullDiskNeedsItems(source) {
+    const session = fullDiskSession(source);
+    if (!session) return preparedFullDisk === source && source.items.length < 2;
+    return session.filters === source.filters && !session.authBlocked && !session.favoriteFolderPlayback?.active &&
+      session.availableItems.length < FULL_DISK_RESERVE;
+  }
+
+  function refillFullDisk(source) {
+    if (source.refilling || source.controller.signal.aborted || source.accountChanged || source.exhausted ||
+        !fullDiskNeedsItems(source)) return source.refilling;
+    source.error = '';
+    source.limited = false;
+    source.refilling = drawFullDiskBatch(source).catch(error => {
+      if (!source.controller.signal.aborted) source.error = String(error?.message || error);
+    }).finally(() => {
+      source.refilling = null;
+      if (!source.controller.signal.aborted) refreshFullDiskView(source);
+    });
+    refreshFullDiskView(source);
+    return source.refilling;
+  }
+
+  async function drawFullDiskBatch(source) {
+    const { signal } = source.controller;
+    const { preferenceState } = await source.ready;
+    if (signal.aborted) return;
+    const allowed = item => createPlayablePredicate(new Set(), source.filters,
+      fullDiskSession(source)?.preferenceState || preferenceState, { trackSeen: false })(item);
+    await confirmFullDiskAccount(source);
+    if (source.filters.favoritesOnly) {
+      if (!source.favoriteItems) {
+        const records = await preferenceStore.listVideoPreferences(source.accountId);
+        source.favoriteItems = await loadFullDiskFavorites(source, records, allowed);
+      }
+      if (signal.aborted) return;
+      source.count ??= source.favoriteItems.length;
+      while (source.favoriteItems.length && fullDiskNeedsItems(source)) {
+        acceptFullDiskItem(source, source.favoriteItems.pop(), allowed);
+      }
+      source.exhausted = !source.favoriteItems.length;
       return;
     }
 
-    updateFullDiskMetrics({
-      directoriesVisited: task.directoriesVisited,
-      recordsScanned: task.recordsScanned,
-      matchedVideos: task.matchedVideos,
-      sampleSize: task.reservoir && task.reservoir.items ? task.reservoir.items.length : 0
-    });
-    const sampleCount = task.reservoir && Array.isArray(task.reservoir.items)
-      ? task.reservoir.items.length : 0;
-    const isRunningHere = Boolean(fullDiskActivePromise && task.status === 'running' && task.taskId === fullDiskTaskId);
-    fullDiskPauseButton.disabled = !isRunningHere;
-    fullDiskStartButton.disabled = isRunningHere || task.status === 'running';
-    fullDiskStartButton.textContent = ['paused', 'complete', 'incomplete'].includes(task.status)
-      ? '重新扫描全盘' : '开始全盘扫描';
-    fullDiskBackgroundButton.disabled = !isRunningHere;
-    fullDiskResumeButton.hidden = task.status !== 'paused' ||
-      Boolean(active?.fullDiskSource && active.fullDiskSource.taskId !== task.taskId);
-    fullDiskPlayButton.hidden = sampleCount === 0 || !['running', 'paused', 'complete'].includes(task.status) || Boolean(active) || opening;
-    fullDiskPlayButton.textContent = task.status === 'complete' ? '播放全盘随机结果' : '边扫边播（仅已扫描范围）';    fullDiskProgressBar.classList.toggle('is-active', task.status === 'running');
-    fullDiskBadge.hidden = !isRunningHere && task.status !== 'running';
-    if (task.status === 'running') {
-      fullDiskBadge.textContent = '● 全盘扫描中 · ' + formatFullDiskCount(task.matchedVideos) + ' 个视频';
-      fullDiskStatus.textContent = isRunningHere
-        ? '全盘扫描正在运行。可以收起窗口，扫描会继续在后台执行。'
-        : '检测到同一账号已有扫描任务正在运行。为避免重复读取，请勿同时启动第二个任务。';
-      fullDiskWarning.hidden = !note;
-      fullDiskWarning.textContent = note;
-    } else if (task.status === 'paused') {
-      fullDiskStatus.textContent = '上次扫描已暂停，已保存到最近一次成功提交的分页。继续扫描会沿用原来的筛选条件。';
-      fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = task.pauseReason || '可以从已保存的分页位置继续。';
-    } else if (task.status === 'complete') {
-      fullDiskStatus.textContent = '全盘扫描完成。共检查 ' + formatFullDiskCount(task.recordsScanned) +
-        ' 条目录记录，匹配 ' + formatFullDiskCount(task.matchedVideos) +
-        ' 个可播放视频，已均匀抽取 ' + sampleCount + ' 个随机候选。';
-      fullDiskWarning.hidden = sampleCount > 0;
-      fullDiskWarning.textContent = sampleCount > 0 ? '' : '没有找到符合条件且可播放的视频，请调整筛选条件后重新扫描。';
-    } else {
-      fullDiskStatus.textContent = '本次扫描未能确认全盘数据完整性，因此不会将部分结果作为全盘随机候选池。';
-      fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = task.lastError || task.pauseReason ||
-        (task.truncated ? '已触及20,000个目录或递归深度20层的保护上限，本次结果不完整。请调整范围或重新扫描。' :
-          task.integrityOk === false ? '发现重复或无法识别的分页记录，无法确认全盘结果完整性。请重新扫描。' :
-            '请重新开始全盘扫描。');
+    if (!source.range) {
+      const { count } = await fullDiskAdapter.readGlobalVideo(0, { signal });
+      await confirmFullDiskAccount(source);
+      // The first row only supplies the count. It is eligible at its normal random position.
+      source.range = createFullDiskRange(count);
+      source.count = count;
+      refreshFullDiskView(source);
     }
-    if (note && task.status !== 'running') {
-      fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = note;
-    }
-  }
 
-  function createFullDiskTaskId() {
-    try {
-      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-        return 'full-disk-' + crypto.randomUUID();
+    let attempts = 0;
+    async function draw() {
+      while (!signal.aborted && !source.error && attempts < FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source)) {
+        const range = source.range;
+        const offset = takeRandomFullDiskOffset(range);
+        if (offset === null) break;
+        attempts++;
+        try {
+          const result = await fullDiskAdapter.readGlobalVideo(offset, { signal });
+          const item = result.item ? await resolveFullDiskItemPath(source, result.item) : null;
+          await confirmFullDiskAccount(source);
+          if (signal.aborted || source.range !== range) continue;
+          if (result.count !== range.count) {
+            source.count = result.count;
+            source.range = createFullDiskRange(result.count);
+            refreshFullDiskView(source);
+            continue;
+          }
+          acceptFullDiskItem(source, item, allowed);
+        } catch (error) {
+          if (signal.aborted) return;
+          range.retry.push(offset);
+          source.error = String(error?.message || error);
+        }
       }
-    } catch { /* 使用本地随机任务标识。 */ }
-    return 'full-disk-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+    }
+    await Promise.all([draw(), draw()]);
+    source.exhausted = !source.range.remaining && !source.range.retry.length;
+    source.limited = attempts >= FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source);
   }
 
-  async function refreshFullDiskTask(accountId) {
-    const tasks = await fullDiskStore.listTasks(accountId);
-    let task = tasks[0] || null;
-    if (task && task.status === 'running' && !fullDiskActivePromise) {
-      const recovered = await fullDiskStore.recoverInterruptedTask(task.taskId, accountId, 30000);
-      if (recovered) task = await fullDiskStore.getTask(task.taskId);
-    }
-    return task;
+  function refillSessionFullDisk(session) {
+    const source = session.fullDiskSource;
+    if (!source || session.closed || session.favoriteFolderPlayback?.active) return;
+    updateFullDiskPlayer(source);
+    void refillFullDisk(source);
+  }
+
+  function queueFullDiskSwap(session, cell) {
+    const source = session.fullDiskSource;
+    if (!source || source.exhausted || source.accountChanged || session.favoriteFolderPlayback?.active) return false;
+    source.pendingSwaps.set(cell, cell.generation);
+    if (session.fullDiskSource) refillSessionFullDisk(session);
+    return true;
+  }
+
+  function restartFullDiskRound(session, message) {
+    const previous = session.fullDiskSource;
+    previous.controller.abort();
+    const filters = session.filters;
+    const range = previous.filters.favoritesOnly || filters.favoritesOnly || previous.count === null
+      ? null : createFullDiskRange(previous.count);
+    session.fullDiskSource = createFullDiskSource(session.accountId, filters, Promise.resolve(session), range);
+    session.scan.scanId = session.fullDiskSource.taskId;
+    session.roundNumber++;
+    session.failedCount = 0;
+    session.failedPickcodes.clear();
+    session.cells.forEach(cell => { if (cell) cancelPendingSkip(cell); });
+    session.usedPickcodes = new Set(session.cells.filter(cell => cell?.item).map(cell => itemKey(cell.item)));
+    session.availableItems = [];
+    session.roundMessage = message || '已开始全盘新一轮';
+    if (session.fullDiskSource) refillSessionFullDisk(session);
   }
 
   function createQuickCollectionView() {
@@ -10464,14 +9323,22 @@ module.exports = Object.freeze({ createExplorerRunner });
     quickScopeButton.setAttribute('aria-pressed', String(!wholeDisk));
     fullDiskScopeButton.setAttribute('aria-pressed', String(wholeDisk));
     quickExploreControls.hidden = wholeDisk;
-    fullDiskScanControls.hidden = !wholeDisk;
+    fullDiskControls.hidden = !wholeDisk;
     quickCollectionView.scheduleOverview(0);
-    if (!wholeDisk) fullDiskAutoPlay = null;
+    if (!wholeDisk) {
+      cancelPreparedFullDisk();
+      return;
+    }
+    if (!active && fullDiskAccountId && !fullDiskOverlay.hidden) {
+      const filters = readFullDiskFilters();
+      if (!validateFilters(filters)) prepareFullDisk(filters);
+    }
+    renderFullDiskSource();
   }
 
   function closeExploreDialog() {
     exploreDialogRevision++;
-    fullDiskAutoPlay = null;
+    cancelPreparedFullDisk();
     quickCollectionView.reset();
     fullDiskOverlay.hidden = true;
     (active?.exploreScopeStatus || exploreLauncher).focus({ preventScroll: true });
@@ -10479,6 +9346,7 @@ module.exports = Object.freeze({ createExplorerRunner });
 
   async function openExploreDialog(scope = 'quick') {
     const revision = ++exploreDialogRevision;
+    fullDiskAccountId = null;
     fullDiskOverlay.hidden = false;
     quickCollectionView.reset();
     exploreScopePicker.hidden = Boolean(active);
@@ -10487,35 +9355,24 @@ module.exports = Object.freeze({ createExplorerRunner });
     quickExploreStatus.textContent = '正在读取探索设置…';
     quickExploreStart.disabled = true;
     fullDiskStartButton.disabled = true;
-    fullDiskStatus.textContent = '正在读取扫描进度…';
-    fullDiskWarning.hidden = true;
     fullDiskCloseButton.focus({ preventScroll: true });
     try {
       const accountId = await resolveAccountId();
       if (revision !== exploreDialogRevision) return;
       if (active && active.accountId !== accountId) throw new Error('当前115账号已切换，请退出播放器后重新开始探索。');
-      fullDiskAccountId = accountId;
       const settings = await preferenceStore.getPlayerSettings(accountId);
       if (revision !== exploreDialogRevision) return;
+      fullDiskAccountId = accountId;
       writeFullDiskFilters(settings.filters);
       quickCollectionView.setAccount(accountId);
       quickExploreStatus.textContent = '';
       quickExploreStart.disabled = false;
-      const task = await refreshFullDiskTask(accountId);
-      if (revision !== exploreDialogRevision) return;
-      renderFullDiskTask(task);
-      if (task && task.status === 'running' && !fullDiskActivePromise) {
-        const ageMs = Math.max(0, Date.now() - Number(task.updatedAt || Date.now()));
-        const remainingMs = Math.max(0, 30000 - ageMs);
-        fullDiskStatus.textContent = '检测到上次页面可能仍在执行扫描。为避免重复任务，需等待约 ' +
-          Math.ceil(remainingMs / 1000) + ' 秒后再恢复，或稍后点击“刷新状态”。';
-      }
+      selectExploreScope(exploreScope);
     } catch (error) {
       if (revision !== exploreDialogRevision) return;
-      quickExploreStatus.textContent = String(error && error.message || error);
-      renderFullDiskTask(null, '无法读取全盘扫描状态：' + String(error && error.message || error));
+      quickExploreStatus.textContent = String(error?.message || error);
+      fullDiskWarning.textContent = quickExploreStatus.textContent;
       fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = '请确认115已登录，并刷新网盘页面后重试。';
     }
   }
 
@@ -10547,250 +9404,54 @@ module.exports = Object.freeze({ createExplorerRunner });
     }
   }
 
-  function runFullDiskScan(resume = false, options = {}) {
-    if (fullDiskActivePromise) return fullDiskActivePromise;
-    const controller = new AbortController();
-    fullDiskController = controller;
-    fullDiskActivePromise = executeFullDiskScan(resume, options, controller);
-    return fullDiskActivePromise;
-  }
-
-  async function executeFullDiskScan(resume, { session, message, autoPlayRevision } = {}, controller) {
-    try {
-      const accountId = await resolveAccountId(controller.signal);
-      const expectedAccountId = session?.accountId || fullDiskAccountId;
-      if (expectedAccountId && expectedAccountId !== accountId) {
-        throw Object.assign(new Error('当前115账号已切换，请重新打开全盘随机探索，避免跨账号混用数据。'), {
-          code: 'N115_ACCOUNT_CHANGED'
-        });
-      }
-      fullDiskAccountId = accountId;
-      if (session?.closed || controller.signal.aborted) return;
-      const latest = await refreshFullDiskTask(accountId);
-      if (latest?.status === 'running') throw new Error('当前账号已有全盘扫描正在运行，请稍后继续。');
-
-      let task = resume ? fullDiskLatestTask : null;
-      let filters;
-      if (resume) {
-        if (!task || !task.taskId) throw new Error('没有可继续的全盘扫描任务');
-        task = await fullDiskStore.getTask(task.taskId);
-        if (task && task.status === 'running') {
-          const recovered = await fullDiskStore.recoverInterruptedTask(task.taskId, accountId, 30000);
-          if (!recovered) throw new Error('上次扫描任务仍在运行，请稍后刷新状态再恢复');
-          task = await fullDiskStore.getTask(task.taskId);
-        }
-        if (!task || task.status !== 'paused') throw new Error('只有已暂停的全盘扫描任务可以继续');
-        filters = normalizeFilters(task.filters || readFullDiskFilters());
-        writeFullDiskFilters(filters);
-      } else {
-        filters = normalizeFilters(session?.filters || readFullDiskFilters());
-        const validation = validateFilters(filters);
-        if (validation) throw new Error(validation);
-      }
-
-      let preferenceSnapshot;
-      if (resume && task && task.preferenceSnapshot) {
-        preferenceSnapshot = task.preferenceSnapshot;
-      } else {
-        const preferenceRecords = await preferenceStore.listVideoPreferences(accountId);
-        preferenceSnapshot = {
-          favoritePickcodes: preferenceRecords.filter(item => item.favorite).map(item => String(item.pickcode || '').toLowerCase()),
-          excludedPickcodes: preferenceRecords.filter(item => item.excluded).map(item => String(item.pickcode || '').toLowerCase())
-        };
-      }
-      const preferenceState = {
-        favoritePickcodes: new Set(preferenceSnapshot.favoritePickcodes || []),
-        excludedPickcodes: new Set(preferenceSnapshot.excludedPickcodes || [])
-      };
-      const resumedSampleKeys = resume && task && task.reservoir && Array.isArray(task.reservoir.items)
-        ? new Set(task.reservoir.items.map(item => String(item.pickcode || '').toLowerCase()))
-        : new Set();
-      const matchesVideo = createPlayablePredicate(resumedSampleKeys, filters, preferenceState);
-      const taskId = resume ? task.taskId : createFullDiskTaskId();
-      if (autoPlayRevision === exploreDialogRevision && !active && !fullDiskOverlay.hidden && exploreScope === 'full-disk') {
-        const settings = await preferenceStore.getPlayerSettings(accountId);
-        if (!resume) await preferenceStore.savePlayerSettings(accountId, { filters });
-        if (autoPlayRevision === exploreDialogRevision && exploreScope === 'full-disk') {
-          fullDiskAutoPlay = { taskId, revision: autoPlayRevision, minimum: Number(settings.layoutCount) || 4 };
-        }
-      }
-      if (session?.closed || controller.signal.aborted) return;
-      fullDiskTaskId = taskId;
-      fullDiskLastError = null;
-      fullDiskStartButton.disabled = true;
-      fullDiskResumeButton.hidden = true;
-      fullDiskPlayButton.hidden = true;
-      fullDiskPauseButton.disabled = false;
-      fullDiskBackgroundButton.disabled = false;
-      fullDiskWarning.hidden = true;
-      fullDiskBadge.hidden = false;
-      fullDiskBadge.textContent = '● 全盘扫描准备中…';
-
-      const config = {
-        taskId,
-        accountId,
-        filters,
-        matchesVideo,
-        preferenceSnapshot,
-        signal: controller.signal,
-        beforePage: async (_page, _checkpoint, signal) => {
-          const currentAccountId = await resolveAccountId(signal);
-          if (currentAccountId !== accountId) {
-            throw Object.assign(new Error('当前115账号已切换，已暂停扫描，未提交其他账号的分页数据。'), {
-              code: 'N115_ACCOUNT_CHANGED'
-            });
-          }
-        },
-        onProgress: update => {
-          if (session && update.phase === 'scan-started' && !session.closed) {
-            session.fullDiskSource = { taskId, items: [], sampleSeen: 0, isComplete: false };
-            session.scan = { ...session.scan, scanId: taskId, status: 'scanning', complete: false };
-            session.roundNumber++;
-            session.failedCount = 0;
-            session.failedPickcodes.clear();
-            session.cells.forEach(cell => { if (cell) cancelPendingSkip(cell); });
-            session.usedPickcodes = new Set(session.cells.filter(cell => cell?.item).map(cell => itemKey(cell.item)));
-            session.availableItems = [];
-            session.candidateTotal = session.roundPoolSize = 0;
-            session.roundRefreshing = false;
-            session.roundMessage = (message ? message + ' · ' : '') + '正在扫描全盘并补充新候选';
-            updateRoundControls(session);
-          }
-          renderFullDiskProgress(update);
-        }
-      };
-      const runPromise = resume
-        ? fullDiskRunner.resumeScan(config)
-        : fullDiskRunner.startScan(Object.assign({}, config, {
-          rootCid: '0',
-          recursive: true,
-          maxDepth: 20,
-          maxDirectories: 20000,
-          sampleLimit: MAX_CANDIDATES
-        }));
-      const result = await runPromise;
-      fullDiskLastError = result.error && result.error.message ? result.error.message : '';
-      const savedTask = await fullDiskStore.getTask(taskId);
-      if (savedTask && savedTask.reservoir && Array.isArray(savedTask.reservoir.items)) {
-        syncLiveFullDiskCandidates({
-          taskId, sample: savedTask.reservoir.items, sampleSeen: savedTask.reservoir.seen,
-          matchedVideos: savedTask.matchedVideos, status: savedTask.status
-        }, savedTask.status === 'complete');
-        if (savedTask.status === 'complete') maybeAutoPlayFullDisk(taskId, savedTask.reservoir.items.length, true);
-      }
-      renderFullDiskTask(savedTask, fullDiskLastError);
-    } catch (error) {
-      fullDiskLastError = String(error && error.message || error);
-      if (session && !session.closed) {
-        session.roundMessage = '全盘探索未能启动：' + fullDiskLastError;
-        updateRoundControls(session);
-      }
-      fullDiskStatus.textContent = '全盘扫描未能启动或恢复：' + fullDiskLastError;
+  async function startFullDiskExplore() {
+    if (active?.fullDiskSource) {
+      refillSessionFullDisk(active);
+      return;
+    }
+    if (active || opening || !fullDiskAccountId) return;
+    const filters = readFullDiskFilters();
+    const validation = validateFilters(filters);
+    if (validation) {
+      fullDiskWarning.textContent = validation;
       fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = '已保留之前成功保存的扫描进度；可以刷新状态后重试。';
-      fullDiskStartButton.disabled = false;
-    } finally {
-      fullDiskController = null;
-      fullDiskActivePromise = null;
-      if (fullDiskLatestTask) renderFullDiskTask(fullDiskLatestTask, fullDiskLastError || '');
-      else {
-        fullDiskPauseButton.disabled = true;
-        fullDiskBackgroundButton.disabled = true;
-        fullDiskStartButton.disabled = false;
-        fullDiskBadge.hidden = true;
-      }
+      return;
     }
-  }
-
-  async function buildFullDiskPlaybackData(task) {
-    if (!task || !['running', 'paused', 'complete'].includes(task.status) ||
-        !task.reservoir || !Array.isArray(task.reservoir.items)) {
-      throw new Error('尚无可播放的已提交扫描候选，请先开始扫描');
-    }
-    const completed = task.status === 'complete';    const accountId = await resolveAccountId();
-    if (String(task.accountId) !== accountId) {
-      throw Object.assign(new Error('当前115账号与扫描任务所属账号不一致，已阻止跨账号播放。'), {
-        code: 'N115_ACCOUNT_CHANGED'
-      });
-    }
-    const settings = await preferenceStore.getPlayerSettings(accountId);
-    const preferenceRecords = await preferenceStore.listVideoPreferences(accountId);
-    const filters = normalizeFilters(task.filters || settings.filters);
-    const currentFavorites = preferenceRecords.filter(item => item.favorite).map(item => String(item.pickcode || '').toLowerCase());
-    const currentExclusions = preferenceRecords.filter(item => item.excluded).map(item => String(item.pickcode || '').toLowerCase());
-    const preferenceState = {
-      favoritePickcodes: new Set(currentFavorites),
-      excludedPickcodes: new Set(currentExclusions)
-    };
-    const predicate = createPlayablePredicate(new Set(), filters, preferenceState, { trackSeen: false });
-    const items = task.reservoir.items.filter(predicate).slice(0, MAX_CANDIDATES);
-    if (!items.length) throw new Error('尚无符合筛选条件的已扫描视频，请继续扫描或调整筛选条件。');    const profiles = await preferenceStore.listProfiles(accountId);
-    const recentDirectories = await preferenceStore.listRecentDirectories(accountId, 5);
-    const matchedVideos = Number(task.matchedVideos || task.reservoir.seen || 0);
-    const scan = {
-      scanId: task.taskId,
-      accountId,
-      rootCid: '0',
-      recursive: true,
-      rootPath: '/网盘根目录',
-      status: completed ? 'complete' : task.status === 'running' ? 'scanning' : task.status,
-      complete: completed,      stats: { videos: matchedVideos }
-    };
-    return {
-      source: 'full-disk',
-      fullDiskSource: {
-        taskId: task.taskId,
-        sampleSeen: Number(task.reservoir.seen || 0),
-        isComplete: completed,
-        items: items.slice()      },
-      items,
-      total: matchedVideos,
-      scan,
-      accountId,
-      preferenceState,
-      preferenceRecords,
-      profiles,
-      settings,
-      recentDirectories,
-      rootPath: '/网盘根目录',
-      filters,
-      statusLabel: completed ? '全盘扫描完成' : '扫描中临时候选（仅已扫描范围）',
-      indexedVideoCount: matchedVideos,
-      isComplete: completed    };
-  }
-
-  function maybeAutoPlayFullDisk(taskId, count, complete = false) {
-    const plan = fullDiskAutoPlay;
-    if (!plan || plan.taskId !== taskId || plan.revision !== exploreDialogRevision ||
-        fullDiskOverlay.hidden || exploreScope !== 'full-disk' || active || opening || fullDiskOpening) return;
-    if (count >= plan.minimum || (complete && count > 0)) void playFullDiskResult(taskId, plan);
-  }
-
-  async function playFullDiskResult(taskId = fullDiskLatestTask?.taskId || fullDiskTaskId, autoPlay = null) {
-    if (active || opening || fullDiskOpening || !taskId) return;
     const revision = exploreDialogRevision;
-    fullDiskOpening = true;
+    const source = prepareFullDisk(filters);
+    if (source.starting) return;
+    source.starting = true;
+    fullDiskStartButton.disabled = true;
     try {
-      const task = await fullDiskStore.getTask(taskId);
-      const indexed = await buildFullDiskPlaybackData(task);
-      if (revision !== exploreDialogRevision || exploreScope !== 'full-disk' ||
-          (autoPlay && autoPlay !== fullDiskAutoPlay)) return;
+      const preferences = await source.ready;
+      await confirmFullDiskAccount(source);
+      if (revision !== exploreDialogRevision || preparedFullDisk !== source ||
+          exploreScope !== 'full-disk' || active || opening) return;
+      preparedFullDisk = null;
       closeExploreDialog();
-      await openPlayer(indexed);
-      // Pages may have committed while preferences and the player were loading.
-      const latest = await fullDiskStore.getTask(taskId);
-      if (latest?.reservoir) syncLiveFullDiskCandidates({
-        taskId, sample: latest.reservoir.items, sampleSeen: latest.reservoir.seen,
-        matchedVideos: latest.matchedVideos, status: latest.status
+      await openPlayer({
+        ...preferences,
+        source: 'full-disk',
+        fullDiskSource: source,
+        items: source.items,
+        total: source.count ?? 0,
+        scan: { scanId: source.taskId, accountId: source.accountId, rootCid: '0',
+          recursive: true, rootPath: '/网盘根目录' },
+        accountId: source.accountId,
+        filters: source.filters,
+        settings: { ...preferences.settings, filters: source.filters },
+        rootPath: '/网盘根目录'
+      });
+      if (!fullDiskSession(source)) source.controller.abort();
+      else void saveSessionSettings(active, { filters: source.filters }).catch(error => {
+        if (fullDiskSession(source)) setFilterMessage(active, '探索已开始，但筛选记忆保存失败：' + String(error?.message || error), true);
       });
     } catch (error) {
-      if (revision !== exploreDialogRevision) return;
-      fullDiskStatus.textContent = '无法打开全盘随机候选：' + String(error && error.message || error);
-      fullDiskOverlay.hidden = false;
+      if (revision !== exploreDialogRevision || preparedFullDisk !== source) return;
+      cancelPreparedFullDisk();
+      renderFullDiskSource();
+      fullDiskWarning.textContent = String(error?.message || error);
       fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = '请确认已发现可播放视频，且当前115账号与扫描任务一致。';
-    } finally {
-      fullDiskOpening = false;
     }
   }
 
@@ -10799,6 +9460,8 @@ module.exports = Object.freeze({ createExplorerRunner });
     if (!session) return;
     if (session.focusSlotId) restoreFocusedCell(session, true);
     session.closed = true;
+    session.fullDiskSource?.controller.abort();
+    if (!fullDiskOverlay.hidden) closeExploreDialog();
     clearTimeout(session.toolbarHideTimer);
     session.toolbarHideTimer = null;
     clearTimeout(session.favoriteToastTimer);
@@ -10835,8 +9498,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       const bar = element('div', 'bar toolbar');
       bar.id = 'topbar';
       const fullIndexSummary = indexed.source === 'full-disk'
-        ? (indexed.isComplete ? '数据来源：已完成全盘随机扫描' : '数据来源：扫描中临时候选（仅已扫描范围）') +
-          ' · 已扫描匹配视频 ' + indexed.indexedVideoCount + ' 条 · 当前随机候选池 ' + items.length + ' 条 · 默认静音'        : '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
+        ? '从115视频列表随机抽取 · 第一格就绪后播放 · 默认静音'
+        : '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
           (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
           (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
           ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
@@ -11221,7 +9884,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       session.exploreScopeStatus.setAttribute('aria-live', 'polite');
       if (indexed.fullDiskSource) {
         session.exploreScopeStatus.type = 'button';
-        session.exploreScopeStatus.title = '查看全盘扫描进度';
+        session.exploreScopeStatus.title = '查看全盘抽取状态';
         session.exploreScopeStatus.onclick = () => { void openExploreDialog('full-disk'); };
       }
       session.description = element('div', 'description');
@@ -11248,6 +9911,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
+      if (session.fullDiskSource) session.fullDiskSource.items = [];
       host.classList.add('is-playing');
       globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
       const isToolbarRevealZone = event => event.clientY - panel.getBoundingClientRect().top < TOOLBAR_REVEAL_ZONE_PX;
@@ -11287,7 +9951,9 @@ module.exports = Object.freeze({ createExplorerRunner });
       panel.focus({ preventScroll: true });
       // 默认隐藏顶部工具栏；只有顶部触发区、工具栏悬停、触屏点击或键盘焦点才唤出。
     } catch (error) {
-      if (error && error.code === 'N115_INDEX_NOT_FOUND') {
+      if (preloaded?.fullDiskSource) {
+        alert('无法启动全盘探索：\n' + String(error?.message || error));
+      } else if (error && error.code === 'N115_INDEX_NOT_FOUND') {
         const openIndexManager = window.confirm(
           '当前目录还没有建立目录索引。\n\n建议先进行一次目录扫描；索引会保存在本地，扫描过程中已保存的视频即可用于播放，不需要等待全部扫描完成。\n\n是否现在打开“目录索引管理”？'
         );
@@ -11500,8 +10166,8 @@ module.exports = Object.freeze({ createExplorerRunner });
     .explore-scope-card[aria-pressed="true"]{border-color:#70c7ac;background:#183632}
     .explore-scope-card span{font-size:12px;line-height:1.5;color:#b8c8da}
     .explore-scope-status{position:absolute;bottom:8px;left:8px;z-index:12;max-width:calc(100% - 16px);padding:5px 8px;border:1px solid #43586e;border-radius:6px;background:#0e1924e8;color:#dceaff;font:inherit;font-size:12px}
-    .explore-scan-controls,.explore-quick-controls{display:grid;gap:12px}
-    .explore-scope-picker[hidden],.explore-scan-controls[hidden],.explore-quick-controls[hidden],.full-disk-fields[hidden]{display:none!important}
+    .explore-full-disk-controls,.explore-quick-controls{display:grid;gap:12px}
+    .explore-scope-picker[hidden],.explore-full-disk-controls[hidden],.explore-quick-controls[hidden],.full-disk-fields[hidden]{display:none!important}
     .explore-quick-controls .full-disk-status:empty{display:none}
     .collection-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px;border:1px solid #35485d;border-radius:8px;background:#111d29}
     .collection-totals{display:grid;gap:4px;font-size:13px;line-height:1.5}
@@ -11519,9 +10185,6 @@ module.exports = Object.freeze({ createExplorerRunner });
     .collection-row-status{flex:none;padding:3px 6px;border-radius:4px;background:#263746;color:#c7d5e5;font-size:11px}
     .collection-row-status.is-eligible{background:#193c35;color:#b8efdb}
     @media(max-width:560px){.collection-filters{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.collection-filters input{grid-column:1/-1}.collection-row{align-items:flex-start}}
-    :host(.is-playing) .full-disk-badge{display:none!important}
-    .full-disk-badge{pointer-events:auto;position:absolute;top:18px;right:20px;z-index:2147483647;max-width:min(360px,calc(100vw - 32px));padding:10px 14px;border:1px solid #54c49a;border-radius:999px;background:linear-gradient(135deg,#123d31,#112a38);color:#c9ffe7;font-size:12px;font-weight:800;box-shadow:0 6px 24px #0009;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-    .full-disk-badge[hidden]{display:none!important}
     .full-disk-overlay{pointer-events:auto;position:absolute;inset:0;z-index:180;display:flex;align-items:center;justify-content:center;padding:18px;background:#05080de8}
     .full-disk-overlay[hidden]{display:none!important}
     .full-disk-dialog{width:min(760px,96vw);max-height:92vh;overflow:auto;display:flex;flex-direction:column;gap:15px;padding:22px;border:1px solid #36546a;border-radius:16px;background:linear-gradient(145deg,#111b27,#101721);box-shadow:0 24px 90px #000c;color:#edf5ff}
@@ -11539,7 +10202,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     .full-disk-primary{border-color:#3d9b79;background:linear-gradient(135deg,#17694e,#1c6a78);color:#f0fff8}
     .full-disk-danger{border-color:#8b4b54;background:#4b2831;color:#ffe6e9}
     .full-disk-action:disabled{opacity:.4;cursor:not-allowed}
-    .full-disk-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+    .full-disk-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
     .full-disk-metric{min-width:0;padding:11px;border:1px solid #2c3e50;border-radius:9px;background:#0b131d}
     .full-disk-metric strong{display:block;overflow:hidden;text-overflow:ellipsis;font-size:19px;font-variant-numeric:tabular-nums;color:#f2f7ff}
     .full-disk-metric span{font-size:11px;color:#90a4b9}
@@ -11550,7 +10213,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     .full-disk-status{min-height:44px;white-space:pre-line;overflow-wrap:anywhere;font-size:13px;line-height:1.7;color:#d6e4f2}
     .full-disk-warning{padding:10px 12px;border:1px solid #795e38;border-radius:8px;background:#352918;color:#ffdda3;font-size:12px;line-height:1.65;white-space:pre-line}
     .full-disk-warning[hidden]{display:none!important}
-    @media(max-width:560px){.full-disk-dialog{padding:15px}.full-disk-fields,.explore-scope-picker{grid-template-columns:1fr}.full-disk-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.full-disk-badge{top:8px;right:8px;max-width:calc(100vw - 16px);font-size:11px;padding:8px 10px}}
+    @media(max-width:560px){.full-disk-dialog{padding:15px}.full-disk-fields,.explore-scope-picker{grid-template-columns:1fr}.full-disk-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(hover:none){
       .cell-tools{opacity:1;visibility:visible}
       .main-screen-actions{opacity:0;visibility:hidden;pointer-events:none}
@@ -11567,12 +10230,6 @@ module.exports = Object.freeze({ createExplorerRunner });
   exploreLauncher.title = '选择快速探索或全盘探索';
   exploreLauncher.onclick = () => { void openExploreDialog(); };
   entryActions.append(launcher, exploreLauncher);
-
-  const fullDiskBadge = element('button', 'full-disk-badge', '● 全盘扫描中');
-  fullDiskBadge.type = 'button';
-  fullDiskBadge.hidden = true;
-  fullDiskBadge.title = '点击查看全盘扫描进度';
-  fullDiskBadge.onclick = () => { void openExploreDialog('full-disk'); };
 
   const fullDiskOverlay = element('section', 'full-disk-overlay');
   fullDiskOverlay.hidden = true;
@@ -11601,10 +10258,10 @@ module.exports = Object.freeze({ createExplorerRunner });
     return button;
   }
   const quickScopeButton = createScopeButton('quick', '快速探索', '已收录的视频', '从已收录的视频中直接抽取，适合日常使用。');
-  const fullDiskScopeButton = createScopeButton('full-disk', '全盘探索', '整个 115 网盘', '发现尚未收录的视频，边扫描边播放。');
+  const fullDiskScopeButton = createScopeButton('full-disk', '全盘探索', '整个 115 网盘', '从 115 的视频列表直接随机抽取，发现尚未收录的视频。');
   const exploreHint = element('div', 'full-disk-hint', '两种范围共用筛选、随机换片、锁定、本轮去重和收藏。');
   const fullDiskHint = element('div', 'full-disk-hint',
-    '从网盘根目录开始扫描。候选够填满当前布局时自动开始播放，并继续补充。扫描上限为 20,000 个目录及 20 层深度，触及上限会显示扫描未完成。');
+    '全盘抽取可能需要十几秒。第一格就绪即开始播放，其他格子和换片候选会在后台陆续补齐。');
 
   const fullDiskFields = element('div', 'full-disk-fields');
   function createFullDiskField(labelText, input) {
@@ -11651,49 +10308,30 @@ module.exports = Object.freeze({ createExplorerRunner });
   fullDiskFields.append(fullDiskFavoritesLabel);
 
   const fullDiskActions = element('div', 'full-disk-actions');
-  const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary', '开始全盘扫描');
+  const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary', '开始全盘探索');
   fullDiskStartButton.type = 'button';
-  const fullDiskResumeButton = element('button', 'full-disk-action full-disk-primary', '继续上次扫描');
-  fullDiskResumeButton.type = 'button';
-  fullDiskResumeButton.hidden = true;
-  const fullDiskPauseButton = element('button', 'full-disk-action full-disk-danger', '暂停扫描');
-  fullDiskPauseButton.type = 'button';
-  fullDiskPauseButton.disabled = true;
-  const fullDiskBackgroundButton = element('button', 'full-disk-action', '后台继续扫描');
-  fullDiskBackgroundButton.type = 'button';
-  fullDiskBackgroundButton.disabled = true;
-  const fullDiskRefreshButton = element('button', 'full-disk-action', '刷新状态');
-  fullDiskRefreshButton.type = 'button';
-  const fullDiskPlayButton = element('button', 'full-disk-action full-disk-primary', '使用全盘随机结果播放');
-  fullDiskPlayButton.type = 'button';
-  fullDiskPlayButton.hidden = true;
-  fullDiskActions.append(
-    fullDiskStartButton, fullDiskResumeButton, fullDiskPauseButton,
-    fullDiskBackgroundButton, fullDiskRefreshButton, fullDiskPlayButton
-  );
+  fullDiskStartButton.onclick = () => { void startFullDiskExplore(); };
+  fullDiskActions.append(fullDiskStartButton);
 
   const fullDiskMetrics = element('div', 'full-disk-metrics');
   const fullDiskMetricValues = {
-    directories: element('strong', '', '0'),
-    records: element('strong', '', '0'),
-    videos: element('strong', '', '0'),
+    videos: element('strong', '', '—'),
+    videoLabel: element('span', '', '115 视频范围'),
     samples: element('strong', '', '0')
   };
-  [
-    ['directories', '已访问目录'],
-    ['records', '已检查记录'],
-    ['videos', '匹配视频'],
-    ['samples', '随机候选池']
-  ].forEach(([key, label]) => {
+  for (const [value, label] of [
+    [fullDiskMetricValues.videos, fullDiskMetricValues.videoLabel],
+    [fullDiskMetricValues.samples, element('span', '', '待播候选')]
+  ]) {
     const metric = element('div', 'full-disk-metric');
-    metric.append(fullDiskMetricValues[key], element('span', '', label));
+    metric.append(value, label);
     fullDiskMetrics.append(metric);
-  });
+  }
 
   const fullDiskProgressTrack = element('div', 'full-disk-track');
   const fullDiskProgressBar = element('div', 'full-disk-progress');
   fullDiskProgressTrack.append(fullDiskProgressBar);
-  const fullDiskStatus = element('div', 'full-disk-status', '尚未开始扫描。');
+  const fullDiskStatus = element('div', 'full-disk-status');
   fullDiskStatus.setAttribute('role', 'status');
   fullDiskStatus.setAttribute('aria-live', 'polite');
   const fullDiskWarning = element('div', 'full-disk-warning');
@@ -11715,30 +10353,19 @@ module.exports = Object.freeze({ createExplorerRunner });
   quickExploreActions.append(quickExploreStart, manageCollection);
   const quickCollectionView = createQuickCollectionView();
   quickExploreControls.append(quickCollectionView.summary, quickExploreActions, quickExploreStatus);
-  fullDiskFields.addEventListener('input', () => quickCollectionView.scheduleOverview());
-  const fullDiskScanControls = element('div', 'explore-scan-controls');
-  fullDiskScanControls.append(fullDiskHint, fullDiskActions, fullDiskMetrics, fullDiskProgressTrack, fullDiskStatus, fullDiskWarning);
+  fullDiskFields.addEventListener('input', () => {
+    quickCollectionView.scheduleOverview();
+    if (exploreScope === 'full-disk' && !active) {
+      cancelPreparedFullDisk();
+      renderFullDiskSource();
+    }
+  });
+  const fullDiskControls = element('div', 'explore-full-disk-controls');
+  fullDiskControls.append(fullDiskHint, fullDiskActions, fullDiskMetrics, fullDiskProgressTrack, fullDiskStatus, fullDiskWarning);
   fullDiskDialog.append(fullDiskHeader, exploreScopePicker, exploreHint, fullDiskFields,
-    quickExploreControls, quickCollectionView.detail, fullDiskScanControls);
+    quickExploreControls, quickCollectionView.detail, fullDiskControls);
   fullDiskOverlay.append(fullDiskDialog);
   fullDiskCloseButton.onclick = closeExploreDialog;
-  fullDiskBackgroundButton.onclick = closeExploreDialog;
-  fullDiskStartButton.onclick = () => {
-    if (active?.fullDiskSource) void startNewRound(active);
-    else void runFullDiskScan(false, { autoPlayRevision: exploreDialogRevision });
-  };
-  fullDiskResumeButton.onclick = () => {
-    void runFullDiskScan(true, { session: active, autoPlayRevision: exploreDialogRevision });
-  };
-  fullDiskPauseButton.onclick = () => {
-    if (!fullDiskController) return;
-    fullDiskStatus.textContent = '正在暂停扫描并保存最近一次成功提交的分页…';
-    fullDiskController.abort();
-  };
-  fullDiskRefreshButton.onclick = () => { void openExploreDialog('full-disk'); };
-  fullDiskPlayButton.onclick = () => {
-    void playFullDiskResult(fullDiskActivePromise ? fullDiskTaskId : fullDiskLatestTask?.taskId);
-  };
   fullDiskOverlay.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -11749,7 +10376,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     if (event.target === fullDiskOverlay) closeExploreDialog();
   });
 
-  shadow.append(style, entryActions, fullDiskBadge, fullDiskOverlay);
+  shadow.append(style, entryActions, fullDiskOverlay);
   document.documentElement.append(host);
   globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
   const handleFullscreenChange = () => {
@@ -11766,7 +10393,7 @@ module.exports = Object.freeze({ createExplorerRunner });
   document.addEventListener('fullscreenchange', handleFullscreenChange);
   shadow.addEventListener('fullscreenchange', handleFullscreenChange);
   window.addEventListener('pagehide', () => {
-    if (fullDiskController) fullDiskController.abort();
+    cancelPreparedFullDisk();
     closePlayer();
   });
 })();

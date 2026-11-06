@@ -29,7 +29,7 @@ test('unified exploration upgrades the existing test channel', () => {
   assert.ok(explorer, 'parallel full-disk registration must remain');
   const source = read(explorer.source);
   const served = withUpdateUrls(source, explorer.id, baseUrl);
-  assert.equal(readMetadata(source).version, '1.8.2');
+  assert.equal(readMetadata(source).version, '1.8.3');
   assert.notEqual(explorer.id, stable.id);
   assert.notEqual(served.updateUrl, baseUrl + '/userscripts/115-multiview-indexed.meta.js');
   assert.notEqual(served.downloadUrl, baseUrl + '/userscripts/115-multiview-indexed.user.js');
@@ -45,7 +45,7 @@ test('unified exploration upgrades the existing test channel', () => {
   assert.match(source, /const API_ORIGIN = 'https:\/\/webapi\.115\.com';/);
   const marker = '// ==/UserScript==';
   const bodyOf = value => value.slice(value.indexOf(marker) + marker.length);
-  const snapshot = read('history/115-multiview-full-disk/1.8.2.user.js');
+  const snapshot = read('history/115-multiview-full-disk/1.8.3.user.js');
   assert.equal(normalizeEol(bodyOf(source)), normalizeEol(bodyOf(snapshot)), 'current source must match its immutable history snapshot');
   assert.equal(normalizeEol(read('userscripts/115-multiview-full-disk.meta.js')).trimEnd(), normalizeEol(served.header).trimEnd());
   assert.notEqual(readMetadata(source).name, readMetadata(read(stable.source)).name, 'parallel install must have a distinct Tampermonkey name');

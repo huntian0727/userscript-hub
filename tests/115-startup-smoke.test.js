@@ -38,7 +38,7 @@ function playerSessionFromRealSource(script, settings = {}) {
 
 function indexRequestFromRealSource(script) {
   const verifierStart = script.indexOf('(function boot115IndexVerifier()');
-  const verifierEnd = script.indexOf('/* N115_FULL_DISK_EXPLORER_BUNDLE_START */', verifierStart);
+  const verifierEnd = script.indexOf('/* global Hls, GM_xmlhttpRequest */', verifierStart);
   assert.ok(verifierStart >= 0 && verifierEnd > verifierStart, 'index manager source boundary exists');
   const verifier = script.slice(verifierStart, verifierEnd);
   const originDeclaration = (verifier.match(/^\s*const API_ORIGIN =[^;]+;/m) || [])[0] || '';
@@ -78,7 +78,7 @@ test('real index-manager request code uses a defined API origin and rejects unex
 });
 
 test('all restored constants and both independent host IDs exist in the exact release source', () => {
-  assert.match(current, /^\/\/ @version\s+1\.8\.2$/m);
+  assert.match(current, /^\/\/ @version\s+1\.8\.3$/m);
   assert.match(current, /const MAX_VIDEOS = 12;/);
   assert.match(current, /const DEFAULT_DUAL_SMALL_COUNT = 3;/);
   assert.match(current, /const API_ORIGIN = 'https:\/\/webapi\.115\.com';/);

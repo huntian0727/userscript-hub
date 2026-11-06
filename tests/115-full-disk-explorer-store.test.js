@@ -17,7 +17,7 @@ const {
 } = require('../experiments/full-disk-explorer-v0.1/explorer-idb-store');
 const { createExplorerRunner } = require('../experiments/full-disk-explorer-v0.1/explorer-runner');
 const userscriptSource = fs.readFileSync(
-  path.join(__dirname, '..', 'userscripts', '115-multiview-full-disk.user.js'), 'utf8'
+  path.join(__dirname, '..', 'history', '115-multiview-full-disk', '1.8.2.user.js'), 'utf8'
 ).replace(/\r\n/g, '\n');
 const adapterStart = userscriptSource.indexOf('(function expose115DataAdapter(');
 const adapterEnd = userscriptSource.indexOf('\n(function attach115IndexManager', adapterStart);
