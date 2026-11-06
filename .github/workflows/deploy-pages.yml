@@ -47,10 +47,19 @@ jobs:
           PAGES_BASE_URL: https://huntian0727.github.io/userscript-hub
         run: node scripts/build-pages.js --check-history
 
+      - name: Package Pages artifact
+        run: |
+          tar --dereference --hard-dereference --exclude='.[^/]*' \
+            --directory site --create --file "$RUNNER_TEMP/artifact.tar" .
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          path: ./site
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 9
 
   deploy:
     environment:
