@@ -43,8 +43,11 @@
     },
     {
       "id": "115-video-universe",
-      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.9）",
-      "description": "独立实验：HLS短预览采用自动码率并限制到预览窗口尺寸，显示当前清晰度；115官方播放页仍是完整播放入口。",       "source": "userscripts/115-video-universe.user.js",
-      "channel": "独立公开测试版 · v0.2.9（真实115视频播放待验收）",      "enabled": true
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.3.1）",
+      "description": "HOME真实账号试用候选：已发现星球/视频样本搜索、视频卫星分批换批、当前目录面包屑导航；115官方播放与可选HLS预览。真实账号验收待HOME登录态。",
+      "source": "userscripts/115-video-universe.user.js",
+      "channel": "独立公开测试版 · v0.3.1（HOME真实账号试用候选）",
+      "enabled": true
     }
-  ]}
+  ]
+}

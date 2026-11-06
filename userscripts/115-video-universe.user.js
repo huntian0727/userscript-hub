@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.9
-// @description  115独立3D视频宇宙：真实目录探索、115官方播放交接与自适应画质HLS短预览。
+// @version      0.3.1
+// @description  115独立3D视频宇宙：真实目录搜索、视频卫星换批、3D星球探索和115官方播放。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.9';
-  const DELIVERY = 'VU-029-01';
+  const VERSION = '0.3.1';
+  const DELIVERY = 'VU-031-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -306,9 +306,12 @@
   }
 
   // A video moon is a view-only projection of a scanned sample, never a directory node.
-  function orbitingVideoMoons(folder, timestamp, limit = VIDEO_MOON_LIMIT) {
+  function orbitingVideoMoons(folder, timestamp, limit = VIDEO_MOON_LIMIT, page = 0) {
     if (!folder || !Array.isArray(folder.sample)) return [];
-    const records = folder.sample.slice(0, limit);
+    const pageSize = Math.max(1, Math.floor(Number(limit) || VIDEO_MOON_LIMIT));
+    const pages = Math.max(1, Math.ceil(folder.sample.length / pageSize));
+    const safePage = ((Math.floor(Number(page) || 0) % pages) + pages) % pages;
+    const records = folder.sample.slice(safePage * pageSize, (safePage + 1) * pageSize);
     const count = records.length;
     if (!count) return [];
     return records.map((record, index) => {
@@ -324,6 +327,50 @@
         depth: folder.depth + 1, scanned: true, observedVideos: 0
       };
     });
+  }
+
+  // Search only discovered planet names and the bounded video samples held in memory.
+  // It deliberately does not claim to search unscanned folders or the entire 115 account.
+  function searchUniverse(nodes, query, limit = 12) {
+    const needle = String(query || '').trim().toLocaleLowerCase();
+    if (!needle || !(nodes instanceof Map)) return [];
+    const matches = [];
+    for (const node of nodes.values()) {
+      const folderName = String(node.name || '');
+      if (folderName.toLocaleLowerCase().includes(needle)) {
+        matches.push({ type: 'planet', id: node.id, name: folderName });
+      }
+      if (!node.scanned || !Array.isArray(node.sample)) continue;
+      for (const record of node.sample) {
+        const videoName = String(record && record.name || '');
+        if (videoName.toLocaleLowerCase().includes(needle)) {
+          matches.push({ type: 'video', id: record.id, parentId: node.id, name: videoName, record });
+        }
+      }
+    }
+    matches.sort((a, b) => {
+      const score = item => {
+        const name = item.name.toLocaleLowerCase();
+        return name === needle ? 0 : name.startsWith(needle) ? 1 : 2;
+      };
+      return score(a) - score(b) || (a.type === b.type ? 0 : a.type === 'planet' ? -1 : 1) ||
+        a.name.localeCompare(b.name);
+    });
+    return matches.slice(0, Math.max(1, Math.min(24, Math.floor(Number(limit) || 12))));
+  }
+
+  function folderPath(nodes, id) {
+    if (!(nodes instanceof Map)) return [];
+    const parts = [];
+    const visited = new Set();
+    let node = nodes.get(String(id));
+    while (node && !visited.has(String(node.id))) {
+      const key = String(node.id);
+      visited.add(key);
+      parts.push({ id: key, name: String(node.name || key) });
+      node = node.parentId == null ? null : nodes.get(String(node.parentId));
+    }
+    return parts.reverse();
   }
 
   function focusedParent(nodes, id) {
@@ -372,8 +419,24 @@
     '.orbit-neighbors button{text-align:left;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
     'background:#1b3055;border:1px solid #537aae66;color:#d5ecff;border-radius:9px;padding:8px;font-size:11px;}',
     '.orbit-neighbors button:hover{background:#294775}.orbit-status{font-size:11px;color:#9bb5d7;}',
-    '.moon-heading{display:flex;align-items:center;gap:9px;justify-content:space-between;}',
+    '.moon-heading{display:flex;align-items:center;gap:7px;justify-content:space-between;flex-wrap:wrap;}',
     '.moon-count{font-size:11px;color:#9fd5fc}.moon-switch{font-size:11px;padding:6px 10px;}',
+    '.universe-search{display:flex;flex-direction:column;gap:6px;}',
+    '.universe-search input{width:100%;border:1px solid #6689bd66;background:#0b1930;color:#e8f1ff;border-radius:9px;padding:10px 11px;font-size:12px;outline:none;}',
+    '.universe-search input:focus{border-color:#87c9ff;box-shadow:0 0 0 2px #5aa9ed22;}',
+    '.search-caption{font-size:10px;color:#819dc1;line-height:1.5;}',
+    '.search-results{display:flex;flex-direction:column;gap:4px;max-height:176px;overflow:auto;}',
+    '.search-results[hidden]{display:none!important}.search-result{display:flex;align-items:center;gap:8px;text-align:left;width:100%;',
+    '.folder-breadcrumbs{display:flex;align-items:center;gap:4px;min-height:25px;overflow-x:auto;white-space:nowrap;',
+    'scrollbar-width:thin;padding:2px 0;color:#8fa8ca;font-size:10px;}',
+    '.folder-breadcrumbs button{flex:none;border:0;background:transparent;color:#9ec8f1;padding:3px 4px;border-radius:5px;',
+    'font-size:10px;max-width:116px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.folder-breadcrumbs button:hover{background:#203858;color:#e4f2ff;}',
+    '.folder-breadcrumbs button[aria-current="location"]{color:#e4f2ff;font-weight:700;background:#1b3150;}',
+    '.folder-breadcrumbs .crumb-separator{color:#6682a9;flex:none;}',
+    'background:#152847;border:1px solid #587eb244;color:#dceaff;border-radius:8px;padding:8px 9px;font-size:11px;}',
+    '.search-result:hover{border-color:#80c8ff;background:#1d355d;}.search-result-kind{flex:none;color:#92bce9;font-size:9px;',
+    'background:#0b1930;border-radius:5px;padding:3px 5px;}.search-result-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.video-card[aria-pressed="true"]{border-color:#adf2ff;background:linear-gradient(160deg,#284677,#27245a);}',
     '.video-preview{background:linear-gradient(145deg,#233869,#141e3d);border:1px solid #7ab6ee66;',
     'border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:9px;}',
@@ -465,6 +528,12 @@
           '<div class="planet-orb"></div>',
           '<div class="planet-name" id="side-title">我的视频宇宙</div>',
           '<div class="info" id="side-summary">每个文件夹是一颗星球。先体验演示星图，再开始读取自己的115目录。</div>',
+          '<nav class="folder-breadcrumbs" id="folder-breadcrumbs" aria-label="当前目录路径"></nav>',
+          '<div class="universe-search">',
+            '<input id="universe-search" type="search" autocomplete="off" placeholder="搜索已发现的星球或视频样本" aria-label="搜索已发现的星球或视频样本" />',
+            '<div class="search-caption" id="search-caption">仅搜索已发现星球和每个目录最多16条视频样本，不代表全盘搜索。</div>',
+            '<div class="search-results" id="search-results" hidden></div>',
+          '</div>',
           '<div class="actions"><button class="btn primary" id="jump" type="button">⚡ 随机跃迁</button>',
           '<button class="btn" id="focus-planet" type="button">◎ 聚焦星球</button>',
            '<button class="btn" id="parent-planet" type="button">↶ 返回上级星球</button>',
@@ -476,6 +545,7 @@
           '<div class="orbit-status" id="orbit-status">点击一颗星球，展开它的星系</div>',
           '<div class="orbit-neighbors" id="orbit-neighbors"></div>',
           '<div class="moon-heading"><div class="title-sm">☄ 视频卫星</div>',
+            '<button class="btn moon-switch" id="shuffle-moons" type="button" title="切换当前已读取的视频样本">换一批</button>',
             '<button class="btn moon-switch" id="toggle-motion" type="button" aria-pressed="false" title="开启后才会读取真实视频流">短预览：关</button>',
             '<button class="btn moon-switch" id="toggle-moons" type="button" aria-pressed="true">隐藏卫星</button></div>',
           '<div class="moon-count" id="moon-count">选择一颗星球后即可查看视频卫星</div>',
@@ -512,11 +582,13 @@
     launch: $('#universe-launch'), shell: $('#universe-shell'), canvas: $('#universe-canvas'),
     scan: $('#scan'), pause: $('#pause'), demo: $('#demo'), close: $('#close'),
     cid: $('#start-cid'), jump: $('#jump'), folder: $('#open-folder'),
+    search: $('#universe-search'), searchCaption: $('#search-caption'), searchResults: $('#search-results'),
+    breadcrumbs: $('#folder-breadcrumbs'),
     list: $('#video-grid'), msg: $('#scan-message'), note: $('#source-note'),
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
     orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
     orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
-    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), motionToggle: $('#toggle-motion'),
+    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), moonShuffle: $('#shuffle-moons'), motionToggle: $('#toggle-motion'),
     motionDiagnostics: $('#motion-diagnostics'), motionDiagnosticText: $('#motion-diagnostic-text'),
     motionRetry: $('#retry-motion'), scanProgress: $('#scan-progress'),
     scanProgressLabel: $('#scan-progress-label'), scanProgressCount: $('#scan-progress-count'),
@@ -538,7 +610,7 @@
     connectionStatus: 'idle', progress: null,
     pointer: null, hoverId: null, projected: [], seed: 1,
     orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
-    videoProjected: [], moonsVisible: true, hoveredVideoId: null, motionEnabled: false
+    videoProjected: [], moonsVisible: true, moonPage: 0, hoveredVideoId: null, motionEnabled: false
   };
   // Reuses images within a bounded cache. Failures keep the luminous sphere.
   const posterImages = new Map();
@@ -808,6 +880,7 @@
     $('#spin').textContent = '⏸ 停止自转';
     $('#spin').setAttribute('aria-pressed', 'true');
     state.scanningCount = 0;
+    state.moonPage = 0;
     state.discoveredVideos = 0;
     state.visited = new Set([rootCid]);
     state.running = false;
@@ -1081,6 +1154,7 @@
     });
     state.previewRecord = null;
     state.videoProjected = [];
+    state.moonPage = 0;
     ui.preview.hidden = true;
     flyToPlanet(state.nodes.get(state.rootId), 950, true);
     refreshPanel();
@@ -1126,6 +1200,7 @@
     });
     state.previewRecord = null;
     state.videoProjected = [];
+    state.moonPage = 0;
     updateMoonPeek(null);
     ui.preview.hidden = true;
     state.visited.add(id);
@@ -1179,6 +1254,47 @@
     window.open(url.href, '_blank', 'noopener,noreferrer');
   }
 
+  function refreshSearchResults() {
+    const query = ui.search.value.trim();
+    ui.searchResults.replaceChildren();
+    if (!query) {
+      ui.searchResults.hidden = true;
+      ui.searchCaption.textContent = '仅搜索已发现星球和每个目录最多16条视频样本，不代表全盘搜索。';
+      return;
+    }
+    const matches = searchUniverse(state.nodes, query, 12);
+    ui.searchCaption.textContent = matches.length
+      ? '已发现范围内找到 ' + matches.length + ' 项 · 仅包含已加载目录与视频样本'
+      : '当前已发现范围没有匹配结果 · 可继续探索更多目录';
+    ui.searchResults.hidden = matches.length === 0;
+    for (const match of matches) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'search-result';
+      button.title = (match.type === 'planet' ? '聚焦星球：' : '查看视频：') + match.name;
+      const kind = document.createElement('span');
+      kind.className = 'search-result-kind';
+      kind.textContent = match.type === 'planet' ? '星球' : '视频';
+      const label = document.createElement('span');
+      label.className = 'search-result-name';
+      label.textContent = match.name;
+      button.append(kind, label);
+      button.addEventListener('click', () => {
+        ui.search.value = '';
+        refreshSearchResults();
+        if (match.type === 'planet') {
+          selectPlanet(match.id, true);
+          return;
+        }
+        const parent = state.nodes.get(match.parentId);
+        if (!parent) return;
+        selectPlanet(parent.id, true);
+        showVideoPreview(match.record);
+      });
+      ui.searchResults.appendChild(button);
+    }
+  }
+
   function refreshScanProgress() {
     const active = state.mode === 'real' && (state.running || (state.paused && state.queue.length));
     ui.scanProgress.hidden = !active;
@@ -1209,6 +1325,28 @@
       (node.truncated ? ' · 部分分页未读取' : '') +
       (node.hiddenFolderCount ? ' · ' + node.hiddenFolderCount + ' 个子目录因星图容量暂未显示' : '') +
       (node.depthLimitedFolderCount ? ' · ' + node.depthLimitedFolderCount + ' 个子目录超过当前探索深度' : '') + '。';
+    ui.breadcrumbs.replaceChildren();
+    const pathItems = folderPath(state.nodes, node.id);
+    pathItems.forEach((item, index) => {
+      if (index) {
+        const separator = document.createElement('span');
+        separator.className = 'crumb-separator';
+        separator.textContent = '›';
+        ui.breadcrumbs.appendChild(separator);
+      }
+      const crumb = document.createElement('button');
+      crumb.type = 'button';
+      crumb.textContent = item.name;
+      crumb.title = item.name;
+      if (index === pathItems.length - 1) {
+        crumb.setAttribute('aria-current', 'location');
+        crumb.disabled = true;
+      } else {
+        crumb.addEventListener('click', () => selectPlanet(item.id, true));
+      }
+      ui.breadcrumbs.appendChild(crumb);
+    });
+    ui.breadcrumbs.hidden = pathItems.length === 0;
     $('#metric-folders').textContent = String(Math.max(0, state.nodes.size - 1));
     $('#metric-videos').textContent = state.discoveredVideos.toLocaleString();
     $('#metric-visited').textContent = String(state.visited.size);
@@ -1237,9 +1375,14 @@
     ui.folder.disabled = state.mode === 'demo';
     ui.parent.disabled = !focusedParent(state.nodes, node.id);
     const moonCount = node.sample.length;
-    ui.moonCount.textContent = (state.orbitActive ? moonCount + ' 颗已发现视频卫星（样本，不代表全部）' :
-      '聚焦星球后出现环绕视频卫星') +
+    const moonPages = Math.max(1, Math.ceil(moonCount / VIDEO_MOON_LIMIT));
+    const visibleMoons = Math.min(VIDEO_MOON_LIMIT, Math.max(0, moonCount - state.moonPage * VIDEO_MOON_LIMIT));
+    ui.moonCount.textContent = (state.orbitActive
+      ? moonCount + ' 条视频样本 · 当前 ' + visibleMoons + ' 颗卫星 · 第 ' + (state.moonPage + 1) + '/' + moonPages + ' 批'
+      : '聚焦星球后出现环绕视频卫星') +
       (state.mode === 'demo' ? ' · 演示数据' : '');
+    ui.moonShuffle.disabled = moonPages <= 1;
+    ui.moonShuffle.textContent = moonPages > 1 ? '换一批' : '样本不足';
     ui.moonToggle.textContent = state.moonsVisible ? '隐藏卫星' : '显示卫星';
     ui.moonToggle.setAttribute('aria-pressed', String(state.moonsVisible));
     ui.scan.textContent = state.mode === 'real' && state.queue.length && state.paused
@@ -1247,6 +1390,7 @@
         : state.connectionStatus === 'verify' ? '验证后继续' : '继续探索')
       : '探索真实115宇宙';
     refreshScanProgress();
+    refreshSearchResults();
     const neighborhood = state.orbitActive ?
       orbitNeighborhood(state.nodes, node.id, state.orbitPage) : null;
     ui.orbitList.textContent = '';
@@ -1494,7 +1638,7 @@
     state.projected = entries;
     const selectedFolder = state.orbitActive && state.nodes.get(state.selected);
     state.videoProjected = selectedFolder && state.moonsVisible
-      ? orbitingVideoMoons(selectedFolder, timestamp).map(moon => {
+      ? orbitingVideoMoons(selectedFolder, timestamp, VIDEO_MOON_LIMIT, state.moonPage).map(moon => {
         const screen = projectedPlanet(moon, state.camera, w, h);
         screen.radius = clamp(screen.radius * 0.52, 8, 17);
         return { node: moon, screen };
@@ -1728,6 +1872,15 @@
       }
     }
   });
+  ui.moonShuffle.addEventListener('click', () => {
+    const node = state.nodes.get(state.selected);
+    if (!node || node.sample.length <= VIDEO_MOON_LIMIT) return;
+    const pages = Math.max(1, Math.ceil(node.sample.length / VIDEO_MOON_LIMIT));
+    updateMoonPeek(null);
+    state.moonPage = (state.moonPage + 1) % pages;
+    state.videoProjected = [];
+    refreshPanel();
+  });
   ui.moonToggle.addEventListener('click', () => {
     state.moonsVisible = !state.moonsVisible;
     if (!state.moonsVisible) { state.videoProjected = []; updateMoonPeek(null); }
@@ -1735,6 +1888,15 @@
   });
   ui.orbitPrev.addEventListener('click', () => changeOrbitPage(-1));
   ui.orbitNext.addEventListener('click', () => changeOrbitPage(1));
+  ui.search.addEventListener('input', refreshSearchResults);
+  ui.search.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      ui.search.value = '';
+      refreshSearchResults();
+    } else if (event.key === 'Enter') {
+      ui.searchResults.querySelector('button')?.click();
+    }
+  });
   ui.previewPlay.addEventListener('click', open115Video);
   $('#preview-folder').addEventListener('click', () => open115Folder(state.selected));
   $('#preview-close').addEventListener('click', () => {

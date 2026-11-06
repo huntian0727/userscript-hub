@@ -18,7 +18,7 @@ function coreOf(script = source) {
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason, connectionStateForError, motionPreviewHlsConfig };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason, connectionStateForError, motionPreviewHlsConfig, searchUniverse, folderPath };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.9');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.3.1');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-029-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-031-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /体验演示星图/);
@@ -136,8 +136,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /完整播放交给115官方页面/);
 });
 
-test('v0.2.9 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.9.user.js');
+test('v0.3.1 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.3.1.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -184,7 +184,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-029-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-031-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -327,6 +327,70 @@ test('v0.2.5 HLS manifest is constrained to the 115 domain and valid pickcodes',
     {pickcode:'../a'}, {pickcode:'a?x=y'}, {pickcode:'bad#frag'}]) {
     assert.equal(core.videoHlsManifestUrl(bad), null);
   }
+});
+
+test('v0.3.1 video satellite pages rotate through the bounded sample without overlap', () => {
+  const folder = { sample: Array.from({ length: 16 }, (_, i) => ({ id: String(i), name: 'video-' + i })) };
+  const first = core.orbitingVideoMoons(folder, 1000, 9, 0);
+  const second = core.orbitingVideoMoons(folder, 1000, 9, 1);
+  assert.equal(first.length, 9);
+  assert.equal(second.length, 7);
+  assert.equal(new Set([...first, ...second].map(x => x.record.id)).size, 16);
+  assert.deepEqual(first.map(x => x.record.id), ['0','1','2','3','4','5','6','7','8']);
+  assert.deepEqual(second.map(x => x.record.id), ['9','10','11','12','13','14','15']);
+  assert.deepEqual(core.orbitingVideoMoons(folder, 1000, 9, 2), first);
+});
+
+test('v0.3.1 local search only finds known planets and scanned video samples', () => {
+  const known = new Map([
+    ['a', { id: 'a', name: 'Travel Galaxy', scanned: true, sample: [
+      { id: 'v1', name: 'Summer Trip.mp4' }, { id: 'v2', name: 'Ocean.mov' }
+    ] }],
+    ['b', { id: 'b', name: 'Music World', scanned: false, sample: [
+      { id: 'v3', name: 'Hidden Sample.mp4' }
+    ] }]
+  ]);
+  const results = core.searchUniverse(known, 'summer');
+  assert.equal(results.length, 1);
+  assert.equal(results[0].type, 'video');
+  assert.equal(results[0].id, 'v1');
+  assert.equal(results[0].parentId, 'a');
+  assert.equal(core.searchUniverse(known, 'music')[0].type, 'planet');
+  assert.equal(core.searchUniverse(known, 'hidden').length, 0, 'unscanned folder samples are not searchable');
+  assert.deepEqual(core.searchUniverse(known, ''), []);
+  assert.equal(core.searchUniverse(known, 'summer', 1).length, 1);
+});
+
+test('v0.3.1 folder breadcrumbs return real ancestor paths and stop safely on cycles', () => {
+  const nodes = new Map([
+    ['0', { id: '0', parentId: null, name: '根目录' }],
+    ['10', { id: '10', parentId: '0', name: '电影' }],
+    ['20', { id: '20', parentId: '10', name: '科幻' }]
+  ]);
+  assert.deepEqual(core.folderPath(nodes, '20'), [
+    { id: '0', name: '根目录' }, { id: '10', name: '电影' }, { id: '20', name: '科幻' }
+  ]);
+  assert.deepEqual(core.folderPath(nodes, '0'), [{ id: '0', name: '根目录' }]);
+  assert.deepEqual(core.folderPath(nodes, 'missing'), []);
+  nodes.get('0').parentId = '20';
+  const cyclic = core.folderPath(nodes, '20');
+  assert.equal(cyclic.length, 3);
+  assert.deepEqual(new Set(cyclic.map(x => x.id)), new Set(['0', '10', '20']));
+});
+
+test('v0.3.1 search and satellite batch UI state are wired to real in-memory discoveries', () => {
+  assert.match(source, /id="universe-search"/);
+  assert.match(source, /仅搜索已发现星球和每个目录最多16条视频样本/);
+  assert.match(source, /ui\.search\.addEventListener\('input', refreshSearchResults\)/);
+  assert.match(source, /function refreshSearchResults\(/);
+  assert.match(source, /ui\.moonShuffle\.addEventListener\('click'/);
+  assert.match(source, /state\.moonPage = \(state\.moonPage \+ 1\) % pages/);
+  assert.match(source, /orbitingVideoMoons\(selectedFolder, timestamp, VIDEO_MOON_LIMIT, state\.moonPage\)/);
+  assert.match(source, /ui\.searchResults\.replaceChildren\(\)/);
+  assert.match(source, /id="folder-breadcrumbs"/);
+  assert.match(source, /function folderPath\(nodes, id\)/);
+  assert.match(source, /ui\.breadcrumbs\.replaceChildren\(\)/);
+  assert.match(source, /crumb\.addEventListener\('click', \(\) => selectPlanet\(item\.id, true\)\)/);
 });
 
 test('v0.2.9 HLS preview uses adaptive quality capped to the small preview viewport', () => {
