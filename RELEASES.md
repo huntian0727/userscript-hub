@@ -4,7 +4,7 @@
 
 | 版本 | 状态 | 基线/提交 | 完整快照 | SHA-256 | 说明 |
 |---|---|---|---|---|---|
-| 视频宇宙 v0.3.1 | HOME真实账号试用候选（待发布） | 独立候选 | history/115-video-universe/0.3.1.user.js | b1ce59b9912e8603d339456c61323d7e7258b72c0facffc7a87c6f8e1be18800 | VU-031-01；搜索已发现星球/视频样本、卫星换批、可点击目录面包屑；真实115账号与播放待HOME登录态验收。 |
+| 视频宇宙 v0.3.1 | GitHub Pages 独立测试版（公网已核验） | 02562076c1033038893fa3a58cc70947afc627b1 | history/115-video-universe/0.3.1.user.js | b1ce59b9912e8603d339456c61323d7e7258b72c0facffc7a87c6f8e1be18800 | VU-031-01；搜索已发现星球/视频样本、卫星换批、可点击目录面包屑；真实115账号与播放待HOME登录态验收；GitHub Pages部署工作流42211424103成功，脚本/meta/manifest与历史快照公网均返回v0.3.1。 |
 | 视频宇宙 v0.3.0 | 内部候选（未公开，已保留快照） | 基于 v0.2.9；未单独提交 | history/115-video-universe/0.3.0.user.js | 4ef6efc5eb448a3c16568aff097a5d6571240c6b646096755c7162d6ec308c12 | VU-030-01；已发现星球/视频样本搜索、9+7视频卫星分页换批；后续追加目录路径导航时升级为v0.3.1；WebGL/Canvas搜索和换批浏览器验收通过。 |
 | v0.12.4 | 历史稳定基线 | `b7f8b5c686bbdfd61f4f4a0a793da0c75a6762dc` | `history/115-multiview-indexed/0.12.4.user.js` | `6a19e964e02d251996f69ad0c77f816623c991c79f3b53fe3fb7796d501544a5` | 进入1.0.0开发前最后一个0.x版本 |
 | v1.0.0 | 开发基线（已冻结） | `da002d4f808b4b903dd38b770d34481fc5a66d4d` | `history/115-multiview-indexed/1.0.0.user.js` | `06d05b0bbe06527839518aea9ae4c10c55a9867cfccdc156da8500bab55d2330` | 重大更新首轮开发基线；32项自动化测试通过；未发布，历史快照不可覆盖 |
