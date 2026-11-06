@@ -387,6 +387,11 @@ test('runner completes a recursive scan and returns one global sample', async ()
   assert.equal(result.progress.sampleSeen, 2);
   assert.equal(result.sample.length, 2);
   assert.ok(progress.some(item => item.phase === 'page-committed'));
+  const committedPages = progress.filter(item => item.phase === 'page-committed');
+  assert.equal(committedPages.length, 2);
+  assert.deepEqual(committedPages.map(page => page.sample.length), [1, 2]);
+  assert.deepEqual(committedPages.map(page => page.sampleSeen), [1, 2]);
+  assert.equal(progress.some(item => item.phase === 'directory-page' && Array.isArray(item.sample)), false);
   assert.equal((await store.getTask('runner-complete')).status, 'complete');
   store.close();
 });

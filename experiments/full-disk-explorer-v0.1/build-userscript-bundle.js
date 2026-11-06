@@ -5,8 +5,9 @@ const path = require('node:path');
 
 const experimentDir = __dirname;
 const projectRoot = path.resolve(experimentDir, '..', '..');
-const userscriptPath = path.join(projectRoot, 'userscripts', '115-multiview-indexed.user.js');
-const startMarker = '/* N115_FULL_DISK_EXPLORER_BUNDLE_START */';
+const userscriptFile = process.argv.includes('--full-disk')
+  ? '115-multiview-full-disk.user.js' : '115-multiview-indexed.user.js';
+const userscriptPath = path.join(projectRoot, 'userscripts', userscriptFile);const startMarker = '/* N115_FULL_DISK_EXPLORER_BUNDLE_START */';
 const endMarker = '/* N115_FULL_DISK_EXPLORER_BUNDLE_END */';
 
 function readModule(file) {

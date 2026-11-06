@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.6.2
+// @version      1.7.0
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -2791,7 +2791,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.6.2';
+  const VERSION = '1.7.0';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -4493,9 +4493,11 @@ function createExplorerRunner(options = {}) {
               directoryId: page.cid,
               directoryOffset: page.nextOffset,
               directoryTotal: page.totalCount,
+              // Only publish a provisional sample after the matching IndexedDB transaction commits.
+              // It is uniform over the scanned prefix, not the entire disk until completion.
+              sample: checkpoint.reservoir.items.slice(),
               ...progressSummary(checkpoint)
-            });
-          }
+            });          }
         });
 
         if (checkpoint.currentDirectory &&
@@ -4580,13 +4582,13 @@ module.exports = Object.freeze({ createExplorerRunner });
 (() => {
   'use strict';
 
-  const VERSION = '1.6.2';
+  const VERSION = '1.7.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
   const HOST_ID = 'local-115-multiview-full-disk-v1-6';
   const MAX_VIDEOS = 12;
-  const MAX_CANDIDATES = 100;
+  const MAX_CANDIDATES = 300;
   const DEFAULT_DUAL_SMALL_COUNT = 3;
   const DEFAULT_ASPECT_RATIO = 16 / 9;
   const STANDARD_LAYOUTS = Object.freeze({ 2: [2, 1], 4: [2, 2], 6: [3, 2], 9: [3, 3], 12: [4, 3] });
@@ -9881,15 +9883,105 @@ module.exports = Object.freeze({ createExplorerRunner });
       (progress.reservoir && progress.reservoir.items ? progress.reservoir.items.length : 0));
   }
 
+  // Only committed pages can replenish live playback. Never replace active or locked cells.
+  function syncLiveFullDiskCandidates(update, completed = false) {
+    const session = active;
+    if (!session || session.closed || !session.fullDiskSource ||
+        session.fullDiskSource.taskId !== String(update.taskId || '') ||
+        session.accountId !== fullDiskAccountId) return 0;
+    const source = session.fullDiskSource;
+    const allowed = createPlayablePredicate(new Set(), session.filters, session.preferenceState, { trackSeen: false });
+    const known = new Set(source.items.map(itemKey));
+    const queued = new Set(session.availableItems.map(itemKey));
+    const visible = new Set(session.cells.filter(cell => cell && cell.item).map(cell => itemKey(cell.item)));
+    // At completion the persisted reservoir is the authoritative uniform whole-disk sample.
+    // Discard older provisional queue entries but never interrupt the current video cells.
+    if (update.status === 'complete' || completed) {
+      const finalItems = [];
+      const finalKeys = new Set();
+      for (const item of Array.isArray(update.sample) ? update.sample : []) {
+        const key = itemKey(item);
+        if (!key || finalKeys.has(key) || !allowed(item)) continue;
+        finalKeys.add(key);
+        finalItems.push(item);
+        if (finalItems.length >= MAX_CANDIDATES) break;
+      }
+      source.items = finalItems;
+      session.availableItems = shuffleItems(finalItems.filter(item => {
+        const key = itemKey(item);
+        return !session.usedPickcodes.has(key) && !visible.has(key);
+      }));
+      source.sampleSeen = Math.max(Number(source.sampleSeen || 0), Number(update.sampleSeen || 0));
+      source.isComplete = true;
+      session.scan.complete = true;
+      session.scan.status = 'complete';
+      session.candidateTotal = Math.max(Number(session.candidateTotal || 0), Number(update.matchedVideos || 0));
+      session.roundPoolSize = finalItems.length;
+      session.roundMessage = '全盘扫描完成，已切换到最终均匀随机候选池';
+      for (const cell of session.cells) {
+        if (!cell || cell.index >= session.layoutCount || cell.item || cell.locked) continue;
+        const next = collectNextItem(session);
+        if (!next) break;
+        replaceCell(session, cell, next);
+      }
+      updateRoundControls(session);
+      return 0;
+    }
+    let added = 0;
+    for (const item of shuffleItems(Array.isArray(update.sample) ? update.sample : [])) {
+      const key = itemKey(item);
+      if (!key || !allowed(item) || session.usedPickcodes.has(key) ||
+          known.has(key) || queued.has(key) || visible.has(key)) continue;
+      if (session.availableItems.length >= MAX_CANDIDATES) break;
+      if (source.items.length >= MAX_CANDIDATES) {
+        const stale = source.items.findIndex(previous => {
+          const previousKey = itemKey(previous);
+          return !queued.has(previousKey) && !visible.has(previousKey);
+        });
+        if (stale < 0) break;
+        known.delete(itemKey(source.items[stale]));
+        source.items.splice(stale, 1);
+      }
+      source.items.push(item);
+      session.availableItems.push(item);
+      queued.add(key);
+      known.add(key);
+      added++;
+    }
+    source.sampleSeen = Math.max(Number(source.sampleSeen || 0), Number(update.sampleSeen || 0));
+    const status = String(update.status || (completed ? 'complete' : 'running'));
+    source.isComplete = status === 'complete';
+    session.scan.complete = source.isComplete;
+    session.scan.status = status === 'running' ? 'scanning' : status;
+    session.candidateTotal = Math.max(Number(session.candidateTotal || 0), Number(update.matchedVideos || 0));
+    session.roundPoolSize = source.items.length;
+    if (added) {
+      session.roundMessage = '后台扫描新增 ' + added + ' 个临时候选（仅已扫描范围）';
+      for (const cell of session.cells) {
+        if (!cell || cell.index >= session.layoutCount || cell.item || cell.locked) continue;
+        const next = collectNextItem(session);
+        if (!next) break;
+        replaceCell(session, cell, next);
+      }
+    } else if (status === 'complete') {
+      session.roundMessage = '全盘扫描完成；后续换片使用当前随机候选池';
+    } else if (status === 'paused' || status === 'incomplete') {
+      session.roundMessage = status === 'paused' ? '扫描已暂停，当前仅播放已扫描范围' : '扫描未完整结束，当前仅播放已扫描范围';
+    }
+    if (added || status !== 'running') updateRoundControls(session);
+    return added;
+  }
+
   function renderFullDiskProgress(update = {}) {
     const progress = update.progress || update;
     const phase = String(update.phase || progress.phase || 'scanning');
+    if (phase === 'page-committed' && Array.isArray(update.sample)) syncLiveFullDiskCandidates(update);
     updateFullDiskMetrics(progress);
     fullDiskProgressBar.classList.toggle('is-active', !['scan-paused', 'scan-invalidated'].includes(phase));
     fullDiskPauseButton.disabled = !fullDiskController;
     fullDiskResumeButton.hidden = true;
-    fullDiskPlayButton.hidden = true;
-    fullDiskStartButton.disabled = true;
+    fullDiskPlayButton.hidden = !(Number(progress.sampleSize) > 0) || Boolean(active) || opening;
+    fullDiskPlayButton.textContent = '边扫边播（仅已扫描范围）';    fullDiskStartButton.disabled = true;
     fullDiskBackgroundButton.disabled = false;
     fullDiskBadge.hidden = false;
     fullDiskBadge.textContent = '● 全盘扫描中 · ' + formatFullDiskCount(progress.matchedVideos) + ' 个视频';
@@ -9938,8 +10030,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       ? '重新扫描全盘' : '开始全盘扫描';
     fullDiskBackgroundButton.disabled = !isRunningHere;
     fullDiskResumeButton.hidden = task.status !== 'paused';
-    fullDiskPlayButton.hidden = task.status !== 'complete' || sampleCount === 0;
-    fullDiskProgressBar.classList.toggle('is-active', task.status === 'running');
+    fullDiskPlayButton.hidden = sampleCount === 0 || !['running', 'paused', 'complete'].includes(task.status) || Boolean(active) || opening;
+    fullDiskPlayButton.textContent = task.status === 'complete' ? '播放全盘随机结果' : '边扫边播（仅已扫描范围）';    fullDiskProgressBar.classList.toggle('is-active', task.status === 'running');
     fullDiskBadge.hidden = !isRunningHere && task.status !== 'running';
     if (task.status === 'running') {
       fullDiskBadge.textContent = '● 全盘扫描中 · ' + formatFullDiskCount(task.matchedVideos) + ' 个视频';
@@ -10107,8 +10199,13 @@ module.exports = Object.freeze({ createExplorerRunner });
       const result = await runPromise;
       fullDiskLastError = result.error && result.error.message ? result.error.message : '';
       const savedTask = await fullDiskStore.getTask(taskId);
-      renderFullDiskTask(savedTask, fullDiskLastError);
-    } catch (error) {
+      if (savedTask && savedTask.reservoir && Array.isArray(savedTask.reservoir.items)) {
+        syncLiveFullDiskCandidates({
+          taskId, sample: savedTask.reservoir.items, sampleSeen: savedTask.reservoir.seen,
+          matchedVideos: savedTask.matchedVideos, status: savedTask.status
+        }, savedTask.status === 'complete');
+      }
+      renderFullDiskTask(savedTask, fullDiskLastError);    } catch (error) {
       fullDiskLastError = String(error && error.message || error);
       fullDiskStatus.textContent = '全盘扫描未能启动或恢复：' + fullDiskLastError;
       fullDiskWarning.hidden = false;
@@ -10128,10 +10225,11 @@ module.exports = Object.freeze({ createExplorerRunner });
   }
 
   async function buildFullDiskPlaybackData(task) {
-    if (!task || task.status !== 'complete' || !task.reservoir || !Array.isArray(task.reservoir.items)) {
-      throw new Error('全盘扫描尚未完整结束，不能将部分结果当作全盘随机池播放');
+    if (!task || !['running', 'paused', 'complete'].includes(task.status) ||
+        !task.reservoir || !Array.isArray(task.reservoir.items)) {
+      throw new Error('尚无可播放的已提交扫描候选，请先开始扫描');
     }
-    const accountId = await resolveAccountId();
+    const completed = task.status === 'complete';    const accountId = await resolveAccountId();
     if (String(task.accountId) !== accountId) {
       throw Object.assign(new Error('当前115账号与扫描任务所属账号不一致，已阻止跨账号播放。'), {
         code: 'N115_ACCOUNT_CHANGED'
@@ -10149,8 +10247,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       excludedPickcodes: new Set([...(scanPreferences.excludedPickcodes || []), ...currentExclusions])
     };
     const predicate = createPlayablePredicate(new Set(), filters, preferenceState, { trackSeen: false });
-    const items = task.reservoir.items.filter(predicate).slice(0, MAX_CANDIDATES);    if (!items.length) throw new Error('本次随机候选已全部被排除或不符合当前筛选条件，请重新扫描。');
-    const profiles = await preferenceStore.listProfiles(accountId);
+    const items = task.reservoir.items.filter(predicate).slice(0, MAX_CANDIDATES);
+    if (!items.length) throw new Error('尚无符合筛选条件的已扫描视频，请继续扫描或调整筛选条件。');    const profiles = await preferenceStore.listProfiles(accountId);
     const recentDirectories = await preferenceStore.listRecentDirectories(accountId, 5);
     const matchedVideos = Number(task.matchedVideos || task.reservoir.seen || 0);
     const scan = {
@@ -10159,17 +10257,16 @@ module.exports = Object.freeze({ createExplorerRunner });
       rootCid: '0',
       recursive: true,
       rootPath: '/网盘根目录',
-      status: 'complete',
-      complete: true,
-      stats: { videos: matchedVideos }
+      status: completed ? 'complete' : 'scanning',
+      complete: completed,      stats: { videos: matchedVideos }
     };
     return {
       source: 'full-disk',
       fullDiskSource: {
         taskId: task.taskId,
         sampleSeen: Number(task.reservoir.seen || 0),
-        items: items.slice()
-      },
+        isComplete: completed,
+        items: items.slice()      },
       items,
       total: matchedVideos,
       scan,
@@ -10181,26 +10278,22 @@ module.exports = Object.freeze({ createExplorerRunner });
       recentDirectories,
       rootPath: '/网盘根目录',
       filters,
-      statusLabel: '全盘扫描完成',
+      statusLabel: completed ? '全盘扫描完成' : '扫描中临时候选（仅已扫描范围）',
       indexedVideoCount: matchedVideos,
-      isComplete: true
-    };
+      isComplete: completed    };
   }
 
   async function playFullDiskResult() {
     try {
-      const task = fullDiskLatestTask && fullDiskLatestTask.status === 'complete'
-        ? fullDiskLatestTask
-        : fullDiskTaskId ? await fullDiskStore.getTask(fullDiskTaskId) : null;
-      const indexed = await buildFullDiskPlaybackData(task);
-      fullDiskOverlay.hidden = true;
+      const task = fullDiskTaskId ? await fullDiskStore.getTask(fullDiskTaskId)
+        : fullDiskLatestTask;
+      const indexed = await buildFullDiskPlaybackData(task);      fullDiskOverlay.hidden = true;
       await openPlayer(indexed);
     } catch (error) {
       fullDiskStatus.textContent = '无法打开全盘随机候选：' + String(error && error.message || error);
       fullDiskOverlay.hidden = false;
       fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = '请确认扫描已完整结束，且当前115账号与扫描时一致。';
-    }
+      fullDiskWarning.textContent = '请确认已发现可播放视频，且当前115账号与扫描任务一致。';    }
   }
 
   function closePlayer() {
@@ -10242,8 +10335,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       const bar = element('div', 'bar toolbar');
       bar.id = 'topbar';
       const fullIndexSummary = indexed.source === 'full-disk'
-        ? '数据来源：全盘随机探索 · 全盘匹配视频 ' + indexed.indexedVideoCount + ' 条 · 本次随机候选池 ' + items.length + ' 条 · 默认静音'
-        : '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
+        ? (indexed.isComplete ? '数据来源：已完成全盘随机扫描' : '数据来源：扫描中临时候选（仅已扫描范围）') +
+          ' · 已扫描匹配视频 ' + indexed.indexedVideoCount + ' 条 · 当前随机候选池 ' + items.length + ' 条 · 默认静音'        : '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
           (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
           (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
           ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
@@ -10947,14 +11040,14 @@ module.exports = Object.freeze({ createExplorerRunner });
   const fullDiskDialog = element('div', 'full-disk-dialog');
   const fullDiskHeader = element('header', 'full-disk-head');
   const fullDiskTitle = element('div', 'full-disk-title', '🌐 115 全盘随机探索');
-  const fullDiskVersion = element('span', 'full-disk-version', 'v1.6.2 · FDX-162-01');
+  const fullDiskVersion = element('span', 'full-disk-version', 'v1.7.0 · FDX-170-01');
   const fullDiskCloseButton = element('button', 'full-disk-close', '收起');
   fullDiskCloseButton.type = 'button';
   fullDiskCloseButton.setAttribute('aria-label', '收起全盘随机探索窗口');
   fullDiskHeader.append(fullDiskTitle, fullDiskVersion, fullDiskCloseButton);
 
   const fullDiskHint = element('div', 'full-disk-hint',
-    '从网盘根目录开始递归读取全部子文件夹，不需要预先建立目录索引。扫描只读取目录与视频元数据，不下载、不移动、不删除或修改网盘文件。系统会从全盘匹配结果中均匀抽取最多100个随机候选，完成后直接交给现有多宫格播放器。扫描最多遍历20,000个目录、递归深度20层；触及上限会标记为未完整，不会冒充全盘扫描完成。扫描期间请尽量不要在115端新增、上传、移动、删除或重命名文件；发现目录总数变化会中止任务。');
+    '从网盘根目录开始递归读取全部子文件夹，不需要预先建立目录索引。扫描只读取目录与视频元数据，不下载、不移动、不删除或修改网盘文件。扫描中发现候选后即可边扫边播（仅已扫描范围），后台继续补充；完整扫描结束后保留最多300个全局随机候选。扫描最多遍历20,000个目录、递归深度20层；触及上限会标记为未完整，不会冒充全盘扫描完成。扫描期间请尽量不要在115端新增、上传、移动、删除或重命名文件；发现目录总数变化会中止任务。');
 
   const fullDiskFields = element('div', 'full-disk-fields');
   function createFullDiskField(labelText, input) {

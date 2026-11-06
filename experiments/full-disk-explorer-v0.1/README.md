@@ -1,8 +1,6 @@
 # Full-disk random explorer — algorithm lab v0.1
 
-Status: public test candidate v1.6.2 / delivery FDX-162-01. Restores three omitted startup constants from the stable player (MAX_VIDEOS, DEFAULT_DUAL_SMALL_COUNT and API_ORIGIN) after the v1.6.1 button fix. Startup regression tests execute the actual player session initializer and the actual index-manager request code with synthetic fixtures, and confirm the v1.6.1 failure can be reproduced without any live 115 calls. The two independent host IDs, separate install/update channel and immutable historical releases remain intact.
-
-## What the current code already proves
+Status: v1.7.0 public-test release candidate / delivery FDX-170-01. A persisted page exposes only its committed bounded reservoir to active playback. The player can open provisional candidates while scanning, replenish a bounded queue without replacing active/locked cells, and distinguish partial-prefix results from a completed whole-drive sample. The independent v0.12.4 stable release and immutable v1.6.x snapshots remain unchanged.## What the current code already proves
 
 - The production adapter builds `/files` requests from a CID and accepts root CID `0`; its default page size is 1,150.
 - The adapter normalizes file records, video flags, pickcodes, byte sizes, folder IDs and path segments.
@@ -30,8 +28,7 @@ Status: public test candidate v1.6.2 / delivery FDX-162-01. Restores three omitt
 2. Use the additive `streamDirectory` adapter path; it does not retain every file key or folder object and awaits the page callback before requesting the next page.
 3. The page contract is strict: `records` contains normalized unique records, `unknownCount` and `duplicateCount` are page deltas, and `records.length + unknownCount + duplicateCount === rawCount`. Any mismatch fails closed.
 4. A bounded two-page recent-key window detects duplicates within a page and overlaps near page boundaries. Its keys are included in the checkpoint so refresh/resume preserves the window.
-5. Feed every unique matching video into one global reservoir of at most 100 candidates. Do not reservoir-sample each page independently and append those page samples.
-6. Persist only traversal metadata, counters, the recent-key window and the bounded sample; do not persist every discovered video as an index record.
+5. Feed every unique matching video into one global reservoir of at most 300 candidates for newly started v1.7.0 tasks. Older scan checkpoints retain their original persisted reservoir limits; do not merge per-page independent samples.6. Persist only traversal metadata, counters, the recent-key window and the bounded sample; do not persist every discovered video as an index record.
 7. Commit the sample state, directory offset and newly discovered folder queue entries atomically. A committed offset is the replay fence after refresh.
 8. Bind a task to the 115 account ID. Re-check the account before resume; a changed account must fail closed.
 9. If a directory's reported total changes mid-scan, invalidate the whole scan and restart with a new scan ID. Mixing old and new directory pages would bias the reservoir.
@@ -43,8 +40,7 @@ Status: public test candidate v1.6.2 / delivery FDX-162-01. Restores three omitt
 
 For a completed traversal of (N) unique matching videos, reservoir sampling of size (K) gives each video inclusion probability (min(K,N)/N), independent of directory order and page order.
 
-A partial scan can only be uniform over the subset already visited. Therefore the UI must not label provisional candidates as “全盘随机”. Either wait for a complete scan before claiming global randomness, or clearly label early playback as “扫描中临时候选（仅已扫描范围）” and replace the candidate pool with the final global sample when the scan completes.
-
+A partial scan can only be uniform over the subset already visited. The v1.7.0 UI labels this as “扫描中临时候选（仅已扫描范围）”, permits live playback from committed pages, and replenishes a bounded queue as scanning continues. Only a fully complete scan may claim a global random result. At scan completion no new videos can materialize without another traversal or retained full index; the current queue is finite.
 ## Pagination consistency limitation
 
 The recent-key window is bounded to the latest two pages. It catches duplicates caused by adjacent-page overlap and is restored after refresh, but it cannot prove that a same-count reorder more than two pages behind the cursor did not omit or repeat a file. The first real-account validation must confirm the 115 listing order is stable during a scan. Until that is verified, users should avoid adding, uploading, deleting, moving or renaming files during a scan; a changed total, unknown item, duplicate or short page is treated as incomplete. Do not advertise a mathematically exact whole-drive sample if the listing changed during traversal.
@@ -59,6 +55,6 @@ Observed in the latest run: 1,001 directories visited/completed; 1,001,000 recor
 
 The isolated store now implements this boundary: task-level metadata and the global reservoir live in `tasks`; per-directory offset, total, page count, counters and the bounded recent-key window live in `directories`. A page transaction updates the sample, active directory checkpoint and newly discovered folders together. `listTasks(accountId)` supports finding resumable tasks after refresh; resume rejects a different 115 account.
 
-The full repository suite currently passes 137/137 tests. The focused full-disk explorer suite passes 54/54, including an end-to-end synthetic run through the actual 115 adapter, browser bundle, scan runner and dedicated store. Fake IndexedDB tests verify transaction behavior; they do not replace a real-browser IndexedDB check or a real 115 account scan.
+Automated tests include source-level player startup, synthetic streaming and IndexedDB page-commit checks, provisional playback filtering, bounded replenishment, account isolation, and locked-window preservation. Synthetic tests cannot establish actual 115 login status, real API rate limits or browser playback success.
 
-Remaining before a test release: verify the bundled userscript in the target browser, validate 115 pagination stability and actual account identification, and measure realistic scan duration/rate limits and human-verification behavior. No real-account scan or production publication is part of this development run.
+Validation boundary: the local headless Chrome DOM smoke verified both launchers and the full-disk dialog, without uncaught initialization errors. Automated tests and the static installation-center build pass. Actual logged-in 115 scans, real playback and API rate limiting remain unverified; those limitations apply to the public-test release.
