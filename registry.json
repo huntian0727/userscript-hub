@@ -48,6 +48,13 @@
       "source": "userscripts/115-video-universe.user.js",
       "channel": "独立公开测试版 · v0.3.1（HOME真实账号试用候选）",
       "enabled": true
-    }
-  ]
+    },
+    {
+      "id": "115-video-universe-lab",
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.3.4 独立试用版）",
+      "description": "独立并行测试入口：在真实115只读目录探索、3D星球/视频卫星、115官方播放基础上，新增最多24颗本机星球收藏、刷新后保留和收藏目录快速重入。演示数据需手动开启；真实账号验收待HOME登录态。",
+      "source": "userscripts/115-video-universe-lab.user.js",
+      "channel": "独立公开测试版 · v0.3.4（与v0.3.1并行，不覆盖旧入口）",
+      "enabled": true
+    }  ]
 }

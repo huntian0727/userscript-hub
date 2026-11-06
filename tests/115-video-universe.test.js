@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
-const source = fs.readFileSync(path.join(root, 'userscripts/115-video-universe.user.js'), 'utf8');
+const source = fs.readFileSync(path.join(root, 'userscripts/115-video-universe-lab.user.js'), 'utf8');
+const legacySource = fs.readFileSync(path.join(root, 'userscripts/115-video-universe.user.js'), 'utf8');
 const registry = JSON.parse(fs.readFileSync(path.join(root, 'registry.json'), 'utf8'));
 const { readMetadata, withUpdateUrls } = require('../scripts/build-pages');
 
@@ -24,27 +25,37 @@ function coreOf(script = source) {
 
 const core = coreOf();
 
-test('standalone video universe has unique name, namespace, metadata version and separate install URL', () => {
+test('video universe v0.3.4 has an independent install identity while v0.3.1 stays unchanged', () => {
   assert.doesNotThrow(() => new vm.Script(source));
   const universe = readMetadata(source);
+  const legacy = readMetadata(legacySource);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.3.4');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.3.4');
+  assert.equal(legacy.version, '0.3.1');
+  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
+  assert.notEqual(universe.name, legacy.name);
+  assert.notEqual(universe.namespace, legacy.namespace);
   assert.notEqual(universe.name, stable.name);
   assert.notEqual(universe.name, explorer.name);
   assert.notEqual(universe.namespace, stable.namespace);
   assert.notEqual(universe.namespace, explorer.namespace);
-  const item = registry.scripts.find(x => x.id === '115-video-universe');
+  const item = registry.scripts.find(x => x.id === '115-video-universe-lab');
+  const legacyItem = registry.scripts.find(x => x.id === '115-video-universe');
   assert.ok(item && item.enabled);
-  assert.equal(item.source, 'userscripts/115-video-universe.user.js');
+  assert.ok(legacyItem && legacyItem.enabled);
+  assert.equal(item.source, 'userscripts/115-video-universe-lab.user.js');
+  assert.equal(legacyItem.source, 'userscripts/115-video-universe.user.js');
   const hosted = withUpdateUrls(source, item.id, registry.pagesBaseUrl);
-  assert.equal(hosted.updateUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.meta.js');
-  assert.equal(hosted.downloadUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js');
+  const legacyHosted = withUpdateUrls(legacySource, legacyItem.id, registry.pagesBaseUrl);
+  assert.equal(hosted.updateUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe-lab.meta.js');
+  assert.equal(hosted.downloadUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe-lab.user.js');
+  assert.equal(legacyHosted.updateUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.meta.js');
+  assert.equal(legacyHosted.downloadUrl, 'https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js');
 });
-
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
   assert.match(source, /const DELIVERY = 'VU-034-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
@@ -137,9 +148,9 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
 });
 
 test('v0.3.4 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.3.4.user.js');
+  const pathToSnapshot = path.join(root, 'history/115-video-universe-lab/0.3.4.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
-  const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
+  const served = withUpdateUrls(source, '115-video-universe-lab', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
 });
 test('3D placement uses genuine XYZ depth and stays deterministic', () => {
@@ -189,13 +200,13 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
   assert.equal(readMetadata(old).version, '0.1.0');
-  assert.equal(readMetadata(old).namespace, readMetadata(source).namespace);
+  assert.equal(readMetadata(old).namespace, readMetadata(legacySource).namespace);
 });
 
 test('v0.2.0 is retained and single-click must focus rather than only select', () => {
   const previous = fs.readFileSync(path.join(root, 'history/115-video-universe/0.2.0.user.js'), 'utf8');
   assert.equal(readMetadata(previous).version, '0.2.0');
-  assert.equal(readMetadata(previous).namespace, readMetadata(source).namespace);
+  assert.equal(readMetadata(previous).namespace, readMetadata(legacySource).namespace);
   assert.match(source, /if \(planet\) selectPlanet\(planet\.id, true\);/);
   assert.doesNotMatch(source, /if \(planet\) selectPlanet\(planet\.id, false\);/);
   assert.match(source, /点击星球居中/);

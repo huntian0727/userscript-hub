@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         拉面视频宇宙 · 115独立探索实验
-// @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
+// @name         拉面视频宇宙 · 3D立体星图（v0.3.4独立试用版）
+// @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe-lab
 // @version      0.3.4
 // @description  115独立3D视频宇宙：真实目录探索、视频卫星、星球收藏和115官方播放。
 // @match        https://115.com/*
@@ -9,8 +9,6 @@
 // @grant        GM_xmlhttpRequest
 // @require      https://huntian0727.github.io/userscript-hub/vendor/hls-1.7.4.min.js
 // @connect      webapi.115.com
-// @updateURL   https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.meta.js
-// @downloadURL https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js
 // ==/UserScript==
 
 (function videoUniverse() {
