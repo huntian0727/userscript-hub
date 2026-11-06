@@ -12,9 +12,9 @@ const source = fs.readFileSync(
 ).replace(/\r\n/g, '\n');
 test('115 multiview userscript parses and exposes multi-folder favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.ok(source.includes('// @version      1.8.3'));
-  assert.match(source, /^\/\/ @version\s+1\.8\.3$/m);
-  assert.equal(source.split("const VERSION = '1.8.3';").length - 1, 2);
+  assert.ok(source.includes('// @version      1.8.4'));
+  assert.match(source, /^\/\/ @version\s+1\.8\.4$/m);
+  assert.equal(source.split("const VERSION = '1.8.4';").length - 1, 2);
   assert.match(source, /id = 'btnFavorites'/);
   assert.match(source, /session\.favoritesButton\.textContent = '★ 收藏 ' \+ favoriteCount/);
   assert.match(source, /点击顶部“★ 收藏”即可查看/);

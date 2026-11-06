@@ -47,15 +47,15 @@ test('live adapter uses root-wide video filtering and validates the returned dee
 
 function makeHarness(readGlobalVideo, options = {}) {
   const events = [];
-  const names = ['fullDiskAdapter', 'FULL_DISK_RESERVE', 'FULL_DISK_BATCH_ATTEMPTS', 'resolveAccountId',
+  const names = ['fullDiskAdapter', 'FULL_DISK_RESERVE', 'FULL_DISK_BATCH_ATTEMPTS', 'FULL_DISK_STALL_MS', 'resolveAccountId',
     'createPlayablePredicate', 'itemKey', 'replaceCell', 'setStatus', 'updateRoundControls',
-    'fullDiskStartButton', 'fullDiskMetricValues', 'fullDiskStatus', 'fullDiskWarning', 'fullDiskProgressBar',
+    'fullDiskStartButton', 'fullDiskAdjustFiltersButton', 'fullDiskMetricValues', 'fullDiskStatus', 'fullDiskWarning', 'fullDiskProgressBar',
     'formatFullDiskCount', 'cancelPendingSkip', 'Math'];
   const init = new Function(...names, 'let active, preparedFullDisk, fullDiskAccountId;\n' + liveCode + nextItemCode +
     '\nreturn { setSession(session) { active = session; }, createFullDiskSource, createFullDiskRange,' +
     ' refillSessionFullDisk, queueFullDiskSwap, restartFullDiskRound };');
   const controls = { videos: {}, videoLabel: {}, samples: {} };
-  const api = init({ readGlobalVideo }, 6, 24, options.account || (async () => 'account-a'),
+  const api = init({ readGlobalVideo, readSearchedVideo: options.search }, 6, 24, options.stallMs ?? 55000, options.account || (async () => 'account-a'),
     () => item => !!item && item.playable && (!options.allowed || options.allowed(item)),
     item => item?.pickcode || '',
     (session, cell, item) => {
@@ -64,9 +64,9 @@ function makeHarness(readGlobalVideo, options = {}) {
       events.push([cell.index, item.id]);
       return true;
     }, (cell, status) => { cell.status = status; }, () => {},
-    {}, controls, {}, {}, { classList: { toggle() {} } }, String, () => {}, Object.assign(Object.create(Math), { random: () => 0.75 }));
+    {}, {}, controls, {}, {}, { classList: { toggle() {} } }, String, () => {}, Object.assign(Object.create(Math), { random: () => 0.75 }));
   const cell = index => ({ index, generation: 1, locked: false, item: null });
-  const session = { cells: [cell(0), cell(1)], layoutCount: 2, accountId: 'account-a', filters: {},
+  const session = { cells: [cell(0), cell(1)], layoutCount: 2, accountId: 'account-a', filters: options.filters || {},
     scan: {}, roundNumber: 1, failedPickcodes: new Set(), usedPickcodes: new Set(),
     preferenceState: {}, availableItems: [] };
   session.fullDiskSource = api.createFullDiskSource(session.accountId, session.filters, Promise.resolve(session));
@@ -169,4 +169,44 @@ test('selective filters cap each batch and allow another batch without repeating
   await session.fullDiskSource.refilling;
   assert.equal(offsets.length, 49);
   assert.equal(new Set(offsets).size, offsets.length);
+});
+
+test('keyword exploration draws from server search rather than the unfiltered drive', async () => {
+  const offsets = [];
+  const count = 1268;
+  const { api, session, events } = makeHarness(async () => {
+    assert.fail('keyword exploration must not open an unfiltered video list');
+  }, {
+    filters: { keyword: 'fixture terms' },
+    search: async (keyword, offset) => {
+      assert.equal(keyword, 'fixture');
+      offsets.push(offset);
+      return { count, item: { ...video(offset), name: 'fixture terms ' + offset + '.mp4' } };
+    }
+  });
+  api.refillSessionFullDisk(session);
+  await session.fullDiskSource.refilling;
+  assert.equal(session.candidateTotal, count);
+  assert.deepEqual(offsets.slice(0, 3), [0, 951, 950]);
+  assert.equal(events.length, 2);
+  assert.ok(session.availableItems.length >= 6);
+});
+
+test('stalling before a candidate cancels outstanding requests and leaves the rank available to retry', async () => {
+  const signals = [];
+  const count = 1268;
+  const { api, session, events } = makeHarness((offset, { signal }) => {
+    if (offset === 0) return Promise.resolve({ count, item: video(0) });
+    signals.push(signal);
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }, { stallMs: 40 });
+  api.refillSessionFullDisk(session);
+  await session.fullDiskSource.refilling;
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every(signal => signal.aborted));
+  assert.equal(session.fullDiskSource.range.retry.length, 2);
+  assert.match(session.fullDiskSource.error, /继续抽取或调整筛选/);
+  assert.deepEqual(events, []);
 });

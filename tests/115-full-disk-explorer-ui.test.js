@@ -17,7 +17,7 @@ test('the player and directory manager have separate DOM hosts', () => {
     'local-115-multiview-full-disk-v1-6'
   ]);
   assert.equal(new Set(hostIds).size, 2);
-  assert.match(source, /const VERSION = '1\.8\.3';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const VERSION = '1\.8\.4';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
   assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
 });
 

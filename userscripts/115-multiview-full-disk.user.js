@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.3
+// @version      1.8.4
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -697,12 +697,33 @@
       if (payload.data.length !== Number(offset < count)) {
         throw new N115DataError('115 随机位置返回的记录数不一致，请重试');
       }
+      return { count, item: normalizeListedVideo(payload) };
+    }
+
+    async function readSearchedVideo(keyword, offset, { signal }) {
+      const url = new URL('/files/search', API_ORIGIN);
+      url.search = new URLSearchParams({
+        aid: '1', cid: '0', type: '4', show_dir: '0',
+        search_value: keyword, limit: '1', offset: String(offset)
+      });
+      const payload = parseApiResponse(await request(url.href, { signal }));
+      throwIfAborted(signal);
+      const reportedCount = integerValue(payload.count, 'count');
+      const resultOffset = integerValue(payload.offset, 'offset', payload.data.length ? null : offset);
+      if (reportedCount === null || resultOffset !== offset || payload.data.length > 1) {
+        throw new N115DataError('115 未能确认关键词搜索结果，请重试');
+      }
+      // Web search only serves positions within the first 10,000 results.
+      return { count: Math.min(10000, reportedCount), capped: reportedCount > 10000,
+        item: normalizeListedVideo(payload) };
+    }
+
+    function normalizeListedVideo(payload) {
       const row = payload.data[0];
+      if (row?.fid == null) return null;
       const segments = normalizePathSegments(payload.path);
-      const item = row?.fid != null
-        ? normalizeRecord(row, '0', segments.at(-1)?.id === String(row.cid) ? segments : [])
-        : null;
-      return { count, item: item?.isVideo ? item : null };
+      const item = normalizeRecord(row, '0', segments.at(-1)?.id === String(row.cid) ? segments : []);
+      return item?.isVideo ? item : null;
     }
 
     async function readVideoFolder(parentId, { signal }) {
@@ -1279,6 +1300,7 @@
       listDirectory,
       streamDirectory,
       readGlobalVideo,
+      readSearchedVideo,
       readVideoFolder,
       scanTree,      defaultPageSize: DEFAULT_PAGE_SIZE
     });
@@ -2854,7 +2876,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.8.3';
+  const VERSION = '1.8.4';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -3404,7 +3426,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.8.3';
+  const VERSION = '1.8.4';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3426,6 +3448,7 @@
   });
   const FULL_DISK_RESERVE = 6;
   const FULL_DISK_BATCH_ATTEMPTS = 24;
+  const FULL_DISK_STALL_MS = 55000;
   let active = null;
   let opening = false;
   let fullDiskAccountId = null;
@@ -4419,7 +4442,7 @@
     if (session.infoText) session.infoText.textContent = folderMode
       ? '同目录 · ' + folderMode.folderPath + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
       : favoriteMode ? '收藏夹 · ' + favoriteMode.folderName + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
-        : (session.fullDiskSource && !session.fullDiskSource.filters.favoritesOnly ? '115 视频范围 ' : '共 ') +
+        : (session.fullDiskSource ? fullDiskCountLabel(session.fullDiskSource) + ' ' : '共 ') +
           candidateTotal + ' 个视频 · ' + layoutLabel;
     const scopeLabel = session.fullDiskSource ? '全盘探索 · ' + fullDiskStateLabel(session.fullDiskSource)
       : session.quickExplore ? '快速探索 · 已收录的视频'
@@ -8771,13 +8794,17 @@
     return offset;
   }
 
+  function fullDiskSearchTerm(filters) {
+    return filters.favoritesOnly ? '' : String(filters.keyword || '').trim().split(/\s+/)[0];
+  }
+
   function createFullDiskSource(accountId, filters, ready, range = null) {
     return {
       taskId: 'direct-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
-      accountId, filters, ready, range,
+      accountId, filters, ready, range, searchTerm: fullDiskSearchTerm(filters),
       controller: new AbortController(),
       items: [], pendingSwaps: new Map(), folderPaths: new Map(),
-      favoriteItems: null, count: range?.count ?? null, accepted: 0,
+      favoriteItems: null, count: range?.count ?? null, accepted: 0, checked: 0,
       refilling: null, starting: false, exhausted: false, limited: false, error: '', accountChanged: false
     };
   }
@@ -8786,11 +8813,19 @@
     return active?.fullDiskSource === source && !active.closed ? active : null;
   }
 
+  function fullDiskCountLabel(source) {
+    if (source.filters.favoritesOnly) return '可抽取收藏';
+    return source.searchTerm ? '关键词搜索范围' : '115 视频范围';
+  }
+
   function fullDiskStateLabel(source) {
     if (source.accountChanged) return '账号已切换，请重新打开探索';
-    if (source.refilling) return '正在抽取视频';
-    if (source.error) return '抽取遇到问题，可重试';
-    if (source.exhausted) return '本轮已抽完';
+    if (source.error) return '抽取暂缓，可继续抽取';
+    if (source.refilling) {
+      if (source.count === null) return source.searchTerm ? '正在搜索关键词' : '正在读取视频范围';
+      return '正在抽取 · 已检查 ' + formatFullDiskCount(source.checked) + ' 个';
+    }
+    if (source.exhausted) return source.accepted ? '本轮已抽完' : '本轮没有符合条件的视频';
     if (source.limited) return '本批已结束，可继续抽取';
     return source.count === null ? '等待抽取' : '随机直抽';
   }
@@ -8798,19 +8833,21 @@
   function renderFullDiskSource(source = active?.fullDiskSource || preparedFullDisk) {
     const session = source && fullDiskSession(source);
     const remaining = session ? session.availableItems.length : (source?.items.length || 0);
+    fullDiskAdjustFiltersButton.hidden = !session;
     fullDiskStartButton.textContent = session ? '继续抽取' : '开始全盘探索';
     fullDiskStartButton.disabled = session
       ? Boolean(source.refilling || source.exhausted || source.accountChanged || session.authBlocked ||
           session.favoriteFolderPlayback?.active)
       : !fullDiskAccountId || Boolean(active || opening || source?.starting);
     fullDiskMetricValues.videos.textContent = source?.count == null ? '—' : formatFullDiskCount(source.count);
-    fullDiskMetricValues.videoLabel.textContent = source?.filters.favoritesOnly ? '可抽取收藏' : '115 视频范围';
+    fullDiskMetricValues.videoLabel.textContent = source ? fullDiskCountLabel(source) : '115 视频范围';
     fullDiskMetricValues.samples.textContent = formatFullDiskCount(remaining);
     fullDiskProgressBar.classList.toggle('is-active', Boolean(source?.refilling));
     fullDiskStatus.textContent = source
       ? fullDiskStateLabel(source) + (remaining ? ' · 待播 ' + formatFullDiskCount(remaining) + ' 个' : '')
       : '开始后从 115 的视频列表抽取，第一格就绪即播放。';
-    fullDiskWarning.textContent = source?.error || '';
+    fullDiskWarning.textContent = source?.error || (source?.range?.capped
+      ? '115 关键词搜索最多可抽取前 10,000 条结果。' : '');
     fullDiskWarning.hidden = !fullDiskWarning.textContent;
   }
 
@@ -8819,8 +8856,8 @@
     preparedFullDisk = null;
   }
 
-  async function confirmFullDiskAccount(source) {
-    const accountId = await resolveAccountId(source.controller.signal);
+  async function confirmFullDiskAccount(source, signal = source.controller.signal) {
+    const accountId = await resolveAccountId(signal);
     if (accountId === source.accountId) return;
     source.accountChanged = true;
     source.items.length = 0;
@@ -8864,13 +8901,16 @@
     return shuffleItems(favoritesWithDetails.filter(allowed));
   }
 
-  async function resolveFullDiskItemPath(source, item) {
-    if (!item.parentId || item.parentId === '0' || item.pathSegments.length ||
-        !(source.filters.folderPath || source.filters.keyword || source.filters.excludeKeyword)) return item;
+  async function resolveFullDiskItemPath(source, item, signal) {
+    if (!item.parentId || item.parentId === '0' || item.pathSegments.length) return item;
+    const { keyword, folderPath, excludeKeyword } = source.filters;
+    const name = item.name.toLocaleLowerCase();
+    const keywordNeedsPath = keyword && !keyword.toLocaleLowerCase().split(/\s+/).every(token => name.includes(token));
+    if (!folderPath && !excludeKeyword && !keywordNeedsPath) return item;
     let lookup = source.folderPaths.get(item.parentId);
     if (!lookup) {
       if (source.folderPaths.size >= 128) source.folderPaths.delete(source.folderPaths.keys().next().value);
-      lookup = fullDiskAdapter.readVideoFolder(item.parentId, { signal: source.controller.signal });
+      lookup = fullDiskAdapter.readVideoFolder(item.parentId, { signal });
       source.folderPaths.set(item.parentId, lookup);
     }
     try {
@@ -8901,8 +8941,8 @@
           source.pendingSwaps.delete(cell);
           replaceCell(session, cell, item);
         } else {
-          setStatus(cell, source.refilling ? '正在从115抽取视频…'
-            : source.error || (source.exhausted ? '本轮暂无其他符合条件的视频'
+          setStatus(cell, source.error || (source.refilling ? fullDiskStateLabel(source) + '…'
+            : source.exhausted ? '本轮暂无其他符合条件的视频，可调整筛选'
               : '本批暂无更多候选，可继续抽取或调整筛选'));
         }
       }
@@ -8916,16 +8956,16 @@
   }
 
   function acceptFullDiskItem(source, item, allowed) {
-    if (source.accountChanged || !allowed(item)) return;
+    if (source.accountChanged || !allowed(item)) return false;
     const session = fullDiskSession(source);
-    if (!session && preparedFullDisk !== source) return;
+    if (!session && preparedFullDisk !== source) return false;
     const queue = session ? session.availableItems : source.items;
     const key = itemKey(item);
-    if (session && (session.filters !== source.filters || session.usedPickcodes.has(key))) return;
-    if (queue.some(candidate => itemKey(candidate) === key)) return;
+    if (session && (session.filters !== source.filters || session.usedPickcodes.has(key))) return false;
+    if (queue.some(candidate => itemKey(candidate) === key)) return false;
     queue.push(item);
     source.accepted++;
-    refreshFullDiskView(source);
+    return true;
   }
 
   function fullDiskNeedsItems(source) {
@@ -8940,9 +8980,25 @@
         !fullDiskNeedsItems(source)) return source.refilling;
     source.error = '';
     source.limited = false;
-    source.refilling = drawFullDiskBatch(source).catch(error => {
-      if (!source.controller.signal.aborted) source.error = String(error?.message || error);
+    const batch = new AbortController();
+    const stopBatch = () => batch.abort();
+    const sourceSignal = source.controller.signal;
+    sourceSignal.addEventListener('abort', stopBatch, { once: true });
+    let deadline;
+    const resetDeadline = () => {
+      clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        source.error = '暂未找到更多匹配视频，可继续抽取或调整筛选。';
+        stopBatch();
+        refreshFullDiskView(source);
+      }, FULL_DISK_STALL_MS);
+    };
+    resetDeadline();
+    source.refilling = drawFullDiskBatch(source, batch.signal, resetDeadline).catch(error => {
+      if (!batch.signal.aborted) source.error = String(error?.message || error);
     }).finally(() => {
+      clearTimeout(deadline);
+      sourceSignal.removeEventListener('abort', stopBatch);
       source.refilling = null;
       if (!source.controller.signal.aborted) refreshFullDiskView(source);
     });
@@ -8950,13 +9006,12 @@
     return source.refilling;
   }
 
-  async function drawFullDiskBatch(source) {
-    const { signal } = source.controller;
+  async function drawFullDiskBatch(source, signal, resetDeadline) {
     const { preferenceState } = await source.ready;
     if (signal.aborted) return;
     const allowed = item => createPlayablePredicate(new Set(), source.filters,
       fullDiskSession(source)?.preferenceState || preferenceState, { trackSeen: false })(item);
-    await confirmFullDiskAccount(source);
+    await confirmFullDiskAccount(source, signal);
     if (source.filters.favoritesOnly) {
       if (!source.favoriteItems) {
         const records = await preferenceStore.listVideoPreferences(source.accountId);
@@ -8965,17 +9020,24 @@
       if (signal.aborted) return;
       source.count ??= source.favoriteItems.length;
       while (source.favoriteItems.length && fullDiskNeedsItems(source)) {
-        acceptFullDiskItem(source, source.favoriteItems.pop(), allowed);
+        if (acceptFullDiskItem(source, source.favoriteItems.pop(), allowed)) {
+          resetDeadline();
+          refreshFullDiskView(source);
+        }
       }
       source.exhausted = !source.favoriteItems.length;
       return;
     }
 
+    const readRank = offset => source.searchTerm
+      ? fullDiskAdapter.readSearchedVideo(source.searchTerm, offset, { signal })
+      : fullDiskAdapter.readGlobalVideo(offset, { signal });
     if (!source.range) {
-      const { count } = await fullDiskAdapter.readGlobalVideo(0, { signal });
-      await confirmFullDiskAccount(source);
-      // The first row only supplies the count. It is eligible at its normal random position.
+      const { count, capped } = await readRank(0);
+      await confirmFullDiskAccount(source, signal);
+      // Position zero remains eligible at its normal random position.
       source.range = createFullDiskRange(count);
+      source.range.capped = capped;
       source.count = count;
       refreshFullDiskView(source);
     }
@@ -8988,20 +9050,24 @@
         if (offset === null) break;
         attempts++;
         try {
-          const result = await fullDiskAdapter.readGlobalVideo(offset, { signal });
-          const item = result.item ? await resolveFullDiskItemPath(source, result.item) : null;
-          await confirmFullDiskAccount(source);
-          if (signal.aborted || source.range !== range) continue;
-          if (result.count !== range.count) {
+          const result = await readRank(offset);
+          if (signal.aborted) throw signal.reason;
+          const item = result.item ? await resolveFullDiskItemPath(source, result.item, signal) : null;
+          await confirmFullDiskAccount(source, signal);
+          if (signal.aborted) throw signal.reason;
+          if (source.range !== range) continue;
+          if (!source.searchTerm && result.count !== range.count) {
             source.count = result.count;
             source.range = createFullDiskRange(result.count);
             refreshFullDiskView(source);
             continue;
           }
-          acceptFullDiskItem(source, item, allowed);
+          source.checked++;
+          if (acceptFullDiskItem(source, item, allowed)) resetDeadline();
+          refreshFullDiskView(source);
         } catch (error) {
+          if (!source.controller.signal.aborted) range.retry.push(offset);
           if (signal.aborted) return;
-          range.retry.push(offset);
           source.error = String(error?.message || error);
         }
       }
@@ -9030,8 +9096,8 @@
     const previous = session.fullDiskSource;
     previous.controller.abort();
     const filters = session.filters;
-    const range = previous.filters.favoritesOnly || filters.favoritesOnly || previous.count === null
-      ? null : createFullDiskRange(previous.count);
+    const range = previous.range && !filters.favoritesOnly && previous.searchTerm === fullDiskSearchTerm(filters)
+      ? Object.assign(createFullDiskRange(previous.range.count), { capped: previous.range.capped }) : null;
     session.fullDiskSource = createFullDiskSource(session.accountId, filters, Promise.resolve(session), range);
     session.scan.scanId = session.fullDiskSource.taskId;
     session.roundNumber++;
@@ -10261,7 +10327,7 @@
   const fullDiskScopeButton = createScopeButton('full-disk', '全盘探索', '整个 115 网盘', '从 115 的视频列表直接随机抽取，发现尚未收录的视频。');
   const exploreHint = element('div', 'full-disk-hint', '两种范围共用筛选、随机换片、锁定、本轮去重和收藏。');
   const fullDiskHint = element('div', 'full-disk-hint',
-    '全盘抽取可能需要十几秒。第一格就绪即开始播放，其他格子和换片候选会在后台陆续补齐。');
+    '填写包含关键词后，从 115 的文件名搜索结果中抽取。查找目录可填写文件夹路径。第一格就绪即开始播放。');
 
   const fullDiskFields = element('div', 'full-disk-fields');
   function createFullDiskField(labelText, input) {
@@ -10311,7 +10377,15 @@
   const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary', '开始全盘探索');
   fullDiskStartButton.type = 'button';
   fullDiskStartButton.onclick = () => { void startFullDiskExplore(); };
-  fullDiskActions.append(fullDiskStartButton);
+  const fullDiskAdjustFiltersButton = element('button', 'full-disk-action', '调整筛选');
+  fullDiskAdjustFiltersButton.type = 'button';
+  fullDiskAdjustFiltersButton.hidden = true;
+  fullDiskAdjustFiltersButton.onclick = () => {
+    if (!active?.fullDiskSource) return;
+    closeExploreDialog();
+    setToolsDrawerTab(active, 'filter', false);
+  };
+  fullDiskActions.append(fullDiskStartButton, fullDiskAdjustFiltersButton);
 
   const fullDiskMetrics = element('div', 'full-disk-metrics');
   const fullDiskMetricValues = {

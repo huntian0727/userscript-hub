@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 
 const source = path.resolve(__dirname, '../../userscripts/115-multiview-full-disk.user.js');
+const keyword = process.argv.includes('--keyword') ? 'fixture' : '';
 const chrome = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 if (!fs.existsSync(chrome)) {
   process.stderr.write('Chrome executable not found: ' + chrome + '\n');
@@ -20,7 +21,7 @@ try {
   if (!realScript.includes(preferenceStore)) throw new Error('Browser fixture requires the player preference store boundary');
   // Chrome's virtual clock can finish before IndexedDB I/O in a fresh temporary profile.
   const fixtureStore = `const preferenceStore = {
-    getPlayerSettings: async () => ({ layoutCount: 4, layoutMode: 'grid', filters: {} }),
+    getPlayerSettings: async () => ({ layoutCount: 4, layoutMode: 'grid', filters: { keyword: ${JSON.stringify(keyword)} } }),
     listVideoPreferences: async () => [], listProfiles: async () => [], listRecentDirectories: async () => [],
     savePlayerSettings: async (_accountId, settings) => settings
   };`;
@@ -32,18 +33,20 @@ try {
     'window.__smokeErrors=[];',
     'window.addEventListener("error", event => window.__smokeErrors.push(String(event.message)));',
     'window.__fileRequests=[]; window.__streams=[]; window.__canceled=0;',
+    'const keyword = ' + JSON.stringify(keyword) + ';',
     'window.GM_xmlhttpRequest = options => {',
     '  const url = new URL(options.url);',
     '  const reply = (body, delay) => setTimeout(() => options.onload({status:200, finalUrl:url.href, responseText:JSON.stringify(body)}), delay);',
     '  let timer;',
     '  let drawing = false;',
     '  if (url.pathname === "/offine/downpath") timer = reply({state:true,data:[{user_id:"smoke-account"}]}, 1);',
-    '  else if (url.pathname === "/files") {',
+    '  else if (["/files", "/files/search"].includes(url.pathname)) {',
     '    const offset = Number(url.searchParams.get("offset"));',
-    '    const direct = url.searchParams.get("cur") === "0" && url.searchParams.get("type") === "4";',
-    '    const rank = window.__fileRequests.push({offset,direct});',
+    '    const expectedQuery = keyword ? url.pathname === "/files/search" && url.searchParams.get("search_value") === keyword',
+    '      : url.pathname === "/files" && url.searchParams.get("cur") === "0";',
+    '    const rank = window.__fileRequests.push({offset,expectedQuery:expectedQuery&&url.searchParams.get("type")==="4"});',
     '    drawing = true;',
-    '    timer = reply({state:true,count:1000000,offset,data:[{fid:String(offset+1),cid:"23",n:"fixture-"+offset+".mp4",s:"1024",pc:"smoke"+offset,iv:1}]}, rank === 2 ? 200 : rank === 1 ? 35 : 650);',
+    '    timer = reply({state:true,count:keyword?1268:1000000,offset,data:[{fid:String(offset+1),cid:"23",n:"fixture-"+offset+".mp4",s:"1024",pc:"smoke"+offset,iv:1}]}, rank === 2 ? 200 : rank === 1 ? 35 : 650);',
     '  } else if (url.pathname.startsWith("/api/video/m3u8/")) window.__streams.push(url.pathname);',
     '  return {abort(){ if (timer) clearTimeout(timer); if (drawing) window.__canceled++; }};',
     '};',
@@ -79,7 +82,7 @@ try {
     '      result.firstFilled = [...shadow.querySelectorAll(".cell .fname")].filter(el => el.textContent.startsWith("fixture-")).length;',
     '      await until(() => window.__streams.length >= 4);',
     '      result.filled = window.__streams.length;',
-    '      result.onlyDirect = window.__fileRequests.every(request => request.direct);',
+    '      result.expectedQuery = window.__fileRequests.every(request => request.expectedQuery);',
     '      shadow.querySelector(".player-exit-button").click();',
     '      result.closed = !shadow.querySelector(".panel") && window.__canceled > 0;',
     '    } catch(error) { result.errors.push(String(error)); result.diagnostic = { files:window.__fileRequests, streams:window.__streams.length, status:shadow.querySelector(".explore-full-disk-controls [role=status]")?.textContent, warning:shadow.querySelector(".full-disk-warning")?.textContent }; }',
@@ -108,8 +111,8 @@ try {
   process.stdout.write(JSON.stringify(output, null, 2) + '\n');
   if (!state || !state.indexHost || !state.playerHost || !state.unifiedButton || !state.playbackButton ||
       state.scopeChoices.join(',') !== '快速探索,全盘探索' || !state.overlayOpened || state.errors.length ||
-      !state.prewarmed || state.firstStream !== '/api/video/m3u8/smoke750000.m3u8' || state.firstFilled !== 1 ||
-      state.filled !== 4 || !state.onlyDirect || !state.closed) {
+      !state.prewarmed || state.firstStream !== '/api/video/m3u8/smoke' + (keyword ? 951 : 750000) + '.m3u8' || state.firstFilled !== 1 ||
+      state.filled !== 4 || !state.expectedQuery || !state.closed) {
     process.exitCode = 1;
   }
 } finally {
