@@ -1,6 +1,6 @@
 # Full-disk random explorer — algorithm lab v0.1
 
-Status: public test candidate v1.6.1 / delivery FDX-161-01. The streaming adapter, bounded global-sample core, dedicated IndexedDB store and resumable runner are bundled into the independent userscript. The standalone release now declares separate, collision-free DOM host IDs for the index-manager UI and player UI; this fixes the v1.6.0 startup ReferenceError that prevented both launchers from appearing. Synthetic end-to-end coverage is passing; no real 115 account scan has been run.
+Status: public test candidate v1.6.2 / delivery FDX-162-01. Restores three omitted startup constants from the stable player (MAX_VIDEOS, DEFAULT_DUAL_SMALL_COUNT and API_ORIGIN) after the v1.6.1 button fix. Startup regression tests execute the actual player session initializer and the actual index-manager request code with synthetic fixtures, and confirm the v1.6.1 failure can be reproduced without any live 115 calls. The two independent host IDs, separate install/update channel and immutable historical releases remain intact.
 
 ## What the current code already proves
 
