@@ -43,10 +43,8 @@
     },
     {
       "id": "115-video-universe",
-      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.0）",
-      "description": "独立探索试点：WebGL 3D星球、旋转缩放、自动公转、镜头聚焦飞行、随机跃迁、真实115目录只读扫描与九格视频样本；保持稳定版和全盘探索版独立。",
-      "source": "userscripts/115-video-universe.user.js",
-      "channel": "独立公开测试版 · v0.2.0（真实115账号验收后置）",
-      "enabled": true
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.1）",
+      "description": "独立探索：单击星球即平滑居中并变为旋转中心，保留WebGL三维旋转、缩放、随机跃迁、真实目录只读扫描与九格样本；不影响其他播放器。",       "source": "userscripts/115-video-universe.user.js",
+      "channel": "独立公开测试版 · v0.2.1（真实115账号验收后置）",      "enabled": true
     }
   ]}

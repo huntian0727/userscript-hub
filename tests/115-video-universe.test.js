@@ -29,8 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.0');
-  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.1');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -48,8 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-020-01';/);
-  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-021-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /演示数据，不代表真实115文件/);
@@ -110,13 +108,12 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /当前试点不内嵌视频解码/);
 });
 
-test('v0.2.0 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.0.user.js');
-  assert.ok(fs.existsSync(pathToSnapshot), 'new version snapshot should exist');
+test('v0.2.1 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.1.user.js');
+  assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
 });
-
 test('3D placement uses genuine XYZ depth and stays deterministic', () => {
   const parent = { id: '0', x: 0, y: 0, z: 0, depth: 0 };
   const points = Array.from({ length: 12 }, (_, i) => core.placeChild(parent, i, String(100 + i)));
@@ -159,11 +156,19 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-020-01';/);
-});
+  assert.match(source, /const DELIVERY = 'VU-021-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
   assert.equal(readMetadata(old).version, '0.1.0');
   assert.equal(readMetadata(old).namespace, readMetadata(source).namespace);
+});
+
+test('v0.2.0 is retained and single-click must focus rather than only select', () => {
+  const previous = fs.readFileSync(path.join(root, 'history/115-video-universe/0.2.0.user.js'), 'utf8');
+  assert.equal(readMetadata(previous).version, '0.2.0');
+  assert.equal(readMetadata(previous).namespace, readMetadata(source).namespace);
+  assert.match(source, /if \(planet\) selectPlanet\(planet\.id, true\);/);
+  assert.doesNotMatch(source, /if \(planet\) selectPlanet\(planet\.id, false\);/);
+  assert.match(source, /单击星球即成为画面与旋转中心/);
 });

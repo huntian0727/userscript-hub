@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.0
+// @version      0.2.1
 // @description  115独立3D视频宇宙：WebGL球体、自由旋转、缩放、镜头飞行、星球迷雾、真实目录只读探索与随机跃迁。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
@@ -14,8 +14,9 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.0';
-  const DELIVERY = 'VU-020-01';  const API_ORIGIN = 'https://webapi.115.com';
+  const VERSION = '0.2.1';
+  const DELIVERY = 'VU-021-01';
+  const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
   const MAX_PAGES_PER_DIRECTORY = 70;
@@ -223,9 +224,9 @@
       '</header>',
       '<div class="body">',
         '<div class="scene">',
-          '<canvas id="universe-canvas" aria-label="3D星球宇宙：鼠标旋转、Shift或右键平移、滚轮缩放、双击聚焦"></canvas>',
+          '<canvas id="universe-canvas" aria-label="3D星球宇宙：单击星球即移动到中心，拖动旋转，滚轮缩放"></canvas>',
           '<canvas id="universe-label-layer" class="label-layer" aria-hidden="true"></canvas>',
-          '<div class="hint" id="instruction">左键拖动旋转3D宇宙 · Shift/右键拖动平移 · 滚轮缩放 · 单击选中 · 双击聚焦星球</div>',
+          '<div class="hint" id="instruction">单击星球即成为画面与旋转中心 · 左键拖动旋转3D宇宙 · Shift/右键平移 · 滚轮缩放 · 点击空白返回全景</div>',
           '<div class="hud">',
             '<div class="metric"><div id="metric-folders" class="num">0</div><div class="tiny">已发现星球</div></div>',
             '<div class="metric"><div id="metric-videos" class="num">0</div><div class="tiny">已扫描视频</div></div>',
@@ -526,7 +527,8 @@
       state.queue.unshift(id);
       state.notice = '已将「' + node.name + '」移到下一个探索目标。';
     }
-    if (focus) flyToPlanet(node, 1000);    refreshPanel();
+    if (focus) flyToPlanet(node, 900);
+    refreshPanel();
   }
 
   function jumpRandom() {
@@ -900,7 +902,7 @@
     ui.canvas.classList.remove('drag');
     if (!dragged && event.button === 0) {
       const planet = hitPlanet(event.clientX, event.clientY);
-      if (planet) selectPlanet(planet.id, false);
+      if (planet) selectPlanet(planet.id, true);
       else {
         state.selected = state.rootId;
         flyToPlanet(state.nodes.get(state.rootId), 900, true);
