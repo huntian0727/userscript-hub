@@ -16,9 +16,9 @@ function coreOf(script = source) {
   assert.ok(a >= 0 && b > a, 'pure video-universe model function boundary');
   return new Function(
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
-    "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
+    "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.2');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.3');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-022-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-023-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /演示数据，不代表真实115文件/);
@@ -108,8 +108,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /不在宇宙中解码视频/);
 });
 
-test('v0.2.2 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.2.user.js');
+test('v0.2.3 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.3.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -156,7 +156,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-022-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-023-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -170,7 +170,7 @@ test('v0.2.0 is retained and single-click must focus rather than only select', (
   assert.equal(readMetadata(previous).namespace, readMetadata(source).namespace);
   assert.match(source, /if \(planet\) selectPlanet\(planet\.id, true\);/);
   assert.doesNotMatch(source, /if \(planet\) selectPlanet\(planet\.id, false\);/);
-  assert.match(source, /单击星球即成为画面与旋转中心/);
+  assert.match(source, /单击目录星球居中/);
 });
 
 test('focused planets expand to a deterministic paginated neighborhood and leaf shows siblings', () => {
@@ -211,4 +211,40 @@ test('native playback URL accepts only valid pickcodes and uses the 115 domain',
   assert.equal(core.humanFileSize(0), '大小未知');
   assert.match(source, /ui\.previewPlay\.addEventListener\('click', open115Video\)/);
   assert.match(source, /changeOrbitPage\(-1\)/);
+});
+
+
+test('v0.2.3 video moons remain a bounded, deterministic, view-only orbit', () => {
+  const sample = Array.from({ length: 16 }, (_, i) =>
+    ({ id: String(100 + i), name: '视频 ' + i + '.mp4', parentId: '1' }));
+  const folder = { id: '1', x: 100, y: 20, z: -70, depth: 1, sample };
+  const a = core.orbitingVideoMoons(folder, 2000);
+  const b = core.orbitingVideoMoons(folder, 2000);
+  assert.equal(a.length, 9);
+  assert.deepEqual(a, b, 'same time and samples yield identical positions');
+  assert.equal(new Set(a.map(m => m.id)).size, 9);
+  assert.ok(a.every(m => m.type === 'video' && m.record.parentId === '1'));
+  assert.ok(a.every(m => Number.isFinite(m.x) && Number.isFinite(m.y) && Number.isFinite(m.z)));
+  assert.notDeepEqual(core.orbitingVideoMoons(folder, 4000)[0].x, a[0].x, 'moons orbit with time');
+  assert.equal(folder.sample.length, 16, 'the sampled records must remain unchanged');
+  assert.deepEqual(core.orbitingVideoMoons({ ...folder, sample: [] }, 100), []);
+  assert.deepEqual(core.orbitingVideoMoons(null, 100), []);
+});
+
+test('v0.2.3 parent navigation uses real directory ancestry and never a video record', () => {
+  const nodes = new Map([
+    ['0', { id: '0', parentId: null }],
+    ['1', { id: '1', parentId: '0' }],
+    ['2', { id: '2', parentId: '1' }],
+    ['dangling', { id: 'dangling', parentId: 'missing' }]
+  ]);
+  assert.equal(core.focusedParent(nodes, '2'), '1');
+  assert.equal(core.focusedParent(nodes, '1'), '0');
+  assert.equal(core.focusedParent(nodes, '0'), null);
+  assert.equal(core.focusedParent(nodes, 'dangling'), null);
+  assert.equal(core.focusedParent(nodes, 'absent'), null);
+  assert.match(source, /if \(planet\?\.type === 'video'\) showVideoPreview\(planet\.record\)/);
+  assert.match(source, /ui\.parent\.addEventListener\('click', returnToParent\)/);
+  assert.match(source, /ui\.moonToggle\.addEventListener\('click'/);
+  assert.doesNotMatch(source, /indexedDB\.deleteDatabase|GM_setValue/);
 });

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.2
-// @description  115独立3D视频宇宙：星球聚焦展开子星球、分页漫游、视频信息预览与115原生播放入口；保留3D旋转、只读扫描与随机跃迁。
+// @version      0.2.3
+// @description  115独立3D视频宇宙：聚焦星球后显示可点击的环绕视频卫星、返回上级星球、视频信息预览与115原生播放入口。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -14,8 +14,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.2';
-  const DELIVERY = 'VU-022-01';
+  const VERSION = '0.2.3';
+  const DELIVERY = 'VU-023-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -26,6 +26,7 @@
   const MAX_SAMPLE_PER_PLANET = 16;
   const ORBIT_PAGE_SIZE = 12;
   const ORBIT_TRANSITION_MS = 750;
+  const VIDEO_MOON_LIMIT = 9;
   const VIDEO_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;
   const DEMO = [
     ['影像星云', 142, 7], ['旧时光', 86, 5], ['银河档案', 203, 9],
@@ -211,6 +212,32 @@
     return size.toFixed(unit && size < 10 ? 1 : 0) + ' ' + units[unit];
   }
 
+  // A video moon is a view-only projection of a scanned sample, never a directory node.
+  function orbitingVideoMoons(folder, timestamp, limit = VIDEO_MOON_LIMIT) {
+    if (!folder || !Array.isArray(folder.sample)) return [];
+    const records = folder.sample.slice(0, limit);
+    const count = records.length;
+    if (!count) return [];
+    return records.map((record, index) => {
+      const phase = index * (Math.PI * 2 / count) + timestamp * 0.00013;
+      const radius = count < 5 ? 94 : 112;
+      return {
+        id: 'video:' + folder.id + ':' + record.id,
+        type: 'video',
+        record,
+        x: folder.x + Math.cos(phase) * radius,
+        y: folder.y + Math.sin(phase) * radius * 0.72,
+        z: (folder.z || 0) + Math.sin(phase * 1.3) * 34,
+        depth: folder.depth + 1, scanned: true, observedVideos: 0
+      };
+    });
+  }
+
+  function focusedParent(nodes, id) {
+    const node = nodes.get(id);
+    return node && node.parentId && nodes.has(node.parentId) ? node.parentId : null;
+  }
+
   const CSS = [
     ':host{all:initial;font-family:Inter,system-ui,"Microsoft YaHei",sans-serif;color:#e9efff;}',
     '*{box-sizing:border-box;}button,input{font:inherit;}button{cursor:pointer;}',
@@ -252,6 +279,9 @@
     '.orbit-neighbors button{text-align:left;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
     'background:#1b3055;border:1px solid #537aae66;color:#d5ecff;border-radius:9px;padding:8px;font-size:11px;}',
     '.orbit-neighbors button:hover{background:#294775}.orbit-status{font-size:11px;color:#9bb5d7;}',
+    '.moon-heading{display:flex;align-items:center;gap:9px;justify-content:space-between;}',
+    '.moon-count{font-size:11px;color:#9fd5fc}.moon-switch{font-size:11px;padding:6px 10px;}',
+    '.video-card[aria-pressed="true"]{border-color:#adf2ff;background:linear-gradient(160deg,#284677,#27245a);}',
     '.video-preview{background:linear-gradient(145deg,#233869,#141e3d);border:1px solid #7ab6ee66;',
     'border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:9px;}',
     '.video-preview[hidden]{display:none!important}.preview-stage{min-height:112px;border-radius:10px;',
@@ -290,7 +320,7 @@
         '<div class="scene">',
           '<canvas id="universe-canvas" aria-label="3D星球宇宙：单击星球即移动到中心，拖动旋转，滚轮缩放"></canvas>',
           '<canvas id="universe-label-layer" class="label-layer" aria-hidden="true"></canvas>',
-          '<div class="hint" id="instruction">单击星球即成为画面与旋转中心 · 左键拖动旋转3D宇宙 · Shift/右键平移 · 滚轮缩放 · 点击空白返回全景</div>',
+          '<div class="hint" id="instruction">单击目录星球居中 · 点击发光视频卫星查看信息 · 拖动旋转 · 滚轮缩放 · 空白返回全景</div>',
           '<div class="hud">',
             '<div class="metric"><div id="metric-folders" class="num">0</div><div class="tiny">已发现星球</div></div>',
             '<div class="metric"><div id="metric-videos" class="num">0</div><div class="tiny">已扫描视频</div></div>',
@@ -307,6 +337,7 @@
           '<div class="info" id="side-summary">每个文件夹是一颗星球。先体验演示星图，再开始读取自己的115目录。</div>',
           '<div class="actions"><button class="btn primary" id="jump" type="button">⚡ 随机跃迁</button>',
           '<button class="btn" id="focus-planet" type="button">◎ 聚焦星球</button>',
+           '<button class="btn" id="parent-planet" type="button">↶ 返回上级星球</button>',
           '<button class="btn" id="open-folder" type="button">在115打开目录</button></div>',
           '<div class="orbit-heading"><div class="title-sm" id="orbit-title">✦ 星球邻域</div><div>',
             '<button class="btn" id="orbit-prev" type="button" title="上一组星球">‹</button> ',
@@ -314,6 +345,8 @@
           '</div></div>',
           '<div class="orbit-status" id="orbit-status">点击一颗星球，展开它的星系</div>',
           '<div class="orbit-neighbors" id="orbit-neighbors"></div>',
+          '<div class="moon-heading"><div class="title-sm">☄ 视频卫星</div><button class="btn moon-switch" id="toggle-moons" type="button" aria-pressed="true">隐藏卫星</button></div>',
+          '<div class="moon-count" id="moon-count">选择一颗星球后即可查看视频卫星</div>',
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
           '<div class="video-preview" id="video-preview" hidden>',
@@ -342,7 +375,8 @@
     list: $('#video-grid'), msg: $('#scan-message'), note: $('#source-note'),
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
     orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
-    orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), preview: $('#video-preview'),
+    orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
+    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), preview: $('#video-preview'),
     previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
     previewPlay: $('#preview-play')
   };
@@ -355,7 +389,8 @@
     scanAbort: null, scanEpoch: 0, running: false, paused: false, scanningCount: 0,
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
     pointer: null, hoverId: null, projected: [], seed: 1,
-    orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null
+    orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
+    videoProjected: [], moonsVisible: true
   };
   const starfield = Array.from({ length: 230 }, (_, i) => ({
     x: ((hashId('star-x-' + i) % 10000) / 10000),
@@ -390,6 +425,7 @@
     state.camera = cameraDefaults();
     state.orbitActive = false; state.orbitPage = 0;
     state.orbitFrom = null; state.orbitStarted = 0; state.previewRecord = null;
+    state.videoProjected = [];
     ui.preview.hidden = true;
     $('#spin').textContent = '⏸ 停止自转';
     $('#spin').setAttribute('aria-pressed', 'true');
@@ -638,6 +674,7 @@
       state.selected = state.rootId;
     });
     state.previewRecord = null;
+    state.videoProjected = [];
     ui.preview.hidden = true;
     flyToPlanet(state.nodes.get(state.rootId), 950, true);
     refreshPanel();
@@ -655,12 +692,21 @@
   function showVideoPreview(record) {
     state.previewRecord = record;
     ui.preview.hidden = false;
+    for (const card of ui.list.querySelectorAll('.video-card')) {
+      card.setAttribute('aria-pressed', String(card.dataset.videoId === String(record.id)));
+    }
     ui.previewName.textContent = record.name;
     ui.previewDetail.textContent = humanFileSize(record.size) +
       ' · ' + (state.mode === 'demo' ? '演示数据（无法播放）' : '真实115文件 · 从115官方页面播放');
     ui.previewPlay.disabled = state.mode !== 'real' || !videoPlaybackUrl(record);
     ui.previewPlay.title = ui.previewPlay.disabled ? '缺少有效提取码，无法直接打开播放页' : '交由115官方播放器播放';
     $('#preview-folder').disabled = state.mode !== 'real';
+  }
+
+  function returnToParent() {
+    const parentId = focusedParent(state.nodes, state.selected);
+    if (parentId) selectPlanet(parentId, true);
+    else resetOverview();
   }
 
   function selectPlanet(id, focus = true) {
@@ -672,6 +718,7 @@
       state.orbitPage = 0;
     });
     state.previewRecord = null;
+    state.videoProjected = [];
     ui.preview.hidden = true;
     state.visited.add(id);
     if (state.mode === 'real' && !node.scanned && node.depth <= MAX_DEPTH) {
@@ -731,6 +778,13 @@
         : '探索中，仅展示已经读取的目录和视频。');
     ui.msg.textContent = state.notice || '点击星球深入探索，或点击「随机跃迁」。';
     ui.folder.disabled = state.mode === 'demo';
+    ui.parent.disabled = !focusedParent(state.nodes, node.id);
+    const moonCount = node.sample.length;
+    ui.moonCount.textContent = (state.orbitActive ? moonCount + ' 颗已发现视频卫星（样本，不代表全部）' :
+      '聚焦星球后出现环绕视频卫星') +
+      (state.mode === 'demo' ? ' · 演示数据' : '');
+    ui.moonToggle.textContent = state.moonsVisible ? '隐藏卫星' : '显示卫星';
+    ui.moonToggle.setAttribute('aria-pressed', String(state.moonsVisible));
     ui.scan.textContent = state.paused && state.mode === 'real' && state.queue.length ? '继续探索' : '探索真实115宇宙';
     const neighborhood = state.orbitActive ?
       orbitNeighborhood(state.nodes, node.id, state.orbitPage) : null;
@@ -768,6 +822,8 @@
         const card = document.createElement('button');
         card.className = 'video-card';
         card.type = 'button';
+        card.dataset.videoId = String(record.id);
+        card.setAttribute('aria-pressed', String(state.previewRecord?.id === record.id));
         const icon = document.createElement('span');
         icon.className = 'video-icon';
         icon.textContent = '▣';
@@ -977,6 +1033,14 @@
         return { node, screen: projectedPlanet(visual, state.camera, w, h) };
       });
     state.projected = entries;
+    const selectedFolder = state.orbitActive && state.nodes.get(state.selected);
+    state.videoProjected = selectedFolder && state.moonsVisible
+      ? orbitingVideoMoons(selectedFolder, timestamp).map(moon => {
+        const screen = projectedPlanet(moon, state.camera, w, h);
+        screen.radius = clamp(screen.radius * 0.52, 8, 17);
+        return { node: moon, screen };
+      }).filter(entry => entry.screen.visible)
+      : [];
     const lookup = new Map(entries.map(entry => [entry.node.id, entry.screen]));
     const links = [];
     for (const { node, screen } of entries) {
@@ -1050,12 +1114,40 @@
       }
       overlay.shadowBlur = 0;
     }
+    // Video moons share the 3D camera but remain a separate, non-persistent visual layer.
+    for (const { node, screen } of state.videoProjected.slice().sort((a, b) => b.screen.depth - a.screen.depth)) {
+      if (screen.x < -25 || screen.x > w + 25 || screen.y < -25 || screen.y > h + 25) continue;
+      const picked = state.previewRecord && state.previewRecord.id === node.record.id;
+      const hovered = state.hoverId === node.id;
+      const radius = screen.radius;
+      const glow = overlay.createRadialGradient(screen.x, screen.y, 1, screen.x, screen.y, radius + 11);
+      glow.addColorStop(0, picked ? '#fff6d8' : '#b9fcff');
+      glow.addColorStop(0.42, picked ? '#ffc36b' : '#6addff');
+      glow.addColorStop(1, '#36c7ff00');
+      overlay.fillStyle = glow;
+      overlay.beginPath(); overlay.arc(screen.x, screen.y, radius + 11, 0, Math.PI * 2); overlay.fill();
+      overlay.fillStyle = picked ? '#ffdd8f' : '#a2e8ff';
+      overlay.beginPath(); overlay.arc(screen.x, screen.y, radius * 0.65, 0, Math.PI * 2); overlay.fill();
+      if (picked || hovered) {
+        overlay.strokeStyle = '#f4faff';
+        overlay.lineWidth = 1.8;
+        overlay.beginPath(); overlay.arc(screen.x, screen.y, radius + 4, 0, Math.PI * 2); overlay.stroke();
+        const label = node.record.name.length > 16 ? node.record.name.slice(0, 15) + '…' : node.record.name;
+        overlay.fillStyle = '#ecf9ff';
+        overlay.font = '12px "Microsoft YaHei",sans-serif';
+        overlay.textAlign = 'center';
+        overlay.fillText(label, screen.x, screen.y + radius + 21, 190);
+      }
+    }
     requestAnimationFrame(drawFrame);
   }
 
   function hitPlanet(clientX, clientY) {
     const rect = ui.canvas.getBoundingClientRect();
-    return nearestPlanetAt(state.projected, clientX - rect.left, clientY - rect.top);
+    const x = clientX - rect.left, y = clientY - rect.top;
+    // Click a video moon before a folder sphere if their projections overlap.
+    return nearestPlanetAt(state.videoProjected, x, y) ||
+      nearestPlanetAt(state.projected, x, y);
   }
 
   ui.canvas.addEventListener('contextmenu', event => event.preventDefault());
@@ -1085,7 +1177,11 @@
           state.camera.pitch = clamp(pointer.pitch - dy * 0.005, -1.4, 1.4);
         }
       }
-    } else state.hoverId = hitPlanet(event.clientX, event.clientY)?.id || null;
+    } else {
+      const hovered = hitPlanet(event.clientX, event.clientY);
+      state.hoverId = hovered?.id || null;
+      ui.canvas.style.cursor = hovered?.type === 'video' ? 'pointer' : 'grab';
+    }
   });
   ui.canvas.addEventListener('pointerup', event => {
     const dragged = state.pointer && state.pointer.moved;
@@ -1093,7 +1189,8 @@
     ui.canvas.classList.remove('drag');
     if (!dragged && event.button === 0) {
       const planet = hitPlanet(event.clientX, event.clientY);
-      if (planet) selectPlanet(planet.id, true);
+      if (planet?.type === 'video') showVideoPreview(planet.record);
+      else if (planet) selectPlanet(planet.id, true);
       else resetOverview();
     }
   });
@@ -1103,7 +1200,8 @@
   ui.canvas.addEventListener('dblclick', event => {
     event.preventDefault();
     const planet = hitPlanet(event.clientX, event.clientY);
-    if (planet) selectPlanet(planet.id, true);
+    if (planet?.type === 'video') showVideoPreview(planet.record);
+    else if (planet) selectPlanet(planet.id, true);
     else resetOverview();
   });
   ui.canvas.addEventListener('wheel', event => {
@@ -1125,6 +1223,12 @@
   ui.demo.addEventListener('click', populateDemo);
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
+  ui.parent.addEventListener('click', returnToParent);
+  ui.moonToggle.addEventListener('click', () => {
+    state.moonsVisible = !state.moonsVisible;
+    if (!state.moonsVisible) state.videoProjected = [];
+    refreshPanel();
+  });
   ui.orbitPrev.addEventListener('click', () => changeOrbitPage(-1));
   ui.orbitNext.addEventListener('click', () => changeOrbitPage(1));
   ui.previewPlay.addEventListener('click', open115Video);
