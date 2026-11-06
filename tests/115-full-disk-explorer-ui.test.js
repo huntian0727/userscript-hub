@@ -17,7 +17,7 @@ test('the player and directory manager have separate DOM hosts', () => {
     'local-115-multiview-full-disk-v1-6'
   ]);
   assert.equal(new Set(hostIds).size, 2);
-  assert.match(source, /const VERSION = '1\.8\.1';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const VERSION = '1\.8\.2';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
   assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
 });
 
@@ -37,6 +37,33 @@ test('full-disk scan always starts at the 115 root and recursively traverses sub
   assert.match(source, /maxDirectories: 20000/);
   assert.match(source, /sampleLimit: MAX_CANDIDATES/);
   assert.match(source, /fullDiskStore = N115FullDiskExplorerStore\.createExplorerIndexedDbStore\(\)/);
+});
+
+test('quick exploration uses one classification for displayed rows and playable candidates', () => {
+  const start = source.indexOf('  function recordFolderNames(record) {');
+  const end = source.indexOf('  function shuffleItems(items) {', start);
+  assert.ok(start >= 0 && end > start);
+  const { selectQuickExploreSources, quickExplorePreferences, createQuickExploreInspector } =
+    new Function('DEFAULT_FILTERS', 'itemKey', source.slice(start, end) +
+      '\nreturn { selectQuickExploreSources, quickExplorePreferences, createQuickExploreInspector };')(
+      {}, record => String(record?.pickcode || '').trim().toLowerCase()
+    );
+  const scans = [
+    { scanId: 'new-empty', rootCid: '1', recursive: true, stats: { videos: 0 } },
+    { scanId: 'current', rootCid: '1', recursive: true, stats: { videos: 2 } },
+    { scanId: 'superseded', rootCid: '1', recursive: true, stats: { videos: 5 } },
+    { scanId: 'other', rootCid: '2', recursive: false, stats: { videos: 3 } }
+  ];
+  assert.deepEqual(selectQuickExploreSources(scans).map(scan => scan.scanId), ['current', 'other']);
+  const filters = { keyword: '旅行', minSizeMB: '', maxSizeMB: '' };
+  const preferences = quickExplorePreferences([{ pickcode: 'Excluded001', excluded: true }]);
+  const inspect = createQuickExploreInspector(filters, preferences);
+  assert.deepEqual(inspect({ id: '1', name: '旅行.mp4', pickcode: 'video001', playable: true }),
+    { eligible: true, label: '可抽取' });
+  assert.equal(inspect({ id: '1', name: '旅行.mp4', pickcode: 'VIDEO001', playable: true }), null);
+  assert.equal(inspect({ id: '2', name: '旅行.mp4', pickcode: 'excluded001', playable: true }).label, '已排除');
+  assert.equal(inspect({ id: '3', name: '旅行.mp4', playable: false }).label, '缺少播放信息');
+  assert.equal(inspect({ id: '4', name: '课程.mp4', pickcode: 'video004', playable: true }).label, '不符合本次筛选');
 });
 
 test('full-disk scan exposes progress, pause, background continuation and resume controls', () => {

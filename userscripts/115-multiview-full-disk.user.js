@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.1
+// @version      1.8.2
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -255,23 +255,20 @@
       return items;
     }
 
-    // 使用蓄水池抽样：扫描IndexedDB游标但只在内存保留所需数量，避免一次性载入数万条视频记录。
-    async function sampleVideos(scanId, limit = 4, predicate = null, random = Math.random) {
-      const count = Math.max(1, Math.min(100, Math.floor(Number(limit) || 4)));
-      const accept = typeof predicate === 'function' ? predicate : () => true;
-      const randomValue = typeof random === 'function' ? random : Math.random;
+    async function visitVideos(scanId, visit, signal) {
       const db = await openDatabase();
+      signal?.throwIfAborted();
       const tx = db.transaction('records', 'readonly');
       const done = transactionPromise(tx);
-      const selected = [];
-      let matched = 0;
       const scanIds = Array.isArray(scanId) ? scanId.map(String) : [String(scanId)];
       const index = tx.objectStore('records').index('byScanVideo');
-      const result = await new Promise((resolve, reject) => {
+      const abort = () => { try { tx.abort(); } catch { /* 事务已结束。 */ } };
+      signal?.addEventListener('abort', abort, { once: true });
+      const read = new Promise((resolve, reject) => {
         let scanIndex = 0;
         function readNextScan() {
           if (scanIndex >= scanIds.length) {
-            resolve({ items: selected, total: matched });
+            resolve();
             return;
           }
           const request = index.openCursor(only([scanIds[scanIndex++], 1]));
@@ -282,27 +279,41 @@
                 readNextScan();
                 return;
               }
-              const record = cursor.value;
-              if (accept(record)) {
-                matched += 1;
-                if (selected.length < count) selected.push(record);
-                else {
-                  const slot = Math.floor(Math.max(0, Math.min(0.999999999999, Number(randomValue()) || 0)) * matched);
-                  if (slot < count) selected[slot] = record;
-                }
-              }
-              cursor.continue();
+              if (visit(cursor.value) === false) resolve();
+              else cursor.continue();
             } catch (error) {
               reject(error);
-              try { tx.abort(); } catch { /* 事务可能已结束。 */ }
+              abort();
             }
           };
           request.onerror = () => reject(request.error || new Error('读取视频索引游标失败'));
         }
         readNextScan();
       });
-      await done;
-      return result;
+      try {
+        await Promise.all([read, done]);
+      } finally {
+        signal?.removeEventListener('abort', abort);
+      }
+    }
+
+    // 游标遍历时使用蓄水池抽样，只保留所需数量。
+    async function sampleVideos(scanId, limit = 4, predicate = null, random = Math.random) {
+      const count = Math.max(1, Math.min(100, Math.floor(Number(limit) || 4)));
+      const accept = typeof predicate === 'function' ? predicate : () => true;
+      const randomValue = typeof random === 'function' ? random : Math.random;
+      const selected = [];
+      let matched = 0;
+      await visitVideos(scanId, record => {
+        if (!accept(record)) return;
+        matched += 1;
+        if (selected.length < count) selected.push(record);
+        else {
+          const slot = Math.floor(Math.max(0, Math.min(0.999999999999, Number(randomValue()) || 0)) * matched);
+          if (slot < count) selected[slot] = record;
+        }
+      });
+      return { items: selected, total: matched };
     }
 
 
@@ -437,6 +448,7 @@
       getDirectoryResumeData,
       getVideos,
       getVideoSamples,
+      visitVideos,
       sampleVideos,
       listScans,
       findVideosByPickcodes,
@@ -2779,7 +2791,9 @@
       addVideosToFavoriteFolder,
       moveVideosBetweenFavoriteFolders,
       removeVideosFromFavoriteFolder,
-      updateVideoPreferences,      clearExclusions,
+      setVideoPreference,
+      updateVideoPreferences,
+      clearExclusions,
       getPlayerSettings,
       savePlayerSettings,
       recordRecentDirectory,
@@ -2801,7 +2815,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.8.1';
+  const VERSION = '1.8.2';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -4592,7 +4606,7 @@ module.exports = Object.freeze({ createExplorerRunner });
 (() => {
   'use strict';
 
-  const VERSION = '1.8.1';
+  const VERSION = '1.8.2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -4923,6 +4937,39 @@ module.exports = Object.freeze({ createExplorerRunner });
       return true;
     };
   }
+
+  function selectQuickExploreSources(scans) {
+    const latest = new Map();
+    for (const scan of scans) {
+      const scope = String(scan.rootCid) + ':' + Boolean(scan.recursive);
+      if (Number(scan.stats?.videos) > 0 && !latest.has(scope)) latest.set(scope, scan);
+    }
+    return [...latest.values()];
+  }
+
+  function quickExplorePreferences(records) {
+    return {
+      favoritePickcodes: new Set(records.filter(item => item.favorite).map(item => itemKey(item))),
+      excludedPickcodes: new Set(records.filter(item => item.excluded).map(item => itemKey(item)))
+    };
+  }
+
+  function createQuickExploreInspector(filters, preferences, skip = new Set()) {
+    const seen = new Set();
+    const canPlay = createPlayablePredicate(skip, filters, preferences, { trackSeen: false });
+    return record => {
+      const pickcode = itemKey(record);
+      const key = /^[a-z0-9]{6,64}$/.test(pickcode) ? pickcode : 'file:' + record.id;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      if (canPlay(record)) return { eligible: true, label: '可抽取' };
+      if (preferences.excludedPickcodes.has(pickcode)) return { eligible: false, label: '已排除' };
+      if (record.playable !== true || !/^[a-z0-9]{6,64}$/.test(pickcode)) {
+        return { eligible: false, label: '缺少播放信息' };
+      }
+      return { eligible: false, label: '不符合本次筛选' };
+    };
+  }
   function shuffleItems(items) {
     const result = items.slice();
     for (let index = result.length - 1; index > 0; index--) {
@@ -4965,27 +5012,20 @@ module.exports = Object.freeze({ createExplorerRunner });
     const settings = await preferenceStore.getPlayerSettings(accountId);
     const activeFilters = normalizeFilters(filters === undefined ? settings.filters : filters);
     const preferenceRecords = await preferenceStore.listVideoPreferences(accountId);
-    const preferenceState = {
-      favoritePickcodes: new Set(preferenceRecords.filter(item => item.favorite).map(item => item.pickcode)),
-      excludedPickcodes: new Set(preferenceRecords.filter(item => item.excluded).map(item => item.pickcode))
-    };
+    const preferenceState = quickExplorePreferences(preferenceRecords);
     const profiles = await preferenceStore.listProfiles(accountId);
     const scans = await indexStore.listScans(accountId);
     if (options.allIndexed) {
-      const latest = new Map();
-      for (const scan of scans) {
-        const scope = String(scan.rootCid) + ':' + Boolean(scan.recursive);
-        if (Number(scan.stats?.videos) > 0 && !latest.has(scope)) latest.set(scope, scan);
-      }
-      const sources = [...latest.values()];
+      const sources = selectQuickExploreSources(scans);
       if (!sources.length) {
         throw Object.assign(new Error('还没有已收录的视频。可以先建立目录索引，或选择全盘探索。'), {
           code: 'N115_INDEX_NOT_FOUND'
         });
       }
+      const inspect = createQuickExploreInspector(activeFilters, preferenceState, options.exclude);
       const { items, total } = await indexStore.sampleVideos(
         sources.map(scan => scan.scanId), MAX_CANDIDATES,
-        createPlayablePredicate(options.exclude || new Set(), activeFilters, preferenceState)
+        record => inspect(record)?.eligible === true
       );
       const scan = sources.find(item => String(item.rootCid) === cid) || sources[0];
       return {
@@ -10145,6 +10185,279 @@ module.exports = Object.freeze({ createExplorerRunner });
     return task;
   }
 
+  function createQuickCollectionView() {
+    const pageSize = 40;
+    const summary = element('div', 'collection-summary');
+    const overview = element('div', 'collection-totals');
+    overview.setAttribute('role', 'status');
+    const browse = element('button', 'full-disk-action', '查看收录视频');
+    browse.type = 'button';
+    browse.disabled = true;
+    summary.append(overview, browse);
+
+    const detail = element('section', 'collection-detail');
+    detail.hidden = true;
+    detail.setAttribute('aria-label', '收录视频明细');
+    const title = element('h3', '', '收录视频');
+    const back = element('button', 'full-disk-action', '返回快速探索');
+    back.type = 'button';
+    const header = element('div', 'collection-detail-head');
+    header.append(title, back);
+    const controls = element('div', 'collection-filters');
+    const search = element('input');
+    search.type = 'search';
+    search.placeholder = '搜索视频文件名';
+    search.setAttribute('aria-label', '搜索视频文件名');
+    const directory = element('select');
+    directory.setAttribute('aria-label', '按收录目录筛选');
+    const view = element('select');
+    view.setAttribute('aria-label', '视频范围');
+    function option(label, value) {
+      const node = element('option', '', label);
+      node.value = value;
+      return node;
+    }
+    view.append(option('全部收录', 'all'), option('本次可抽取', 'eligible'));
+    controls.append(search, directory, view);
+    const status = element('div', 'collection-list-status');
+    status.setAttribute('role', 'status');
+    const list = element('ul', 'collection-list');
+    const pager = element('div', 'full-disk-actions collection-pager');
+    const previous = element('button', 'full-disk-action', '上一页');
+    const next = element('button', 'full-disk-action', '下一页');
+    previous.type = next.type = 'button';
+    pager.append(previous, next);
+    detail.append(header, controls, status, list, pager);
+
+    let accountId = null;
+    let dataPromise = null;
+    let overviewRequest = null;
+    let pageRequest = null;
+    let overviewTimer = null;
+    let pageTimer = null;
+    let currentPage = 0;
+
+    function loadData() {
+      if (!dataPromise) {
+        const promise = Promise.all([
+          indexStore.listScans(accountId), preferenceStore.listVideoPreferences(accountId)
+        ]).then(([scans, records]) => {
+          const sources = selectQuickExploreSources(scans);
+          const folders = new Map();
+          for (const scan of sources) {
+            const id = String(scan.rootCid);
+            const folder = folders.get(id) || { id, label: resolveRootDirectoryPath(scan), partial: false };
+            folder.partial ||= scan.status !== 'complete' || scan.complete !== true;
+            folders.set(id, folder);
+          }
+          return {
+            scanIds: sources.map(scan => scan.scanId),
+            byScanId: new Map(sources.map(scan => [String(scan.scanId), scan])),
+            folders, preferences: quickExplorePreferences(records)
+          };
+        });
+        dataPromise = promise;
+        promise.catch(() => { if (dataPromise === promise) dataPromise = null; });
+      }
+      return dataPromise;
+    }
+
+    async function refreshOverview() {
+      const controller = new AbortController();
+      overviewRequest = controller;
+      overview.textContent = '正在统计已收录的视频…';
+      try {
+        const data = await loadData();
+        const filters = readFullDiskFilters();
+        const validation = validateFilters(filters);
+        const inspect = createQuickExploreInspector(validation ? DEFAULT_FILTERS : filters, data.preferences);
+        let count = 0;
+        let eligible = 0;
+        await indexStore.visitVideos(data.scanIds, record => {
+          const result = inspect(record);
+          if (!result) return;
+          count++;
+          if (result.eligible) eligible++;
+        }, controller.signal);
+        if (controller.signal.aborted) return;
+        const partial = [...data.folders.values()].filter(folder => folder.partial).length;
+        overview.replaceChildren(element('strong', '', '已收录 ' + formatFullDiskCount(count) +
+          ' 个视频 · ' + formatFullDiskCount(data.folders.size) + ' 个收录文件夹'),
+        element('span', '', validation || (count
+          ? '当前筛选可抽取 ' + formatFullDiskCount(eligible) + ' 个' +
+            (partial ? ' · ' + partial + ' 个文件夹部分已收录' : '')
+          : '添加收录文件夹后，即可从这里查看视频。')));
+      } catch (error) {
+        if (!controller.signal.aborted) overview.textContent = '读取收录统计失败：' + String(error?.message || error);
+      } finally {
+        if (overviewRequest === controller) overviewRequest = null;
+      }
+    }
+
+    function scheduleOverview(delay = 250) {
+      clearTimeout(overviewTimer);
+      overviewRequest?.abort();
+      if (!accountId || exploreScope !== 'quick' || !detail.hidden) return;
+      overview.textContent = '正在更新收录统计…';
+      overviewTimer = setTimeout(() => { void refreshOverview(); }, delay);
+    }
+
+    function renderRow(record, result, source, invalidFilters) {
+      const row = element('li', 'collection-row');
+      const name = element('strong', 'collection-name', record.name || '未命名视频');
+      const names = recordFolderNames(record);
+      const path = names.length ? '/' + names.join('/') : resolveRootDirectoryPath(source);
+      const bytes = record.sizeBytes == null ? NaN : Number(record.sizeBytes);
+      const size = Number.isFinite(bytes) && bytes >= 0
+        ? (bytes / (1024 * 1024)).toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + ' MB'
+        : '大小未知';
+      const meta = element('span', 'collection-meta', path + ' · ' + size);
+      const label = invalidFilters && (result.eligible || result.label === '不符合本次筛选')
+        ? '筛选条件有误' : result.label;
+      const badge = element('span', 'collection-row-status', label);
+      if (result.eligible && !invalidFilters) badge.classList.add('is-eligible');
+      const info = element('div', 'collection-file');
+      info.append(name, meta);
+      row.append(info, badge);
+      return row;
+    }
+
+    async function readPage(page) {
+      const controller = new AbortController();
+      pageRequest = controller;
+      list.replaceChildren();
+      previous.disabled = next.disabled = true;
+      status.textContent = '正在读取收录视频…';
+      try {
+        const data = await loadData();
+        if (controller.signal.aborted) return;
+        const filters = readFullDiskFilters();
+        const validation = validateFilters(filters);
+        if (validation && view.value === 'eligible') {
+          status.textContent = validation;
+          return;
+        }
+        const query = search.value.trim().toLocaleLowerCase();
+        const root = directory.value;
+        const eligibleOnly = view.value === 'eligible';
+        const inspect = createQuickExploreInspector(validation ? DEFAULT_FILTERS : filters, data.preferences);
+        const rows = [];
+        let offset = page * pageSize;
+        let hasNext = false;
+        await indexStore.visitVideos(data.scanIds, record => {
+          const result = inspect(record);
+          if (!result || (eligibleOnly && !result.eligible)) return;
+          if (query && !String(record.name || '').toLocaleLowerCase().includes(query)) return;
+          const source = data.byScanId.get(String(record.scanId));
+          const inDirectory = !root || root === '0' || String(source?.rootCid) === root ||
+            String(record.parentId) === root || record.pathSegments?.some(segment => String(segment?.id) === root);
+          if (!inDirectory) return;
+          if (offset > 0) { offset--; return; }
+          if (rows.length >= pageSize) {
+            hasNext = true;
+            return false;
+          }
+          rows.push(renderRow(record, result, source, validation));
+        }, controller.signal);
+        if (controller.signal.aborted) return;
+        currentPage = page;
+        list.replaceChildren(...rows);
+        status.textContent = rows.length
+          ? '第 ' + (page + 1) + ' 页 · 本页 ' + rows.length + ' 个视频'
+          : '没有找到符合当前查看条件的视频。';
+        previous.disabled = page === 0;
+        next.disabled = !hasNext;
+      } catch (error) {
+        if (!controller.signal.aborted) status.textContent = '读取收录明细失败：' + String(error?.message || error);
+      } finally {
+        if (pageRequest === controller) pageRequest = null;
+      }
+    }
+
+    function schedulePage(page = 0, delay = 0) {
+      clearTimeout(pageTimer);
+      pageRequest?.abort();
+      previous.disabled = next.disabled = true;
+      pageTimer = setTimeout(() => { void readPage(page); }, delay);
+    }
+
+    function showDetails(show) {
+      detail.hidden = !show;
+      fullDiskOverlay.setAttribute('aria-label', show ? '收录视频明细' : '随机探索');
+      exploreScopePicker.hidden = show || Boolean(active);
+      fullDiskFields.hidden = show || Boolean(active);
+      exploreHint.hidden = show;
+      quickExploreControls.hidden = show || exploreScope !== 'quick';
+      fullDiskDialog.scrollTop = 0;
+    }
+
+    async function openDetails() {
+      clearTimeout(overviewTimer);
+      overviewRequest?.abort();
+      showDetails(true);
+      status.textContent = '正在读取收录目录…';
+      previous.disabled = next.disabled = true;
+      search.focus();
+      const revision = exploreDialogRevision;
+      try {
+        const data = await loadData();
+        if (revision !== exploreDialogRevision || detail.hidden) return;
+        const selected = directory.value;
+        directory.replaceChildren(option('全部收录文件夹', ''),
+          ...[...data.folders.values()].map(folder =>
+            option(folder.label + (folder.partial ? ' · 部分已收录' : ''), folder.id)));
+        directory.value = data.folders.has(selected) ? selected : '';
+        schedulePage(0);
+      } catch (error) {
+        if (revision === exploreDialogRevision && !detail.hidden) {
+          status.textContent = '读取收录目录失败：' + String(error?.message || error);
+        }
+      }
+    }
+
+    function closeDetails() {
+      if (detail.hidden) return false;
+      clearTimeout(pageTimer);
+      pageRequest?.abort();
+      list.replaceChildren();
+      showDetails(false);
+      scheduleOverview(0);
+      browse.focus();
+      return true;
+    }
+
+    browse.onclick = () => { void openDetails(); };
+    back.onclick = closeDetails;
+    search.oninput = () => schedulePage(0, 200);
+    directory.onchange = view.onchange = () => schedulePage(0);
+    previous.onclick = () => schedulePage(Math.max(0, currentPage - 1));
+    next.onclick = () => schedulePage(currentPage + 1);
+
+    return {
+      summary, detail, closeDetails, scheduleOverview,
+      setAccount(id) {
+        accountId = id;
+        browse.disabled = false;
+        scheduleOverview(0);
+      },
+      reset() {
+        clearTimeout(overviewTimer);
+        clearTimeout(pageTimer);
+        overviewRequest?.abort();
+        pageRequest?.abort();
+        accountId = dataPromise = null;
+        list.replaceChildren();
+        search.value = '';
+        directory.replaceChildren(option('全部收录文件夹', ''));
+        view.value = 'all';
+        currentPage = 0;
+        browse.disabled = true;
+        overview.textContent = '正在读取收录信息…';
+        showDetails(false);
+      }
+    };
+  }
+
   function selectExploreScope(scope) {
     exploreScope = scope;
     const wholeDisk = scope === 'full-disk';
@@ -10152,12 +10465,14 @@ module.exports = Object.freeze({ createExplorerRunner });
     fullDiskScopeButton.setAttribute('aria-pressed', String(wholeDisk));
     quickExploreControls.hidden = wholeDisk;
     fullDiskScanControls.hidden = !wholeDisk;
+    quickCollectionView.scheduleOverview(0);
     if (!wholeDisk) fullDiskAutoPlay = null;
   }
 
   function closeExploreDialog() {
     exploreDialogRevision++;
     fullDiskAutoPlay = null;
+    quickCollectionView.reset();
     fullDiskOverlay.hidden = true;
     (active?.exploreScopeStatus || exploreLauncher).focus({ preventScroll: true });
   }
@@ -10165,6 +10480,7 @@ module.exports = Object.freeze({ createExplorerRunner });
   async function openExploreDialog(scope = 'quick') {
     const revision = ++exploreDialogRevision;
     fullDiskOverlay.hidden = false;
+    quickCollectionView.reset();
     exploreScopePicker.hidden = Boolean(active);
     fullDiskFields.hidden = Boolean(active);
     selectExploreScope(scope);
@@ -10182,7 +10498,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       const settings = await preferenceStore.getPlayerSettings(accountId);
       if (revision !== exploreDialogRevision) return;
       writeFullDiskFilters(settings.filters);
-      quickExploreStatus.textContent = '从当前账号已收录的视频中抽取。';
+      quickCollectionView.setAccount(accountId);
+      quickExploreStatus.textContent = '';
       quickExploreStart.disabled = false;
       const task = await refreshFullDiskTask(accountId);
       if (revision !== exploreDialogRevision) return;
@@ -11185,6 +11502,23 @@ module.exports = Object.freeze({ createExplorerRunner });
     .explore-scope-status{position:absolute;bottom:8px;left:8px;z-index:12;max-width:calc(100% - 16px);padding:5px 8px;border:1px solid #43586e;border-radius:6px;background:#0e1924e8;color:#dceaff;font:inherit;font-size:12px}
     .explore-scan-controls,.explore-quick-controls{display:grid;gap:12px}
     .explore-scope-picker[hidden],.explore-scan-controls[hidden],.explore-quick-controls[hidden],.full-disk-fields[hidden]{display:none!important}
+    .explore-quick-controls .full-disk-status:empty{display:none}
+    .collection-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px;border:1px solid #35485d;border-radius:8px;background:#111d29}
+    .collection-totals{display:grid;gap:4px;font-size:13px;line-height:1.5}
+    .collection-totals span,.collection-meta,.collection-list-status{color:#a8bed4;font-size:12px}
+    .collection-detail{display:grid;gap:12px}
+    .collection-detail[hidden]{display:none}
+    .collection-detail-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .collection-detail-head h3{font-size:16px;margin:0}
+    .collection-filters{display:grid;grid-template-columns:minmax(120px,1fr) minmax(120px,1fr) auto;gap:8px}
+    .collection-filters input,.collection-filters select{min-width:0;max-width:100%;padding:8px;border:1px solid #35475a;border-radius:7px;background:#101925;color:#edf5ff;font:inherit;font-size:13px}
+    .collection-list{list-style:none;display:grid;gap:4px;min-width:0;padding:0;margin:0}
+    .collection-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 8px;border-bottom:1px solid #2c3e50}
+    .collection-file{display:grid;gap:4px;min-width:0;overflow-wrap:anywhere}
+    .collection-name{font-size:13px}
+    .collection-row-status{flex:none;padding:3px 6px;border-radius:4px;background:#263746;color:#c7d5e5;font-size:11px}
+    .collection-row-status.is-eligible{background:#193c35;color:#b8efdb}
+    @media(max-width:560px){.collection-filters{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.collection-filters input{grid-column:1/-1}.collection-row{align-items:flex-start}}
     :host(.is-playing) .full-disk-badge{display:none!important}
     .full-disk-badge{pointer-events:auto;position:absolute;top:18px;right:20px;z-index:2147483647;max-width:min(360px,calc(100vw - 32px));padding:10px 14px;border:1px solid #54c49a;border-radius:999px;background:linear-gradient(135deg,#123d31,#112a38);color:#c9ffe7;font-size:12px;font-weight:800;box-shadow:0 6px 24px #0009;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
     .full-disk-badge[hidden]{display:none!important}
@@ -11379,10 +11713,13 @@ module.exports = Object.freeze({ createExplorerRunner });
     globalThis.N115IndexManagerUI?.open?.(exploreLauncher);
   };
   quickExploreActions.append(quickExploreStart, manageCollection);
-  quickExploreControls.append(quickExploreActions, quickExploreStatus);
+  const quickCollectionView = createQuickCollectionView();
+  quickExploreControls.append(quickCollectionView.summary, quickExploreActions, quickExploreStatus);
+  fullDiskFields.addEventListener('input', () => quickCollectionView.scheduleOverview());
   const fullDiskScanControls = element('div', 'explore-scan-controls');
   fullDiskScanControls.append(fullDiskHint, fullDiskActions, fullDiskMetrics, fullDiskProgressTrack, fullDiskStatus, fullDiskWarning);
-  fullDiskDialog.append(fullDiskHeader, exploreScopePicker, exploreHint, fullDiskFields, quickExploreControls, fullDiskScanControls);
+  fullDiskDialog.append(fullDiskHeader, exploreScopePicker, exploreHint, fullDiskFields,
+    quickExploreControls, quickCollectionView.detail, fullDiskScanControls);
   fullDiskOverlay.append(fullDiskDialog);
   fullDiskCloseButton.onclick = closeExploreDialog;
   fullDiskBackgroundButton.onclick = closeExploreDialog;
@@ -11405,7 +11742,7 @@ module.exports = Object.freeze({ createExplorerRunner });
   fullDiskOverlay.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
-      closeExploreDialog();
+      if (!quickCollectionView.closeDetails()) closeExploreDialog();
     }
   });
   fullDiskOverlay.addEventListener('click', event => {
