@@ -43,8 +43,8 @@
     },
     {
       "id": "115-video-universe",
-      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.4）",
-      "description": "独立探索：115可信封面展示在环绕卫星和视频卡片，鼠标悬停看封面，无封面生成格式海报；保留星球聚焦、卫星显隐与原生播放入口，不影响其他播放器。",       "source": "userscripts/115-video-universe.user.js",
-      "channel": "独立公开测试版 · v0.2.4（真实115账号验收后置）",      "enabled": true
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.5）",
+      "description": "独立实验：新增默认关闭的3秒静音HLS短预览；在115主站悬停时按需取流，失败自动回退封面；独立于原稳定播放器。",       "source": "userscripts/115-video-universe.user.js",
+      "channel": "独立公开测试版 · v0.2.5（真实115账号动态预览待验收）",      "enabled": true
     }
   ]}

@@ -17,7 +17,7 @@
 | 115 多画面播放器（四宫格验证版） v0.1.1 | 公开迁移验证版 |
 | [115 多画面播放器稳定版 v0.12.4](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js) | 原链接不变，服务现有用户 |
 | [115 全盘探索独立版 v1.7.0](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 公开测试：边扫描边播放、300候选、后台补充；真实115验收后置 |
-| [拉面视频宇宙 · 3D 探索版 v0.2.4](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | 独立探索：视频卫星展示115可信封面、悬停预览，无封面自动生成格式海报；保留点击预览和115原生播放入口（真实账号验收后置） |
+| [拉面视频宇宙 · 3D 探索版 v0.2.5](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | 独立实验：默认关闭的3秒静音动态预览，开启后悬停请求115 HLS；不可播放时退回封面（真实账号待验收） |
 | [视频宇宙 v0.1.0 历史快照](history/115-video-universe/0.1.0.user.js) | 2D 首个试点，独立归档供回滚 |
 **视频宇宙效果预览（仅模拟目录数据）：** [查看星系界面截图](docs/images/video-universe-v0.1.0-demo.png)。探索类独立发行规范见 [EXPLORATION-INDEPENDENT-RELEASES.md](docs/EXPLORATION-INDEPENDENT-RELEASES.md)。
 **3D 星系演示（模拟数据）：** [v0.2.0 效果图](docs/images/video-universe-v0.2.0-demo.png) · [交互测试说明](experiments/video-universe-v0.2.1/README.md)。

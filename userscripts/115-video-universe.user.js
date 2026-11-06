@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.4
-// @description  115独立3D视频宇宙：视频卫星支持115封面和悬停预览；缺封面自动生成格式海报，保留星球聚焦、只读扫描、原生播放入口。
+// @version      0.2.5
+// @description  115独立3D视频宇宙：可选的3秒静音HLS卫星动态预览，延时按需请求115播放清单，失败回退封面。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @require      https://huntian0727.github.io/userscript-hub/vendor/hls-1.7.4.min.js
 // @connect      webapi.115.com
 // ==/UserScript==
 
@@ -14,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.4';
-  const DELIVERY = 'VU-024-01';
+  const VERSION = '0.2.5';
+  const DELIVERY = 'VU-025-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -28,6 +29,8 @@
   const ORBIT_TRANSITION_MS = 750;
   const VIDEO_MOON_LIMIT = 9;
   const MAX_POSTER_CACHE = 24;
+  const MOTION_HOVER_DELAY_MS = 700;
+  const MOTION_PREVIEW_MS = 3000;
   const VIDEO_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;
   const DEMO = [
     ['影像星云', 142, 7], ['旧时光', 86, 5], ['银河档案', 203, 9],
@@ -232,6 +235,18 @@
     return url.href;
   }
 
+  // Request only a known owned-file pickcode; no authentication material is collected.
+  function videoHlsManifestUrl(record) {
+    const code = String(record && record.pickcode || '').trim();
+    return /^[A-Za-z0-9]{4,128}$/.test(code) ?
+      'https://115.com/api/video/m3u8/' + code + '.m3u8' : null;
+  }
+
+  function canStartMotionPreview(mode, enabled, origin, record, nativeHls, hlsAvailable) {
+    return mode === 'real' && enabled && origin === 'https://115.com' &&
+      !!videoHlsManifestUrl(record) && !!(nativeHls || hlsAvailable);
+  }
+
   function humanFileSize(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return '大小未知';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -327,6 +342,11 @@
     '.moon-peek[hidden]{display:none!important}.moon-peek .poster-tile{height:95px;}',
     '.moon-peek-name{font-size:11px;color:#e0f4ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.moon-peek-note{font-size:10px;color:#9ebcda}.preview-name{font-size:13px;font-weight:750;word-break:break-word;}',
+    '.moon-visual{height:95px;position:relative;overflow:hidden;border-radius:8px;}',
+    '.moon-visual .poster-tile{height:95px}.moon-visual video{position:absolute;inset:0;width:100%;',
+    'height:100%;object-fit:cover;background:#050915;pointer-events:none;}',
+    '.moon-visual video[hidden]{display:none!important}.moon-visual .poster-wrap[hidden]{display:none!important}',
+    '.moon-preview-status{font-size:10px;color:#9dcbee;}',
     '.preview-detail{font-size:11px;color:#aec5e7;line-height:1.6}.preview-actions{display:flex;gap:6px;flex-wrap:wrap;}',
     '.preview-actions button{flex:1;min-width:90px;}',
     '.message{font-size:12px;min-height:22px;color:#b1cbed;line-height:1.6;}',
@@ -362,7 +382,10 @@
           '<canvas id="universe-label-layer" class="label-layer" aria-hidden="true"></canvas>',
           '<div class="hint" id="instruction">点击星球居中 · 悬停视频卫星看封面 · 点击看详情 · 拖动旋转 · 空白回全景</div>',
           '<div class="moon-peek" id="moon-peek" hidden>',
-            '<div id="moon-peek-poster"></div><div class="moon-peek-name" id="moon-peek-name"></div>',
+            '<div class="moon-visual"><div class="poster-wrap" id="moon-peek-poster"></div>',
+              '<video id="moon-motion-video" muted playsinline preload="none" hidden></video></div>',
+            '<div class="moon-peek-name" id="moon-peek-name"></div>',
+            '<div class="moon-preview-status" id="moon-preview-status">静态封面</div>',
             '<div class="moon-peek-note">点击卫星查看视频详情</div>',
           '</div>',
           '<div class="hud">',
@@ -389,7 +412,9 @@
           '</div></div>',
           '<div class="orbit-status" id="orbit-status">点击一颗星球，展开它的星系</div>',
           '<div class="orbit-neighbors" id="orbit-neighbors"></div>',
-          '<div class="moon-heading"><div class="title-sm">☄ 视频卫星</div><button class="btn moon-switch" id="toggle-moons" type="button" aria-pressed="true">隐藏卫星</button></div>',
+          '<div class="moon-heading"><div class="title-sm">☄ 视频卫星</div>',
+            '<button class="btn moon-switch" id="toggle-motion" type="button" aria-pressed="false" title="开启后才会读取真实视频流">短预览：关</button>',
+            '<button class="btn moon-switch" id="toggle-moons" type="button" aria-pressed="true">隐藏卫星</button></div>',
           '<div class="moon-count" id="moon-count">选择一颗星球后即可查看视频卫星</div>',
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
@@ -405,7 +430,7 @@
           '</div>',
           '<div class="banner" id="source-note">演示数据，不代表真实115文件。</div>',
           '<div class="message" id="scan-message">点击「探索真实115宇宙」开始只读扫描，或先漫游演示星图。</div>',
-          '<div class="foot">最多只读探索80个目录、向下3层。单击星球将其居中，周围展开子星球或同级星球。点击视频样本可先看文件信息，再交给115官方页面播放；不在宇宙中解码视频。</div>',
+          '<div class="foot">最多只读探索80个目录、向下3层。单击星球将其居中，周围展开子星球或同级星球。点击视频卫星可看文件详情；手动开启短预览后，仅在悬停时尝试3秒静音播放，失败保留封面，完整播放仍交给115官方页面。</div>',
         '</aside>',
       '</div>',
     '</section>'
@@ -420,10 +445,11 @@
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
     orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
     orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
-    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), preview: $('#video-preview'),
+    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), motionToggle: $('#toggle-motion'), preview: $('#video-preview'),
     previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
     previewPoster: $('#preview-poster'), moonPeek: $('#moon-peek'),
     moonPeekPoster: $('#moon-peek-poster'), moonPeekName: $('#moon-peek-name'),
+    moonVideo: $('#moon-motion-video'), moonPreviewStatus: $('#moon-preview-status'),
     previewPlay: $('#preview-play')
   };
   const labelCanvas = $('#universe-label-layer');
@@ -436,7 +462,7 @@
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
     pointer: null, hoverId: null, projected: [], seed: 1,
     orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
-    videoProjected: [], moonsVisible: true, hoveredVideoId: null
+    videoProjected: [], moonsVisible: true, hoveredVideoId: null, motionEnabled: false
   };
   // Reuses images within a bounded cache. Failures keep the luminous sphere.
   const posterImages = new Map();
@@ -478,17 +504,157 @@
     return tile;
   }
 
+  // One bounded, muted media session. Every pointer change destroys stale streams.
+  const hoverMotion = {
+    generation: 0, delay: null, timeout: null, hls: null, activeId: null,
+    failedIds: new Set()
+  };
+
+  function hlsEngine() {
+    try {
+      if (typeof Hls === 'function' && Hls.isSupported()) return Hls;
+      if (typeof window.Hls === 'function' && window.Hls.isSupported()) return window.Hls;
+    } catch {}
+    return null;
+  }
+
+  function stopMoonMotion(message = '') {
+    hoverMotion.generation++;
+    clearTimeout(hoverMotion.delay);
+    clearTimeout(hoverMotion.timeout);
+    hoverMotion.delay = null;
+    hoverMotion.timeout = null;
+    hoverMotion.activeId = null;
+    if (hoverMotion.hls) {
+      try { hoverMotion.hls.destroy(); } catch {}
+      hoverMotion.hls = null;
+    }
+    try {
+      ui.moonVideo.pause();
+      ui.moonVideo.removeAttribute('src');
+      ui.moonVideo.load();
+    } catch {}
+    ui.moonVideo.hidden = true;
+    ui.moonPeekPoster.hidden = false;
+    if (message) ui.moonPreviewStatus.textContent = message;
+  }
+
+  function startMoonMotion(moon) {
+    const expectedId = moon.id;
+    const generation = hoverMotion.generation;
+    const video = ui.moonVideo;
+    const native = !!video.canPlayType('application/vnd.apple.mpegurl');
+    const Engine = hlsEngine();
+    if (!canStartMotionPreview(state.mode, state.motionEnabled, window.location.origin,
+      moon.record, native, !!Engine)) {
+      ui.moonPreviewStatus.textContent = state.mode !== 'real'
+        ? '演示模式只有静态封面'
+        : '短预览不可用，保留静态封面';
+      return;
+    }
+    if (hoverMotion.failedIds.has(expectedId)) {
+      ui.moonPreviewStatus.textContent = '当前视频无法短预览';
+      return;
+    }
+    ui.moonPreviewStatus.textContent = '正在请求 115 视频流…';
+    hoverMotion.delay = setTimeout(() => {
+      hoverMotion.delay = null;
+      if (generation !== hoverMotion.generation ||
+          hoverMotion.activeId !== expectedId || !state.motionEnabled ||
+          ui.moonPeek.hidden) return;
+      const mediaUrl = videoHlsManifestUrl(moon.record);
+      if (!mediaUrl) return;
+      hoverMotion.timeout = setTimeout(() => {
+        if (generation === hoverMotion.generation) {
+          hoverMotion.failedIds.add(expectedId);
+          stopMoonMotion('预览请求超时，已恢复封面');
+        }
+      }, 8000);
+      // All requests use the user's existing 115 session. No Cookie is read or stored.
+      if (Engine) {
+        try {
+          const player = new Engine({
+            startLevel: 0,
+            maxBufferLength: 4, maxMaxBufferLength: 6, backBufferLength: 0,
+            manifestLoadingMaxRetry: 0, levelLoadingMaxRetry: 0, fragLoadingMaxRetry: 0,
+            xhrSetup(xhr) { xhr.withCredentials = true; }
+          });
+          hoverMotion.hls = player;
+          player.on(Engine.Events.ERROR, (_, data) => {
+            if (generation === hoverMotion.generation && data?.fatal) {
+              hoverMotion.failedIds.add(expectedId);
+              stopMoonMotion('无法播放当前流，已恢复封面');
+            }
+          });
+          player.on(Engine.Events.MANIFEST_PARSED, () => {
+            if (generation !== hoverMotion.generation) return;
+            video.play().catch(() => {
+              if (generation === hoverMotion.generation) {
+                hoverMotion.failedIds.add(expectedId);
+                stopMoonMotion('浏览器阻止自动播放，已恢复封面');
+              }
+            });
+          });
+          player.attachMedia(video);
+          player.loadSource(mediaUrl);
+        } catch {
+          hoverMotion.failedIds.add(expectedId);
+          stopMoonMotion('视频流未就绪，已恢复封面');
+        }
+      } else if (native) {
+        video.src = mediaUrl;
+        video.play().catch(() => {
+          if (generation === hoverMotion.generation) {
+            hoverMotion.failedIds.add(expectedId);
+            stopMoonMotion('浏览器无法自动播放，已恢复封面');
+          }
+        });
+      }
+    }, MOTION_HOVER_DELAY_MS);
+  }
+
+  ui.moonVideo.addEventListener('playing', () => {
+    if (!hoverMotion.activeId || ui.moonPeek.hidden) {
+      stopMoonMotion();
+      return;
+    }
+    const generation = hoverMotion.generation;
+    ui.moonVideo.hidden = false;
+    ui.moonPeekPoster.hidden = true;
+    ui.moonPreviewStatus.textContent = '真实视频短预览 · 静音 · 3秒';
+    clearTimeout(hoverMotion.timeout);
+    hoverMotion.timeout = setTimeout(() => {
+      if (generation === hoverMotion.generation) {
+        stopMoonMotion('预览结束 · 已恢复封面');
+      }
+    }, MOTION_PREVIEW_MS);
+  });
+  ui.moonVideo.addEventListener('error', () => {
+    if (hoverMotion.activeId) {
+      hoverMotion.failedIds.add(hoverMotion.activeId);
+      stopMoonMotion('该视频流不可用，已恢复封面');
+    }
+  });
+
   function updateMoonPeek(moon, clientX, clientY) {
     if (!moon) {
+      if (!ui.moonPeek.hidden || hoverMotion.activeId || hoverMotion.delay || hoverMotion.hls) {
+        stopMoonMotion();
+      }
       ui.moonPeek.hidden = true;
       state.hoveredVideoId = null;
       return;
     }
     ui.moonPeek.hidden = false;
     if (state.hoveredVideoId !== moon.id) {
+      stopMoonMotion();
       state.hoveredVideoId = moon.id;
       ui.moonPeekPoster.replaceChildren(makePoster(moon.record));
       ui.moonPeekName.textContent = moon.record.name;
+      ui.moonPreviewStatus.textContent = state.motionEnabled
+        ? '悬停后尝试3秒静音动态预览' : '静态封面 · 可手动开启短预览';
+      hoverMotion.activeId = moon.id;
+      startMoonMotion(moon);
     }
     const rect = ui.canvas.getBoundingClientRect();
     ui.moonPeek.style.left = Math.round(clamp(clientX - rect.left + 16, 5,
@@ -520,6 +686,8 @@
   }
 
   function clearUniverse(rootCid, rootName, mode) {
+    updateMoonPeek(null);
+    hoverMotion.failedIds.clear();
     state.scanEpoch++;
     if (state.scanAbort) state.scanAbort.abort();
     state.scanAbort = null;
@@ -773,6 +941,7 @@
   }
 
   function resetOverview() {
+    updateMoonPeek(null);
     transitionOrbit(() => {
       state.orbitActive = false;
       state.orbitPage = 0;
@@ -1347,6 +1516,20 @@
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
   ui.parent.addEventListener('click', returnToParent);
+  ui.motionToggle.addEventListener('click', () => {
+    state.motionEnabled = !state.motionEnabled;
+    ui.motionToggle.textContent = state.motionEnabled ? '短预览：开' : '短预览：关';
+    ui.motionToggle.setAttribute('aria-pressed', String(state.motionEnabled));
+    if (!state.motionEnabled) stopMoonMotion();
+    else if (state.hoveredVideoId) {
+      const current = state.videoProjected.find(item => item.node.id === state.hoveredVideoId);
+      if (current) {
+        stopMoonMotion();
+        hoverMotion.activeId = current.node.id;
+        startMoonMotion(current.node);
+      }
+    }
+  });
   ui.moonToggle.addEventListener('click', () => {
     state.moonsVisible = !state.moonsVisible;
     if (!state.moonsVisible) { state.videoProjected = []; updateMoonPeek(null); }
