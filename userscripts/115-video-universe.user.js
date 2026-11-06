@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.6
-// @description  115独立3D视频宇宙：短预览错误诊断、手动重试与低画质加载优化，保留3秒静音HLS、封面回退及原生播放入口。
+// @version      0.2.7
+// @description  115独立3D视频宇宙：默认真实目录模式、只读分页扫描、真实视频卫星；演示数据需手动开启。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,15 +15,15 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.6';
-  const DELIVERY = 'VU-026-01';
+  const VERSION = '0.2.7';
+  const DELIVERY = 'VU-027-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
   const MAX_PAGES_PER_DIRECTORY = 70;
   const MAX_DIRECTORIES = 80;
   const MAX_DEPTH = 3;
-  const MAX_VISIBLE_PLANETS = 170;
+  const MAX_VISIBLE_PLANETS = 300;
   const MAX_SAMPLE_PER_PLANET = 16;
   const ORBIT_PAGE_SIZE = 12;
   const ORBIT_TRANSITION_MS = 750;
@@ -49,7 +49,8 @@
     const url = new URL('/files', API_ORIGIN);
     for (const [key, value] of Object.entries({
       aid: '1', cid: numericId(cid), o: 'user_ptime', asc: '0',
-      offset: String(offset), show_dir: '1', limit: String(PAGE_SIZE), snap: '0', natsort: '1'
+      offset: String(offset), show_dir: '1', cur: '1',
+      limit: String(PAGE_SIZE), snap: '0', record_open_time: '0'
     })) url.searchParams.set(key, value);
     return url.href;
   }
@@ -58,8 +59,10 @@
     let payload;
     try { payload = JSON.parse(text); } catch { throw new Error('115 目录接口返回内容无法解析'); }
     if (!payload || payload.state !== true || !Array.isArray(payload.data)) {
-      const errorCode = payload && (payload.code || payload.errno || payload.errNo);
-      if (Number(errorCode) === 911) throw new Error('115 需要人机验证，请在网盘页面完成验证后重试');
+      const errorCode = Number(payload && (payload.code || payload.errno || payload.errNo));
+      if (errorCode === 911) throw new Error('115 需要人机验证，请在网盘页面完成验证后重试');
+      if (errorCode === 401 || errorCode === 403) throw new Error('115登录状态失效或当前目录无权访问，请先在115官方页面确认登录状态');
+      if (errorCode === 429) throw new Error('115请求过于频繁，已暂停扫描，请稍后继续');
       throw new Error(String(payload && (payload.msg || payload.error || payload.message) || '115目录接口拒绝请求').slice(0, 160));
     }
     const total = Number(payload.count);
@@ -102,7 +105,7 @@
     const name = String(raw.n == null ? raw.name || '' : raw.n).trim();
     if (!name) return null;
     if (raw.fid != null && raw.fid !== '') {
-      const video = Number(raw.iv) === 1 || VIDEO_RE.test(name) || VIDEO_RE.test('.' + (raw.ico || ''));
+      const video = Number(raw.iv) === 1 || Number(raw.isv) === 1 || VIDEO_RE.test(name) || VIDEO_RE.test('.' + (raw.ico || ''));
       if (!video) return null;
       return {
         type: 'video', id: numericId(raw.fid), parentId,
@@ -394,7 +397,7 @@
         '<label>起点 <input id="start-cid" class="toolbar-input" title="0为整个网盘；也可以填写目录ID" placeholder="0 = 根目录" value="0" /></label>',
         '<button class="btn primary" id="scan" type="button">探索真实115宇宙</button>',
         '<button class="btn" id="pause" type="button" disabled>暂停</button>',
-        '<button class="btn" id="demo" type="button">演示宇宙</button>',
+        '<button class="btn" id="demo" type="button">体验演示星图</button>',
         '<button class="btn danger" id="close" type="button" title="关闭视频宇宙">✕</button>',
       '</header>',
       '<div class="body">',
@@ -453,9 +456,9 @@
               '<button class="btn" id="preview-close" type="button">收起</button>',
             '</div>',
           '</div>',
-          '<div class="banner" id="source-note">演示数据，不代表真实115文件。</div>',
-          '<div class="message" id="scan-message">点击「探索真实115宇宙」开始只读扫描，或先漫游演示星图。</div>',
-          '<div class="foot">最多只读探索80个目录、向下3层。单击星球将其居中，周围展开子星球或同级星球。点击视频卫星可看文件详情；手动开启短预览后，仅在悬停时尝试3秒静音播放，失败保留封面，完整播放仍交给115官方页面。</div>',
+          '<div class="banner" id="source-note">真实115模式 · 尚未读取目录。点击「探索真实115宇宙」读取当前目录。</div>',
+          '<div class="message" id="scan-message">真实数据优先。扫描仅读取115目录，不会修改或下载网盘文件；演示星图需手动开启。</div>',
+          '<div class="foot">默认读取当前115目录；每批最多探索80个目录、向下3层，可继续下一批。单击星球居中并读取未探索目录。只读访问，不修改网盘文件。视频卫星展示真实文件样本，完整播放交给115官方页面。</div>',
         '</aside>',
       '</div>',
     '</section>'
@@ -483,7 +486,7 @@
   const overlay = labelCanvas.getContext('2d');
   let renderer = null;
   const state = {
-    mode: 'demo', nodes: new Map(), queue: [], selected: '0', rootId: '0',
+    mode: 'real', nodes: new Map(), queue: [], selected: '0', rootId: '0',
     camera: cameraDefaults(),
     scanAbort: null, scanEpoch: 0, running: false, paused: false, scanningCount: 0,
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
@@ -723,7 +726,7 @@
     const position = parent ? placeChild(parent, siblingIndex, data.id) : { x: 0, y: 0, z: 0 };
     const node = {
       id: data.id, parentId: data.parentId || null, name: data.name,
-      depth: parent ? parent.depth + 1 : 0, x: position.x, y: position.y, z: position.z,      childIds: [], directVideos: 0, observedVideos: 0, directFolders: 0,
+      depth: parent ? parent.depth + 1 : 0, x: position.x, y: position.y, z: position.z,      childIds: [], directVideos: 0, observedVideos: 0, directFolders: 0, hiddenFolderCount: 0, depthLimitedFolderCount: 0,
       sample: [], scanned: false, truncated: false, demoVideos: 0
     };
     state.nodes.set(node.id, node);
@@ -826,6 +829,9 @@
           method: 'GET', url: parsed.href, responseType: 'text', timeout: 22000,
           anonymous: false, headers: { Referer: 'https://115.com/' },
           onload(response) {
+            if (response.status === 401 || response.status === 403) return done(new Error('115登录状态失效或目录访问受限，请先在115官方页面确认登录状态'));
+            if (response.status === 429) return done(new Error('115请求过于频繁，已暂停扫描，请稍后继续'));
+            if (response.status >= 500) return done(new Error('115目录服务暂时不可用，请稍后继续'));
             if (response.status < 200 || response.status >= 300) return done(new Error('115请求失败 HTTP ' + response.status));
             try {
               const redirected = new URL(response.finalUrl || parsed.href);
@@ -912,8 +918,14 @@
           if (node.depth < MAX_DEPTH) {
             for (const entry of result.folders) {
               const child = addPlanet({ id: entry.id, parentId: node.id, name: entry.name });
-              if (child && !child.scanned && !state.queue.includes(child.id)) state.queue.push(child.id);
+              if (child) {
+                if (!child.scanned && !state.queue.includes(child.id)) state.queue.push(child.id);
+              } else {
+                node.hiddenFolderCount++;
+              }
             }
+          } else {
+            node.depthLimitedFolderCount = result.folders.length;
           }
           aggregateCounts();
           refreshPanel();
@@ -925,13 +937,15 @@
         if (state.queue.length) await new Promise(resolve => setTimeout(resolve, 250));
       }
       state.scanEnded = true;
+      state.paused = state.queue.length > 0;
       state.notice = state.queue.length
-        ? '已达到试点扫描上限（80目录/深度3），星图仅包含已探索区域。'
+        ? '本批已探索 ' + state.scanningCount + ' 个目录，仍有 ' + state.queue.length +
+          ' 个目录待探索。点击「继续探索」或选择星球继续读取。'
         : '当前探索范围已完成；星图仅表示此次选定目录和深度范围。';
     } catch (error) {
       if (epoch !== state.scanEpoch) return;
       if (signal.aborted || error.name === 'AbortError') {
-        state.notice = '扫描已暂停，点击「继续探索」可从当前目录重新读取。';
+        state.notice = '扫描已暂停，点击「继续探索」可从当前目录继续读取。';
         state.paused = true;
       } else {
         state.notice = '探索暂时中断：' + String(error.message || error).slice(0, 140);
@@ -953,6 +967,7 @@
     try { cid = numericId(ui.cid.value || '0'); }
     catch (error) { state.notice = error.message; refreshPanel(); return; }
     if (state.mode === 'real' && state.rootId === cid && state.queue.length && state.paused) {
+      if (state.scanningCount >= MAX_DIRECTORIES) state.scanningCount = 0;
       runScan();
       return;
     }
@@ -1045,14 +1060,26 @@
     updateMoonPeek(null);
     ui.preview.hidden = true;
     state.visited.add(id);
-    if (state.mode === 'real' && !node.scanned && node.depth <= MAX_DEPTH) {
-      const existing = state.queue.indexOf(id);
-      if (existing >= 0) state.queue.splice(existing, 1);
-      state.queue.unshift(id);
-      state.notice = '已将「' + node.name + '」移到下一个探索目标。';
+    if (state.mode === 'real' && node.depth <= MAX_DEPTH) {
+      const pending = [];
+      if (!node.scanned) pending.push(node.id);
+      for (const childId of node.childIds) {
+        const child = state.nodes.get(childId);
+        if (child && !child.scanned && child.depth <= MAX_DEPTH) pending.push(childId);
+      }
+      for (const pendingId of pending.reverse()) {
+        const existing = state.queue.indexOf(pendingId);
+        if (existing >= 0) state.queue.splice(existing, 1);
+        state.queue.unshift(pendingId);
+      }
+      if (pending.length) state.notice = '正在优先探索「' + node.name + '」及其未读取的子目录。';
     }
     if (focus) flyToPlanet(node, 900);
     refreshPanel();
+    if (state.mode === 'real' && state.queue.length && !state.running) {
+      if (state.scanningCount >= MAX_DIRECTORIES) state.scanningCount = 0;
+      runScan();
+    }
   }
 
   function jumpRandom() {
@@ -1091,15 +1118,23 @@
       (node.scanned ? '已探索' : '未知星球');
     ui.summary.textContent = '已发现 ' + node.observedVideos.toLocaleString() + ' 个视频（含已探索子目录） · ' +
       node.directFolders + ' 个直接子目录 · ' + (node.scanned ? '已读取' : '尚未读取') +
-      (node.truncated ? ' · 部分分页未读取' : '') + '。';
+      (node.truncated ? ' · 部分分页未读取' : '') +
+      (node.hiddenFolderCount ? ' · ' + node.hiddenFolderCount + ' 个子目录因星图容量暂未显示' : '') +
+      (node.depthLimitedFolderCount ? ' · ' + node.depthLimitedFolderCount + ' 个子目录超过当前探索深度' : '') + '。';
     $('#metric-folders').textContent = String(Math.max(0, state.nodes.size - 1));
     $('#metric-videos').textContent = state.discoveredVideos.toLocaleString();
     $('#metric-visited').textContent = String(state.visited.size);
     ui.note.textContent = state.mode === 'demo'
       ? '模拟演示数据，非真实115内容。'
-      : (state.scanEnded && !state.queue.length
-        ? '已完成本次限定范围；数量不代表网盘全盘。'
-        : '探索中，仅展示已经读取的目录和视频。');
+      : (state.running
+        ? '正在读取真实115目录；仅展示已返回并校验的数据。'
+        : (state.queue.length && state.paused
+          ? '本批已暂停 · 还有 ' + state.queue.length + ' 个目录待探索。'
+          : (state.scanEnded
+            ? '当前选择的目录探索完成；数量不代表网盘全盘。'
+            : (!node.scanned
+              ? '真实115模式已就绪，尚未读取目录。点击「探索真实115宇宙」开始。'
+              : '已读取真实115数据；可点击未探索星球继续深入。'))));
     ui.msg.textContent = state.notice || '点击星球深入探索，或点击「随机跃迁」。';
     ui.folder.disabled = state.mode === 'demo';
     ui.parent.disabled = !focusedParent(state.nodes, node.id);
@@ -1624,8 +1659,11 @@
     if (document.hidden) updateMoonPeek(null);
   });
   const currentCid = new URLSearchParams(window.location.search).get('cid');
-  if (currentCid && /^\d{1,30}$/.test(currentCid)) ui.cid.value = currentCid;
+  const initialCid = currentCid && /^\d{1,30}$/.test(currentCid) ? currentCid : '0';
+  ui.cid.value = initialCid;
+  clearUniverse(initialCid, initialCid === '0' ? '我的115网盘' : '当前115目录', 'real');
+  state.notice = '真实115模式已就绪。点击「探索真实115宇宙」读取当前目录；演示星图为可选体验。';
+  refreshPanel();
   renderer = createWebGLRenderer();
-  populateDemo();
   requestAnimationFrame(drawFrame);
 })();

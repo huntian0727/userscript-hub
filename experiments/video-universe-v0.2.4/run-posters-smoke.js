@@ -15,11 +15,11 @@ if (!fs.existsSync(chrome)) {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), '115-universe-posters-'));
 try {
   const source = fs.readFileSync(path.resolve(__dirname, '../../userscripts/115-video-universe.user.js'), 'utf8');
-  const needle = /  renderer = createWebGLRenderer\(\);\r?\n  populateDemo\(\);\r?\n  requestAnimationFrame\(drawFrame\);/;
+  const needle = /  renderer = createWebGLRenderer\(\);\r?\n  requestAnimationFrame\(drawFrame\);/;
   if (!needle.test(source)) throw new Error('Browser test probe placement not found');
   const instrumented = source.replace(needle, matched =>
     matched.replace('  requestAnimationFrame(drawFrame);',
-      '  window.__universeProbe = { state, projectedPlanet, nearestPlanetAt, drawFrame };\n  requestAnimationFrame(drawFrame);'));  fs.writeFileSync(path.join(temp, 'universe.user.js'), instrumented, 'utf8');
+      '  window.__universeProbe = { state, projectedPlanet, nearestPlanetAt, drawFrame };\n  populateDemo();\n  requestAnimationFrame(drawFrame);'));  fs.writeFileSync(path.join(temp, 'universe.user.js'), instrumented, 'utf8');
 
   const html = [
     '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0}</style></head>',

@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.6');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.7');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,10 +47,29 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-026-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-027-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
-  assert.match(source, /演示数据，不代表真实115文件/);
+  assert.match(source, /体验演示星图/);
+});
+
+test('v0.2.7 starts in a real empty state; demo data is explicit and never bootstrapped automatically', () => {
+  assert.match(source, /mode: 'real', nodes: new Map\(\)/);
+  assert.match(source, /clearUniverse\(initialCid, initialCid === '0' \? '我的115网盘' : '当前115目录', 'real'\)/);
+  assert.match(source, /ui\.demo\.addEventListener\('click', populateDemo\)/);
+  assert.doesNotMatch(source, /  populateDemo\(\);\s*requestAnimationFrame\(drawFrame\);/);
+  assert.match(source, /record_open_time: '0'/);
+  assert.match(source, /cur: '1'/);
+  assert.doesNotMatch(source, /natsort: '1'/);
+});
+
+test('v0.2.7 scan batches remain resumable and selected unexplored planets start real reads', () => {
+  assert.match(source, /state\.paused = state\.queue\.length > 0/);
+  assert.match(source, /if \(state\.scanningCount >= MAX_DIRECTORIES\) state\.scanningCount = 0/);
+  assert.match(source, /if \(state\.mode === 'real' && state\.queue\.length && !state\.running\) \{/);
+  assert.match(source, /node\.hiddenFolderCount\+\+/);
+  assert.match(source, /node\.depthLimitedFolderCount = result\.folders\.length/);
+  assert.match(source, /isv\) === 1/);
 });
 
 test('115 directory API URL is strictly built from numeric CID without arbitrary domains', () => {
@@ -59,6 +78,9 @@ test('115 directory API URL is strictly built from numeric CID without arbitrary
   assert.equal(u.searchParams.get('cid'), '123');
   assert.equal(u.searchParams.get('offset'), '500');
   assert.equal(u.searchParams.get('show_dir'), '1');
+  assert.equal(u.searchParams.get('cur'), '1');
+  assert.equal(u.searchParams.get('record_open_time'), '0');
+  assert.equal(u.searchParams.get('natsort'), null);
   assert.equal(u.searchParams.get('limit'), '500');
   for (const unsafe of ['1?uid=7', '../1', 'file://anything', '', '-3']) {
     assert.throws(() => core.numericId(unsafe), /目录 ID 无效/);
@@ -71,6 +93,9 @@ test('115 pagination validates count, offset, oversized pages, invalid JSON and 
   assert.throws(() => core.parsePage(JSON.stringify({ state: true, count: 2, offset: 1, data: [] }), 0), /分页数据不一致/);
   assert.throws(() => core.parsePage(JSON.stringify({ state: true, count: 0, offset: 0, data: [{}] }), 0), /分页数据不一致/);
   assert.throws(() => core.parsePage(JSON.stringify({ state: false, code: 911 }), 0), /人机验证/);
+  assert.throws(() => core.parsePage(JSON.stringify({ state: false, code: 401 }), 0), /登录状态失效/);
+  assert.throws(() => core.parsePage(JSON.stringify({ state: false, code: 403 }), 0), /登录状态失效/);
+  assert.throws(() => core.parsePage(JSON.stringify({ state: false, code: 429 }), 0), /请求过于频繁/);
 });
 
 test('video and folder records normalize without exposing non-video files', () => {
@@ -83,6 +108,9 @@ test('video and folder records normalize without exposing non-video files', () =
   assert.equal(video.size, 1024);
   assert.equal(video.parentId, '100');
   assert.equal(core.recordOf({ fid: '99', n: 'notes.txt', ico: 'txt' }, '0'), null);
+  const flagged = core.recordOf({ fid: '9002', n: '无后缀文件', isv: 1, pc: 'AbC012345' }, '100');
+  assert.equal(flagged.type, 'video');
+  assert.equal(flagged.pickcode, 'AbC012345');
 });
 
 test('bounded reservoir does not grow with a million videos and keeps replaceable samples', () => {
@@ -102,14 +130,14 @@ test('planet size tracks observed videos and deterministic positions keep layout
 test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /const MAX_DIRECTORIES = 80;/);
   assert.match(source, /const MAX_DEPTH = 3;/);
-  assert.match(source, /const MAX_VISIBLE_PLANETS = 170;/);
-  assert.match(source, /已达到试点扫描上限/);
+  assert.match(source, /const MAX_VISIBLE_PLANETS = 300;/);
+  assert.match(source, /本批已探索/);
   assert.match(source, /数量不代表网盘全盘/);
-  assert.match(source, /手动开启短预览后/);
+  assert.match(source, /完整播放交给115官方页面/);
 });
 
-test('v0.2.6 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.6.user.js');
+test('v0.2.7 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.7.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -156,7 +184,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-026-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-027-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');

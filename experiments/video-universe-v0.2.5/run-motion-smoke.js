@@ -8,12 +8,12 @@ if(!fs.existsSync(chrome)) throw new Error('Chrome unavailable');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'115-vu025-hls-mock-'));
 try {
   const source=fs.readFileSync(path.resolve(__dirname,'../../userscripts/115-video-universe.user.js'),'utf8');
-  const needle=/  renderer = createWebGLRenderer\(\);\r?\n  populateDemo\(\);\r?\n  requestAnimationFrame\(drawFrame\);/;
+  const needle=/  renderer = createWebGLRenderer\(\);\r?\n  requestAnimationFrame\(drawFrame\);/;
   if(!needle.test(source))throw new Error('test-only probe anchor missing');
   // This origin replacement is for OFFLINE testing only. It never changes the shipped userscript.
   const instrumented=source.replace('window.location.origin',"'https://115.com'").replace(needle,
     (match)=>match.replace('  requestAnimationFrame(drawFrame);',
-    '  window.__probe={state,drawFrame,updateMoonPeek,stopMoonMotion};\n  requestAnimationFrame(drawFrame);'));
+    '  window.__probe={state,drawFrame,updateMoonPeek,stopMoonMotion,hoverMotion};\n  populateDemo();\n  requestAnimationFrame(drawFrame);'));
   fs.writeFileSync(path.join(tmp,'test.user.js'),instrumented,'utf8');
   const html=[
     '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0}</style></head><body>',
