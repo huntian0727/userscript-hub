@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.1.0
-// @description  将115目录变成可漫游的星系。独立实验：星球、迷雾、随机跃迁、九格视频发现；不会修改其他播放器的索引或配置。
+// @version      0.2.0
+// @description  115独立3D视频宇宙：WebGL球体、自由旋转、缩放、镜头飞行、星球迷雾、真实目录只读探索与随机跃迁。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -14,9 +14,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.1.0';
-  const DELIVERY = 'VU-010-01';
-  const API_ORIGIN = 'https://webapi.115.com';
+  const VERSION = '0.2.0';
+  const DELIVERY = 'VU-020-01';  const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
   const MAX_PAGES_PER_DIRECTORY = 70;
@@ -103,11 +102,62 @@
   }
 
   function placeChild(parent, siblingIndex, id) {
+    // Deterministic 3D spiral: folders orbit their parent at multiple elevations.
+    // No index migration: the same folder ID always receives the same location.
     const theta = siblingIndex * 2.399963229728653 + (hashId(parent.id) % 628) / 100;
-    const radius = (parent.depth === 0 ? 125 : 95) + Math.sqrt(siblingIndex + 1) * (parent.depth === 0 ? 77 : 51);
-    return { x: parent.x + Math.cos(theta) * radius, y: parent.y + Math.sin(theta) * radius };
+    const elevation = Math.sin(siblingIndex * 1.618 + (hashId(id) % 500) / 113) * 0.67;
+    const radius = (parent.depth === 0 ? 210 : 112) + Math.sqrt(siblingIndex + 1) *
+      (parent.depth === 0 ? 91 : 52);
+    const plane = Math.sqrt(1 - elevation * elevation) * radius;
+    return {
+      x: parent.x + Math.cos(theta) * plane,
+      y: parent.y + elevation * radius,
+      z: (parent.z || 0) + Math.sin(theta) * plane
+    };
   }
 
+  function cameraDefaults() {
+    return {
+      yaw: 0.38, pitch: -0.19, distance: 1680,
+      focus: { x: 0, y: 0, z: 0 }, panX: 0, panY: 0,
+      autoSpin: true, glide: null, lastFrame: 0
+    };
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function projectedPlanet(node, camera, width, height) {
+    const dx = node.x - camera.focus.x;
+    const dy = node.y - camera.focus.y;
+    const dz = (node.z || 0) - camera.focus.z;
+    const cosYaw = Math.cos(camera.yaw), sinYaw = Math.sin(camera.yaw);
+    const xx = dx * cosYaw - dz * sinYaw;
+    const rotatedZ = dx * sinYaw + dz * cosYaw;
+    const cosPitch = Math.cos(camera.pitch), sinPitch = Math.sin(camera.pitch);
+    const yy = dy * cosPitch - rotatedZ * sinPitch;
+    const zz = dy * sinPitch + rotatedZ * cosPitch;
+    const depth = camera.distance - zz;
+    const visible = depth > 65 && depth < 9000;
+    const focal = Math.min(width, height) * 1.42;
+    const scale = visible ? focal / depth : 0;
+    return {
+      x: width / 2 + camera.panX + xx * scale,
+      y: height / 2 + camera.panY - yy * scale,
+      radius: (sizeOfPlanet(node) + (node.depth === 0 ? 15 : 4)) *
+        (node.scanned ? 1.7 : 1.10) * scale,
+      depth, visible, z: clamp((depth - 65) / (9000 - 65) * 2 - 1, -0.999, 0.999)
+    };
+  }
+
+  function nearestPlanetAt(projected, x, y) {
+    // Frontmost visible sphere wins in overlapping projections.
+    return projected
+      .filter(({ screen }) => screen.visible &&
+        (screen.x - x) ** 2 + (screen.y - y) ** 2 <= Math.max(12, screen.radius + 7) ** 2)
+      .sort((a, b) => a.screen.depth - b.screen.depth)[0]?.node || null;
+  }
   const CSS = [
     ':host{all:initial;font-family:Inter,system-ui,"Microsoft YaHei",sans-serif;color:#e9efff;}',
     '*{box-sizing:border-box;}button,input{font:inherit;}button{cursor:pointer;}',
@@ -122,8 +172,9 @@
     'border:1px solid #6489bf55;border-radius:11px;color:#e2f3ff;padding:10px 13px;font-size:12px;transition:.18s;}',
     '.btn:hover{background:#24436d;border-color:#8cc3ff}.btn:disabled{opacity:.4;cursor:not-allowed}.primary{background:linear-gradient(120deg,#2464cb,#7145ad);}',
     '.danger{color:#ffc4d5}.body{position:relative;flex:1;min-height:0;display:flex;}',
-    '.scene{flex:1;position:relative;min-width:0;overflow:hidden;background:radial-gradient(ellipse at 60% 40%,#141a37,#060915 75%);}',
+    '.scene{flex:1;position:relative;min-width:0;overflow:hidden;background:radial-gradient(ellipse at 60% 40%,#152647,#050914 76%);}',
     'canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab;}canvas.drag{cursor:grabbing;}',
+    '.label-layer{position:absolute;inset:0;pointer-events:none;width:100%;height:100%;}',
     '.hint{position:absolute;left:22px;top:19px;background:#0c142bc0;border:1px solid #6686c644;',
     'border-radius:14px;padding:10px 14px;pointer-events:none;max-width:370px;font-size:12px;color:#afc6e6;line-height:1.7;}',
     '.hud{position:absolute;left:22px;bottom:22px;display:flex;flex-wrap:wrap;gap:8px;}',
@@ -158,7 +209,7 @@
   document.documentElement.appendChild(host);
   const shadow = host.attachShadow({ mode: 'open' });
   shadow.innerHTML = '<style>' + CSS + '</style>' + [
-    '<button class="launcher" type="button" id="universe-launch">✦ <span>视频宇宙</span><span class="tag">实验 0.1</span></button>',
+    '<button class="launcher" type="button" id="universe-launch">✦ <span>3D 视频宇宙</span><span class="tag">实验 0.2</span></button>',
     '<section class="shell" id="universe-shell" hidden aria-label="115视频宇宙探索实验">',
       '<header class="bar">',
         '<div><div class="brand">✦ 拉面视频宇宙</div><div class="desc">从文件夹到星球 · 探索属于你的影像星系</div></div>',
@@ -172,15 +223,17 @@
       '</header>',
       '<div class="body">',
         '<div class="scene">',
-          '<canvas id="universe-canvas" aria-label="可缩放拖动的星系图，点击星球进入目录"></canvas>',
-          '<div class="hint" id="instruction">拖动画布漫游 · 滚轮缩放 · 点击星球探索 · 随机跃迁发现未知</div>',
+          '<canvas id="universe-canvas" aria-label="3D星球宇宙：鼠标旋转、Shift或右键平移、滚轮缩放、双击聚焦"></canvas>',
+          '<canvas id="universe-label-layer" class="label-layer" aria-hidden="true"></canvas>',
+          '<div class="hint" id="instruction">左键拖动旋转3D宇宙 · Shift/右键拖动平移 · 滚轮缩放 · 单击选中 · 双击聚焦星球</div>',
           '<div class="hud">',
             '<div class="metric"><div id="metric-folders" class="num">0</div><div class="tiny">已发现星球</div></div>',
             '<div class="metric"><div id="metric-videos" class="num">0</div><div class="tiny">已扫描视频</div></div>',
             '<div class="metric"><div id="metric-visited" class="num">0</div><div class="tiny">已探索星球</div></div>',
           '</div>',
-          '<div class="zoom"><button class="btn" id="zoom-in" type="button">＋</button><button class="btn" id="zoom-out" type="button">－</button>',
-            '<button class="btn" id="reset-camera" type="button">◎ 居中</button></div>',
+          '<div class="zoom"><button class="btn" id="spin" type="button" aria-pressed="true">⏸ 停止自转</button>',
+            '<button class="btn" id="zoom-in" type="button">＋</button><button class="btn" id="zoom-out" type="button">－</button>',
+            '<button class="btn" id="reset-camera" type="button">◎ 回到全景</button></div>',
         '</div>',
         '<aside class="side">',
           '<div class="eyebrow" id="side-kicker">GALACTIC EXPLORER · DEMO</div>',
@@ -188,6 +241,7 @@
           '<div class="planet-name" id="side-title">我的视频宇宙</div>',
           '<div class="info" id="side-summary">每个文件夹是一颗星球。先体验演示星图，再开始读取自己的115目录。</div>',
           '<div class="actions"><button class="btn primary" id="jump" type="button">⚡ 随机跃迁</button>',
+          '<button class="btn" id="focus-planet" type="button">◎ 聚焦星球</button>',
           '<button class="btn" id="open-folder" type="button">在115打开目录</button></div>',
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
@@ -207,13 +261,15 @@
     list: $('#video-grid'), msg: $('#scan-message'), note: $('#source-note'),
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary')
   };
-  const ctx = ui.canvas.getContext('2d');
+  const labelCanvas = $('#universe-label-layer');
+  const overlay = labelCanvas.getContext('2d');
+  let renderer = null;
   const state = {
     mode: 'demo', nodes: new Map(), queue: [], selected: '0', rootId: '0',
-    camera: { x: 0, y: 0, zoom: 0.85 },
+    camera: cameraDefaults(),
     scanAbort: null, scanEpoch: 0, running: false, paused: false, scanningCount: 0,
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
-    pointer: null, hoverId: null, seed: 1
+    pointer: null, hoverId: null, projected: [], seed: 1
   };
   const starfield = Array.from({ length: 230 }, (_, i) => ({
     x: ((hashId('star-x-' + i) % 10000) / 10000),
@@ -221,17 +277,15 @@
     size: i % 11 === 0 ? 1.7 : 0.55,
     phase: i * .67
   }));
-
   function addPlanet(data) {
     if (state.nodes.has(data.id)) return state.nodes.get(data.id);
     if (state.nodes.size >= MAX_VISIBLE_PLANETS) return null;
     const parent = state.nodes.get(data.parentId);
     const siblingIndex = parent ? parent.childIds.length : 0;
-    const position = parent ? placeChild(parent, siblingIndex, data.id) : { x: 0, y: 0 };
+    const position = parent ? placeChild(parent, siblingIndex, data.id) : { x: 0, y: 0, z: 0 };
     const node = {
       id: data.id, parentId: data.parentId || null, name: data.name,
-      depth: parent ? parent.depth + 1 : 0, x: position.x, y: position.y,
-      childIds: [], directVideos: 0, observedVideos: 0, directFolders: 0,
+      depth: parent ? parent.depth + 1 : 0, x: position.x, y: position.y, z: position.z,      childIds: [], directVideos: 0, observedVideos: 0, directFolders: 0,
       sample: [], scanned: false, truncated: false, demoVideos: 0
     };
     state.nodes.set(node.id, node);
@@ -247,7 +301,9 @@
     state.queue = [];
     state.selected = rootCid;
     state.rootId = rootCid;
-    state.camera = { x: 0, y: 0, zoom: .85 };
+    state.camera = cameraDefaults();
+    $('#spin').textContent = '⏸ 停止自转';
+    $('#spin').setAttribute('aria-pressed', 'true');
     state.scanningCount = 0;
     state.discoveredVideos = 0;
     state.visited = new Set([rootCid]);
@@ -470,11 +526,7 @@
       state.queue.unshift(id);
       state.notice = '已将「' + node.name + '」移到下一个探索目标。';
     }
-    if (focus) {
-      state.camera.x = -node.x * state.camera.zoom;
-      state.camera.y = -node.y * state.camera.zoom;
-    }
-    refreshPanel();
+    if (focus) flyToPlanet(node, 1000);    refreshPanel();
   }
 
   function jumpRandom() {
@@ -556,132 +608,289 @@
       ui.canvas.width = width;
       ui.canvas.height = height;
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { w: rect.width, h: rect.height };
+    if (labelCanvas.width !== width || labelCanvas.height !== height) {
+      labelCanvas.width = width;
+      labelCanvas.height = height;
+    }
+    overlay.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w: rect.width, h: rect.height, dpr };
   }
 
-  function project(node, w, h) {
-    return {
-      x: w / 2 + state.camera.x + node.x * state.camera.zoom,
-      y: h / 2 + state.camera.y + node.y * state.camera.zoom
+  function createWebGLRenderer() {
+    // The GPU lights spherical point sprites in a real 3D perspective scene.
+    // Each node has depth; a separate 2D overlay only draws labels and reticles.
+    let gl;
+    try { gl = ui.canvas.getContext('webgl', { alpha: true, antialias: true }); }
+    catch { return null; }
+    if (!gl) return null;
+    const vertex = [
+      'attribute vec2 a_xy;',
+      'attribute float a_z;',
+      'attribute float a_size;',
+      'attribute vec3 a_color;',
+      'varying vec3 v_color;',
+      'void main(){',
+      '  gl_Position=vec4(a_xy,a_z,1.0);',
+      '  gl_PointSize=a_size;',
+      '  v_color=a_color;',
+      '}'
+    ].join('\n');
+    const fragment = [
+      'precision mediump float;',
+      'varying vec3 v_color;',
+      'uniform float u_lines;',
+      'void main(){',
+      ' if(u_lines>0.5){gl_FragColor=vec4(v_color,0.30);return;}',
+      ' vec2 uv=gl_PointCoord*2.0-1.0;',
+      ' float rr=dot(uv,uv);if(rr>1.0)discard;',
+      ' vec3 normal=normalize(vec3(uv.x,-uv.y,sqrt(max(0.0,1.0-rr))));',
+      ' vec3 light=normalize(vec3(-0.57,0.72,1.0));',
+      ' float diffuse=0.25+0.75*max(dot(normal,light),0.0);',
+      ' float rim=pow(1.0-normal.z,2.0);',
+      ' float sparkle=pow(max(dot(normal,light),0.0),32.0);',
+      ' vec3 color=v_color*diffuse+vec3(0.27,0.48,0.85)*rim*0.46+vec3(sparkle*0.40);',
+      ' gl_FragColor=vec4(clamp(color,0.0,1.0),1.0);',
+      '}'
+    ].join('\n');
+    function shader(type, source) {
+      const compiled = gl.createShader(type);
+      gl.shaderSource(compiled, source);
+      gl.compileShader(compiled);
+      if (!gl.getShaderParameter(compiled, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(compiled) || 'WebGL shader compilation failed');
+      }
+      return compiled;
+    }
+    try {
+      const program = gl.createProgram();
+      gl.attachShader(program, shader(gl.VERTEX_SHADER, vertex));
+      gl.attachShader(program, shader(gl.FRAGMENT_SHADER, fragment));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || 'WebGL link failed');
+      }
+      const buffer = gl.createBuffer();
+      const xy = gl.getAttribLocation(program, 'a_xy');
+      const zz = gl.getAttribLocation(program, 'a_z');
+      const size = gl.getAttribLocation(program, 'a_size');
+      const color = gl.getAttribLocation(program, 'a_color');
+      const lineUniform = gl.getUniformLocation(program, 'u_lines');
+      const pointLimit = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1];
+      ui.canvas.addEventListener('webglcontextlost', event => {
+        event.preventDefault();
+        renderer = null; // 3D perspective fallback continues in the label canvas.
+      });
+      function drawBatch(data, mode) {
+        if (!data.length) return;
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
+        gl.uniform1f(lineUniform, mode === gl.LINES ? 1 : 0);
+        gl.drawArrays(mode, 0, data.length / 7);
+      }
+      return {
+        draw(entries, links, w, h, dpr) {
+          gl.viewport(0, 0, ui.canvas.width, ui.canvas.height);
+          gl.clearColor(0, 0, 0, 0);
+          gl.clearDepth(1);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          gl.useProgram(program);
+          gl.enable(gl.DEPTH_TEST);
+          gl.depthFunc(gl.LEQUAL);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+          for (const [location, length, offset] of [
+            [xy, 2, 0], [zz, 1, 8], [size, 1, 12], [color, 3, 16]
+          ]) {
+            gl.enableVertexAttribArray(location);
+            gl.vertexAttribPointer(location, length, gl.FLOAT, false, 28, offset);
+          }
+          const pack = (screen, rgb, diameter = 1) => [
+            screen.x / w * 2 - 1, 1 - screen.y / h * 2,
+            screen.z, Math.min(pointLimit, diameter * dpr), ...rgb
+          ];
+          const lineData = [];
+          for (const link of links) {
+            lineData.push(...pack(link.start, [0.41, 0.62, 0.99]));
+            lineData.push(...pack(link.end, [0.41, 0.62, 0.99]));
+          }
+          gl.depthMask(false);
+          drawBatch(lineData, gl.LINES);
+          gl.depthMask(true);
+          const points = [];
+          const palette = [
+            [0.46, 0.72, 1], [0.70, 0.54, 0.99], [0.35, 0.84, 0.84],
+            [0.96, 0.61, 0.83], [0.63, 0.71, 1]
+          ];
+          for (const { node, screen } of entries) {
+            if (!screen.visible || screen.radius < 1) continue;
+            const rgb = node.scanned ? palette[hashId(node.id) % palette.length] : [0.27, 0.31, 0.43];
+            points.push(...pack(screen, node.id === state.selected ? [0.81, 0.9, 1] : rgb,
+              Math.max(5, screen.radius * 2)));
+          }
+          drawBatch(points, gl.POINTS);
+        }
+      };
+    } catch (error) {
+      state.notice = 'WebGL 未就绪，已启用兼容 3D 渲染：' + error.message;
+      return null;
+    }
+  }
+
+  function stopAutoSpin() {
+    state.camera.autoSpin = false;
+    $('#spin').textContent = '▶ 开启自转';
+    $('#spin').setAttribute('aria-pressed', 'false');
+  }
+
+  function flyToPlanet(node, duration = 950, overview = false) {
+    if (!node) return;
+    const camera = state.camera;
+    stopAutoSpin();
+    const target = overview ? { x: 0, y: 0, z: 0 } : { x: node.x, y: node.y, z: node.z || 0 };
+    const distance = overview ? 1680 : clamp(890 - node.depth * 75, 510, 1040);
+    camera.glide = {
+      start: performance.now(), duration,
+      from: { ...camera.focus, distance: camera.distance, panX: camera.panX, panY: camera.panY,
+        yaw: camera.yaw, pitch: camera.pitch },
+      to: { ...target, distance, panX: 0, panY: 0,
+        yaw: overview ? 0.38 : camera.yaw, pitch: overview ? -0.19 : camera.pitch }
     };
+  }
+
+  function tickCamera(timestamp) {
+    const camera = state.camera;
+    const elapsed = camera.lastFrame ? Math.min(50, timestamp - camera.lastFrame) : 16;
+    camera.lastFrame = timestamp;
+    if (camera.glide) {
+      const { start, duration, from, to } = camera.glide;
+      const t = clamp((timestamp - start) / duration, 0, 1);
+      const smooth = t * t * (3 - 2 * t);
+      for (const axis of ['x', 'y', 'z']) {
+        camera.focus[axis] = from[axis] + (to[axis] - from[axis]) * smooth;
+      }
+      for (const axis of ['distance', 'panX', 'panY', 'yaw', 'pitch']) {
+        camera[axis] = from[axis] + (to[axis] - from[axis]) * smooth;
+      }
+      if (t >= 1) camera.glide = null;
+    } else if (camera.autoSpin && !state.pointer) {
+      camera.yaw += elapsed * 0.000085;
+    }
   }
 
   function drawFrame(timestamp) {
     if (ui.shell.hidden) { requestAnimationFrame(drawFrame); return; }
-    const { w, h } = resizeCanvas();
-    ctx.clearRect(0, 0, w, h);
-    const nebula = ctx.createRadialGradient(w * .44, h * .38, 0, w * .44, h * .38, Math.max(w, h) * .78);
-    nebula.addColorStop(0, '#142347');
-    nebula.addColorStop(.5, '#0c122b');
-    nebula.addColorStop(1, '#050713');
-    ctx.fillStyle = nebula;
-    ctx.fillRect(0, 0, w, h);
+    const { w, h, dpr } = resizeCanvas();
+    if (w <= 1 || h <= 1) { requestAnimationFrame(drawFrame); return; }
+    tickCamera(timestamp);
+    overlay.clearRect(0, 0, w, h);
+    const entries = Array.from(state.nodes.values()).map(node =>
+      ({ node, screen: projectedPlanet(node, state.camera, w, h) }));
+    state.projected = entries;
+    const lookup = new Map(entries.map(entry => [entry.node.id, entry.screen]));
+    const links = [];
+    for (const { node, screen } of entries) {
+      if (!screen.visible || !node.parentId) continue;
+      const parent = lookup.get(node.parentId);
+      if (parent && parent.visible) links.push({ start: parent, end: screen });
+    }
+    if (renderer) renderer.draw(entries, links, w, h, dpr);
+    else {
+      overlay.strokeStyle = '#7b9be74d';
+      overlay.lineWidth = 1;
+      for (const { start, end } of links) {
+        overlay.beginPath(); overlay.moveTo(start.x, start.y);
+        overlay.lineTo(end.x, end.y); overlay.stroke();
+      }
+      for (const { node, screen } of entries.slice().sort((a, b) => b.screen.depth - a.screen.depth)) {
+        if (!screen.visible || screen.radius < 1) continue;
+        const rad = Math.max(2, screen.radius);
+        const gradient = overlay.createRadialGradient(screen.x - rad * .36, screen.y - rad * .36, 0,
+          screen.x, screen.y, rad);
+        const hue = node.scanned ? 190 + hashId(node.id) % 85 : 225;
+        gradient.addColorStop(0, node.scanned ? '#e8faff' : '#8891ad');
+        gradient.addColorStop(.35, 'hsl(' + hue + ',' + (node.scanned ? 85 : 20) + '%,62%)');
+        gradient.addColorStop(1, '#0b1637');
+        overlay.shadowBlur = node.id === state.selected ? 32 : 12;
+        overlay.shadowColor = '#4b80ff';
+        overlay.fillStyle = gradient;
+        overlay.beginPath(); overlay.arc(screen.x, screen.y, rad, 0, Math.PI * 2); overlay.fill();
+        overlay.shadowBlur = 0;
+      }
+    }
     for (const star of starfield) {
-      const opacity = .32 + .18 * Math.sin(timestamp / 1850 + star.phase);
-      ctx.fillStyle = 'rgba(178,207,255,' + opacity.toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.arc(star.x * w, star.y * h, star.size, 0, Math.PI * 2);
-      ctx.fill();
+      const shift = Math.sin(state.camera.yaw * .22 + star.phase) * 23;
+      const px = (star.x * w + shift + w) % w;
+      const py = (star.y * h + state.camera.pitch * 16 + h) % h;
+      const opacity = .12 + .22 * Math.abs(Math.sin(timestamp / 2100 + star.phase));
+      overlay.fillStyle = 'rgba(186,211,255,' + opacity.toFixed(3) + ')';
+      overlay.beginPath(); overlay.arc(px, py, star.size, 0, Math.PI * 2); overlay.fill();
     }
-    const rootNode = state.nodes.get(state.rootId);
-    if (rootNode) {
-      const center = project(rootNode, w, h);
-      ctx.strokeStyle = '#5a79bb17';
-      ctx.lineWidth = 1;
-      for (const ring of [180, 360, 610]) {
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, ring * state.camera.zoom, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    const nodes = Array.from(state.nodes.values());
-    for (const node of nodes) {
-      if (!node.parentId) continue;
-      const parent = state.nodes.get(node.parentId);
-      if (!parent) continue;
-      const a = project(node, w, h), b = project(parent, w, h);
-      if (Math.max(a.x, b.x) < -50 || Math.min(a.x, b.x) > w + 50 ||
-          Math.max(a.y, b.y) < -50 || Math.min(a.y, b.y) > h + 50) continue;
-      ctx.strokeStyle = node.scanned ? '#77b6fd2a' : '#7d87b817';
-      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(a.x, a.y); ctx.stroke();
-    }
-    for (const node of nodes) {
-      const pos = project(node, w, h);
-      const rad = Math.max(5, sizeOfPlanet(node) * Math.sqrt(state.camera.zoom));
-      if (pos.x < -rad - 120 || pos.x > w + rad + 120 || pos.y < -rad - 60 || pos.y > h + rad + 60) continue;
-      const selected = node.id === state.selected;
-      const hue = hashId(node.id) % 65 + 185;
-      const gradient = ctx.createRadialGradient(pos.x - rad * .31, pos.y - rad * .33, rad * .04,
-        pos.x, pos.y, rad * 1.08);
-      if (node.scanned) {
-        gradient.addColorStop(0, '#e7fcff');
-        gradient.addColorStop(.19, 'hsl(' + hue + ',84%,76%)');
-        gradient.addColorStop(.69, 'hsl(' + (hue + 27) + ',60%,43%)');
-        gradient.addColorStop(1, '#101b42');
-      } else {
-        gradient.addColorStop(0, '#6b7898');
-        gradient.addColorStop(.38, '#3d4569');
-        gradient.addColorStop(1, '#0b1225');
-      }
-      ctx.shadowColor = selected ? '#89ebff' : (node.scanned ? '#4a75ea' : '#434669');
-      ctx.shadowBlur = selected ? 32 : 15;
-      ctx.fillStyle = gradient;
-      ctx.beginPath(); ctx.arc(pos.x, pos.y, rad, 0, Math.PI * 2); ctx.fill();
-      ctx.shadowBlur = 0;
-      if (selected || node.id === state.hoverId) {
-        ctx.strokeStyle = selected ? '#adf4ff' : '#829bf5';
-        ctx.lineWidth = selected ? 2 : 1;
-        ctx.beginPath(); ctx.arc(pos.x, pos.y, rad + 7, 0, Math.PI * 2); ctx.stroke();
+    for (const { node, screen } of entries.slice().sort((a, b) => b.screen.depth - a.screen.depth)) {
+      if (!screen.visible || screen.x < -90 || screen.x > w + 90 ||
+          screen.y < -90 || screen.y > h + 90) continue;
+      const selected = node.id === state.selected, hovered = node.id === state.hoverId;
+      if (selected || hovered) {
+        overlay.strokeStyle = selected ? '#bbf4ff' : '#789dff';
+        overlay.lineWidth = selected ? 2 : 1.5;
+        overlay.beginPath(); overlay.arc(screen.x, screen.y, Math.max(8, screen.radius) + 9,
+          0, Math.PI * 2); overlay.stroke();
       }
       if (!node.scanned) {
-        ctx.strokeStyle = '#b2b9d477';
-        ctx.setLineDash([2, 4]);
-        ctx.beginPath(); ctx.arc(pos.x, pos.y, rad + 4, 0, Math.PI * 2); ctx.stroke();
-        ctx.setLineDash([]);
+        overlay.strokeStyle = '#8993c877';
+        overlay.setLineDash([2, 5]);
+        overlay.beginPath(); overlay.arc(screen.x, screen.y, Math.max(7, screen.radius) + 4,
+          0, Math.PI * 2); overlay.stroke();
+        overlay.setLineDash([]);
       }
-      // Reveal satellite labels when zoomed in or hovered; otherwise keep the galaxy legible.
-      const showLabel = node.depth < 2 || selected || node.id === state.hoverId || state.camera.zoom >= 1.35;
-      if (showLabel) {
-        const label = node.name.length > 17 ? node.name.slice(0, 16) + '…' : node.name;
-        ctx.textAlign = 'center';
-        ctx.font = (selected ? '600 ' : '') + '12px "Microsoft YaHei", sans-serif';
-        ctx.fillStyle = selected ? '#ecfaff' : '#b9c9e6';
-        ctx.fillText(label, pos.x, pos.y + rad + 18, 168);
-        if (node.observedVideos) {
-          ctx.font = '10px sans-serif';
-          ctx.fillStyle = '#9bc1fb';
-          ctx.fillText(String(node.observedVideos), pos.x, pos.y + rad + 31);
-        }
+      if (node.depth > 1 && !selected && !hovered && state.camera.distance > 980) continue;
+      const label = node.name.length > 15 ? node.name.slice(0, 14) + '…' : node.name;
+      overlay.textAlign = 'center';
+      overlay.font = (selected ? '700 ' : '500 ') + '12px "Microsoft YaHei",sans-serif';
+      overlay.fillStyle = selected ? '#f2feff' : '#c5d3f2';
+      overlay.shadowBlur = 4; overlay.shadowColor = '#000';
+      overlay.fillText(label, screen.x, screen.y + Math.max(5, screen.radius) + 18, 152);
+      if (node.observedVideos) {
+        overlay.font = '10px sans-serif';
+        overlay.fillStyle = '#91c1ff';
+        overlay.fillText(String(node.observedVideos), screen.x,
+          screen.y + Math.max(5, screen.radius) + 31);
       }
+      overlay.shadowBlur = 0;
     }
     requestAnimationFrame(drawFrame);
   }
 
   function hitPlanet(clientX, clientY) {
     const rect = ui.canvas.getBoundingClientRect();
-    const x = clientX - rect.left, y = clientY - rect.top;
-    const nodes = Array.from(state.nodes.values()).reverse();
-    for (const node of nodes) {
-      const pos = project(node, rect.width, rect.height);
-      const radius = Math.max(12, sizeOfPlanet(node) * Math.sqrt(state.camera.zoom) + 10);
-      if ((pos.x - x) ** 2 + (pos.y - y) ** 2 <= radius ** 2) return node;
-    }
-    return null;
+    return nearestPlanetAt(state.projected, clientX - rect.left, clientY - rect.top);
   }
 
+  ui.canvas.addEventListener('contextmenu', event => event.preventDefault());
   ui.canvas.addEventListener('pointerdown', event => {
-    state.pointer = { x: event.clientX, y: event.clientY, px: state.camera.x, py: state.camera.y, moved: false };
+    if (event.button !== 0 && event.button !== 2) return;
+    stopAutoSpin();
+    state.camera.glide = null;
+    state.pointer = {
+      x: event.clientX, y: event.clientY, yaw: state.camera.yaw, pitch: state.camera.pitch,
+      panX: state.camera.panX, panY: state.camera.panY,
+      pan: event.button === 2 || event.shiftKey, moved: false
+    };
     ui.canvas.setPointerCapture(event.pointerId);
     ui.canvas.classList.add('drag');
   });
   ui.canvas.addEventListener('pointermove', event => {
     if (state.pointer) {
-      const dx = event.clientX - state.pointer.x, dy = event.clientY - state.pointer.y;
-      if (Math.abs(dx) + Math.abs(dy) > 6) state.pointer.moved = true;
-      if (state.pointer.moved) {
-        state.camera.x = state.pointer.px + dx;
-        state.camera.y = state.pointer.py + dy;
+      const pointer = state.pointer;
+      const dx = event.clientX - pointer.x, dy = event.clientY - pointer.y;
+      if (Math.abs(dx) + Math.abs(dy) > 5) pointer.moved = true;
+      if (pointer.moved) {
+        if (pointer.pan) {
+          state.camera.panX = pointer.panX + dx;
+          state.camera.panY = pointer.panY + dy;
+        } else {
+          state.camera.yaw = pointer.yaw + dx * 0.006;
+          state.camera.pitch = clamp(pointer.pitch - dy * 0.005, -1.4, 1.4);
+        }
       }
     } else state.hoverId = hitPlanet(event.clientX, event.clientY)?.id || null;
   });
@@ -689,22 +898,30 @@
     const dragged = state.pointer && state.pointer.moved;
     state.pointer = null;
     ui.canvas.classList.remove('drag');
-    if (!dragged) {
+    if (!dragged && event.button === 0) {
       const planet = hitPlanet(event.clientX, event.clientY);
       if (planet) selectPlanet(planet.id, false);
+      else {
+        state.selected = state.rootId;
+        flyToPlanet(state.nodes.get(state.rootId), 900, true);
+        refreshPanel();
+      }
     }
   });
-  ui.canvas.addEventListener('pointercancel', () => { state.pointer = null; ui.canvas.classList.remove('drag'); });
+  ui.canvas.addEventListener('pointercancel', () => {
+    state.pointer = null; ui.canvas.classList.remove('drag');
+  });
+  ui.canvas.addEventListener('dblclick', event => {
+    event.preventDefault();
+    const planet = hitPlanet(event.clientX, event.clientY);
+    if (planet) selectPlanet(planet.id, true);
+    else flyToPlanet(state.nodes.get(state.rootId), 900, true);
+  });
   ui.canvas.addEventListener('wheel', event => {
     event.preventDefault();
-    const rect = ui.canvas.getBoundingClientRect();
-    const before = state.camera.zoom;
-    const after = Math.max(.28, Math.min(2.6, before * (event.deltaY > 0 ? .89 : 1.11)));
-    const x = event.clientX - rect.left - rect.width / 2;
-    const y = event.clientY - rect.top - rect.height / 2;
-    state.camera.x = x - (x - state.camera.x) * after / before;
-    state.camera.y = y - (y - state.camera.y) * after / before;
-    state.camera.zoom = after;
+    stopAutoSpin();
+    state.camera.glide = null;
+    state.camera.distance = clamp(state.camera.distance * (event.deltaY > 0 ? 1.12 : .89), 300, 3500);
   }, { passive: false });
 
   function toggle(open) {
@@ -719,12 +936,30 @@
   ui.demo.addEventListener('click', populateDemo);
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
-  $('#zoom-in').addEventListener('click', () => { state.camera.zoom = Math.min(2.6, state.camera.zoom * 1.24); });
-  $('#zoom-out').addEventListener('click', () => { state.camera.zoom = Math.max(.28, state.camera.zoom / 1.24); });
-  $('#reset-camera').addEventListener('click', () => selectPlanet(state.rootId));
+  $('#focus-planet').addEventListener('click', () => selectPlanet(state.selected, true));
+  $('#spin').addEventListener('click', () => {
+    state.camera.autoSpin = !state.camera.autoSpin;
+    state.camera.glide = null;
+    $('#spin').textContent = state.camera.autoSpin ? '⏸ 停止自转' : '▶ 开启自转';
+    $('#spin').setAttribute('aria-pressed', String(state.camera.autoSpin));
+  });
+  $('#zoom-in').addEventListener('click', () => {
+    stopAutoSpin(); state.camera.glide = null;
+    state.camera.distance = clamp(state.camera.distance * .80, 300, 3500);
+  });
+  $('#zoom-out').addEventListener('click', () => {
+    stopAutoSpin(); state.camera.glide = null;
+    state.camera.distance = clamp(state.camera.distance * 1.25, 300, 3500);
+  });
+  $('#reset-camera').addEventListener('click', () => {
+    state.selected = state.rootId;
+    flyToPlanet(state.nodes.get(state.rootId), 1050, true);
+    refreshPanel();
+  });
   window.addEventListener('keydown', event => { if (event.key === 'Escape' && !ui.shell.hidden) toggle(false); });
   const currentCid = new URLSearchParams(window.location.search).get('cid');
   if (currentCid && /^\d{1,30}$/.test(currentCid)) ui.cid.value = currentCid;
+  renderer = createWebGLRenderer();
   populateDemo();
   requestAnimationFrame(drawFrame);
 })();

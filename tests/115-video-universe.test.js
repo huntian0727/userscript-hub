@@ -18,7 +18,7 @@ function coreOf(script = source) {
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt };'
   )();
 }
 
@@ -29,7 +29,11 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.1.0');
+  assert.equal(universe.version, '0.2.0');
+  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
+  assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
+
   assert.notEqual(universe.name, stable.name);
   assert.notEqual(universe.name, explorer.name);
   assert.notEqual(universe.namespace, stable.namespace);
@@ -44,7 +48,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-010-01';/);
+  assert.match(source, /const DELIVERY = 'VU-020-01';/);
   assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
@@ -106,9 +110,60 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /当前试点不内嵌视频解码/);
 });
 
-test('published snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.1.0.user.js');
-  assert.ok(fs.existsSync(pathToSnapshot), 'new immutable universe snapshot should exist');
+test('v0.2.0 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.0.user.js');
+  assert.ok(fs.existsSync(pathToSnapshot), 'new version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
+});
+
+test('3D placement uses genuine XYZ depth and stays deterministic', () => {
+  const parent = { id: '0', x: 0, y: 0, z: 0, depth: 0 };
+  const points = Array.from({ length: 12 }, (_, i) => core.placeChild(parent, i, String(100 + i)));
+  assert.ok(points.every(point => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z)));
+  assert.ok(new Set(points.map(point => Math.round(point.z))).size > 5, 'satellites must occupy multiple depth layers');
+  assert.ok(new Set(points.map(point => Math.round(point.y))).size > 5, 'satellites must occupy multiple heights');
+  assert.deepEqual(core.placeChild(parent, 7, '107'), points[7]);
+});
+
+test('orbital camera projects, rotates, zooms and focuses correctly', () => {
+  const node = { id: 'star', x: 200, y: 40, z: 120, observedVideos: 120, depth: 1 };
+  const camera = core.cameraDefaults();
+  const before = core.projectedPlanet(node, camera, 1250, 800);
+  camera.yaw += Math.PI / 2;
+  const rotated = core.projectedPlanet(node, camera, 1250, 800);
+  assert.ok(Math.abs(before.x - rotated.x) > 45, 'rotating camera must move projected X');
+  camera.distance /= 2;
+  const zoomed = core.projectedPlanet(node, camera, 1250, 800);
+  assert.ok(zoomed.radius > rotated.radius, 'camera dolly must scale sphere radius');
+  camera.focus = { x: node.x, y: node.y, z: node.z };
+  const focused = core.projectedPlanet(node, camera, 1250, 800);
+  assert.ok(Math.abs(focused.x - 625) < 0.01);
+  assert.ok(Math.abs(focused.y - 400) < 0.01);
+});
+
+test('3D picking chooses frontmost sphere when screens overlap', () => {
+  const behind = { node: { id: 'behind' }, screen: { x: 200, y: 200, radius: 50, depth: 1800, visible: true } };
+  const front = { node: { id: 'front' }, screen: { x: 200, y: 200, radius: 24, depth: 650, visible: true } };
+  assert.equal(core.nearestPlanetAt([behind, front], 200, 200).id, 'front');
+  assert.equal(core.nearestPlanetAt([behind, front], 900, 900), null);
+});
+
+test('3D WebGL lighting and controls do not alter existing data transport or account files', () => {
+  assert.match(source, /function createWebGLRenderer\(\)/);
+  assert.match(source, /gl\.POINTS/);
+  assert.match(source, /gl\.DEPTH_TEST/);
+  assert.match(source, /gl\.getShaderParameter/);
+  assert.match(source, /addEventListener\('dblclick'/);
+  assert.match(source, /addEventListener\('wheel'/);
+  assert.match(source, /addEventListener\('pointermove'/);
+  assert.match(source, /function flyToPlanet\(/);
+  assert.match(source, /function stopAutoSpin\(/);
+  assert.match(source, /const DELIVERY = 'VU-020-01';/);
+});
+
+test('v0.1.0 remains an immutable independently installed historical release', () => {
+  const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
+  assert.equal(readMetadata(old).version, '0.1.0');
+  assert.equal(readMetadata(old).namespace, readMetadata(source).namespace);
 });
