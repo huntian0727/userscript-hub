@@ -11,14 +11,14 @@ const registry = JSON.parse(fs.readFileSync(path.join(root, 'registry.json'), 'u
 const { readMetadata, withUpdateUrls } = require('../scripts/build-pages');
 
 function coreOf(script = source) {
-  const a = script.indexOf('  function numericId(value) {');
+  const a = script.indexOf('  function connectionStateForError(error) {');
   const b = script.indexOf('  const CSS = ', a);
   assert.ok(a >= 0 && b > a, 'pure video-universe model function boundary');
   return new Function(
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason, connectionStateForError };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.7');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.8');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-027-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-028-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /体验演示星图/);
@@ -136,8 +136,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /完整播放交给115官方页面/);
 });
 
-test('v0.2.7 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.7.user.js');
+test('v0.2.8 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.8.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -184,7 +184,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-027-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-028-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -348,6 +348,28 @@ test('v0.2.5 motion preview is opt-in, 115-only, and never runs in demo mode', (
   assert.doesNotMatch(source, /document\.cookie\s*=/);
 });
 
+
+test('v0.2.8 identifies expired login pages and classifies 115 connection failures', () => {
+  assert.throws(() => core.parsePage('<!doctype html><html><body>login</body></html>', 0), /登录状态可能失效/);
+  assert.equal(core.connectionStateForError(new Error('115返回了网页而不是目录数据，登录状态可能失效')), 'login');
+  assert.equal(core.connectionStateForError(new Error('115登录状态失效或目录访问受限')), 'login');
+  assert.equal(core.connectionStateForError(new Error('115 需要人机验证，请在网盘页面完成验证')), 'verify');
+  assert.equal(core.connectionStateForError(new Error('115请求过于频繁')), 'limited');
+  assert.equal(core.connectionStateForError(new Error('115目录请求超时')), 'error');
+  assert.equal(core.connectionStateForError(new Error('网络连接失败')), 'error');
+});
+
+test('v0.2.8 connection diagnostics and progress are visible without reading credentials', () => {
+  assert.match(source, /connectionStatus: 'idle'/);
+  assert.match(source, /ui\.note\.dataset\.status = state\.mode === 'demo' \? 'demo' : state\.connectionStatus/);
+  assert.match(source, /id="scan-progress"/);
+  assert.match(source, /function refreshScanProgress\(/);
+  assert.match(source, /登录后重新尝试/);
+  assert.match(source, /验证后继续/);
+  assert.match(source, /response\.status >= 300 && response\.status < 400/);
+  assert.match(source, /115返回了网页而不是目录数据/);
+  assert.doesNotMatch(source, /document\.cookie|GM_getValue|GM_setValue|unsafeWindow\.cookie/);
+});
 
 test('v0.2.6 HLS errors are grouped into actionable safe categories', () => {
   assert.match(core.previewFailureReason('manifestLoadError', 403), /权限/);

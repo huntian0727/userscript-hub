@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.7
-// @description  115独立3D视频宇宙：默认真实目录模式、只读分页扫描、真实视频卫星；演示数据需手动开启。
+// @version      0.2.8
+// @description  115独立3D视频宇宙：真实115会话诊断、扫描进度和中断恢复；默认真实目录，演示需手动开启。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.7';
-  const DELIVERY = 'VU-027-01';
+  const VERSION = '0.2.8';
+  const DELIVERY = 'VU-028-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -39,6 +39,14 @@
     ['音乐岛屿', 138, 6], ['冒险大陆', 175, 7], ['未知边界', 22, 3]
   ];
 
+  function connectionStateForError(error) {
+    const message = String(error && error.message || error || '').toLowerCase();
+    if (/人机验证|验证码|captcha|\b911\b/.test(message)) return 'verify';
+    if (/登录|passport|login|\b401\b|\b403\b|无权访问/.test(message)) return 'login';
+    if (/频繁|\b429\b|rate.?limit/.test(message)) return 'limited';
+    return 'error';
+  }
+
   function numericId(value) {
     const id = String(value == null ? '' : value).trim();
     if (!/^\d{1,30}$/.test(id)) throw new Error('目录 ID 无效');
@@ -56,8 +64,12 @@
   }
 
   function parsePage(text, expectedOffset) {
+    const rawText = String(text == null ? '' : text);
+    if (/^\s*</.test(rawText)) {
+      throw new Error('115返回了网页而不是目录数据，登录状态可能失效；请先在115官方页面确认登录');
+    }
     let payload;
-    try { payload = JSON.parse(text); } catch { throw new Error('115 目录接口返回内容无法解析'); }
+    try { payload = JSON.parse(rawText); } catch { throw new Error('115 目录接口返回内容无法解析'); }
     if (!payload || payload.state !== true || !Array.isArray(payload.data)) {
       const errorCode = Number(payload && (payload.code || payload.errno || payload.errNo));
       if (errorCode === 911) throw new Error('115 需要人机验证，请在网盘页面完成验证后重试');
@@ -375,6 +387,15 @@
     '.preview-actions button{flex:1;min-width:90px;}',
     '.message{font-size:12px;min-height:22px;color:#b1cbed;line-height:1.6;}',
     '.banner{font-size:11px;color:#edd998;background:#927b2d22;border:1px solid #ae985755;border-radius:9px;padding:8px 10px;}',
+    '.banner[data-status="connected"]{color:#a9f0cf;border-color:#58c99a66;background:#1d725322;}',
+    '.banner[data-status="login"],.banner[data-status="verify"],.banner[data-status="limited"],.banner[data-status="error"]{color:#ffd3a0;border-color:#dba45d77;background:#8b592322;}',
+    '.scan-progress{background:#111f3a;border:1px solid #6689bd44;border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:7px;}',
+    '.scan-progress[hidden]{display:none!important}.scan-progress-head{display:flex;justify-content:space-between;gap:8px;color:#b8cdeb;font-size:10px;}',
+    '.scan-progress-head span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.scan-progress-track{height:5px;border-radius:99px;background:#080f21;overflow:hidden;}',
+    '.scan-progress-fill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,#4f9be9,#83e0dc);transition:width .18s ease;}',
+    '.scan-progress-fill.indeterminate{width:18%!important;animation:vu-scan-glide 1.1s ease-in-out infinite alternate;}',
+    '@keyframes vu-scan-glide{from{transform:translateX(0)}to{transform:translateX(350%)}}',
     '.toolbar-input{border:1px solid #6c92c855;background:#0b1930;color:#e8f1ff;border-radius:9px;padding:9px;width:132px;font-size:12px;}',
     '.bar label{display:flex;gap:7px;align-items:center;color:#a7b8d5;font-size:12px;}',
     '@media(max-width:800px){.bar{padding:8px 12px;gap:8px;flex-wrap:wrap;height:auto;min-height:66px}',
@@ -456,7 +477,11 @@
               '<button class="btn" id="preview-close" type="button">收起</button>',
             '</div>',
           '</div>',
-          '<div class="banner" id="source-note">真实115模式 · 尚未读取目录。点击「探索真实115宇宙」读取当前目录。</div>',
+          '<div class="banner" id="source-note" data-status="idle">尚未验证115登录状态。点击「探索真实115宇宙」进行只读连接检查。</div>',
+          '<div class="scan-progress" id="scan-progress" hidden aria-live="polite">',
+            '<div class="scan-progress-head"><span id="scan-progress-label">等待115响应…</span><span id="scan-progress-count"></span></div>',
+            '<div class="scan-progress-track"><div class="scan-progress-fill indeterminate" id="scan-progress-fill"></div></div>',
+          '</div>',
           '<div class="message" id="scan-message">真实数据优先。扫描仅读取115目录，不会修改或下载网盘文件；演示星图需手动开启。</div>',
           '<div class="foot">默认读取当前115目录；每批最多探索80个目录、向下3层，可继续下一批。单击星球居中并读取未探索目录。只读访问，不修改网盘文件。视频卫星展示真实文件样本，完整播放交给115官方页面。</div>',
         '</aside>',
@@ -475,7 +500,9 @@
     orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
     moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), motionToggle: $('#toggle-motion'),
     motionDiagnostics: $('#motion-diagnostics'), motionDiagnosticText: $('#motion-diagnostic-text'),
-    motionRetry: $('#retry-motion'), preview: $('#video-preview'),
+    motionRetry: $('#retry-motion'), scanProgress: $('#scan-progress'),
+    scanProgressLabel: $('#scan-progress-label'), scanProgressCount: $('#scan-progress-count'),
+    scanProgressFill: $('#scan-progress-fill'), preview: $('#video-preview'),
     previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
     previewPoster: $('#preview-poster'), moonPeek: $('#moon-peek'),
     moonPeekPoster: $('#moon-peek-poster'), moonPeekName: $('#moon-peek-name'),
@@ -490,6 +517,7 @@
     camera: cameraDefaults(),
     scanAbort: null, scanEpoch: 0, running: false, paused: false, scanningCount: 0,
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
+    connectionStatus: 'idle', progress: null,
     pointer: null, hoverId: null, projected: [], seed: 1,
     orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
     videoProjected: [], moonsVisible: true, hoveredVideoId: null, motionEnabled: false
@@ -759,6 +787,8 @@
     state.running = false;
     state.paused = false;
     state.scanEnded = false;
+    state.connectionStatus = 'idle';
+    state.progress = null;
     state.mode = mode;
     ui.scan.disabled = false;
     ui.pause.disabled = true;
@@ -832,15 +862,21 @@
             if (response.status === 401 || response.status === 403) return done(new Error('115登录状态失效或目录访问受限，请先在115官方页面确认登录状态'));
             if (response.status === 429) return done(new Error('115请求过于频繁，已暂停扫描，请稍后继续'));
             if (response.status >= 500) return done(new Error('115目录服务暂时不可用，请稍后继续'));
+            if (response.status >= 300 && response.status < 400) return done(new Error('115目录请求发生重定向，登录状态可能失效，请先确认115登录'));
             if (response.status < 200 || response.status >= 300) return done(new Error('115请求失败 HTTP ' + response.status));
             try {
               const redirected = new URL(response.finalUrl || parsed.href);
-              if (redirected.origin !== API_ORIGIN || redirected.pathname !== '/files') throw new Error('115接口发生非预期跳转');
+              if (redirected.origin !== API_ORIGIN || redirected.pathname !== '/files') {
+                if (/login|passport|signin/i.test(redirected.pathname)) {
+                  throw new Error('115目录请求跳转到了登录页面，请先在115官方页面重新登录');
+                }
+                throw new Error('115接口发生非预期跳转');
+              }
               done(null, String(response.responseText || ''));
             } catch (error) { done(error); }
           },
           ontimeout() { done(new Error('115目录请求超时')); },
-          onerror() { done(new Error('115目录请求失败，请检查登录状态')); },
+          onerror() { done(new Error('115目录网络请求失败，请检查网络后重试')); },
           onabort() { done(Object.assign(new Error('请求取消'), { name: 'AbortError' })); }
         });
       } catch (error) { done(error); }
@@ -860,6 +896,7 @@
       if (signal.aborted) throw Object.assign(new Error('扫描已暂停'), { name: 'AbortError' });
       if (pageNumber >= MAX_PAGES_PER_DIRECTORY) { truncated = true; break; }
       const page = parsePage(await requestPage(createListUrl(cid, offset), signal), offset);
+      state.connectionStatus = 'connected';
       if (expected === null) expected = page.total;
       if (expected !== page.total) throw new Error('目录分页期间文件总数变化，停止此目录扫描');
       if (!page.records.length) {
@@ -888,6 +925,7 @@
     state.scanAbort = new AbortController();
     state.running = true;
     state.paused = false;
+    state.connectionStatus = 'checking';
     state.notice = '';
     ui.scan.disabled = true;
     ui.pause.disabled = false;
@@ -901,11 +939,14 @@
         if (!node || node.scanned || node.depth > MAX_DEPTH) continue;
         try {
           state.notice = '探索星球「' + node.name + '」…';
+          state.progress = { cid: id, name: node.name, offset: 0, total: null, videos: 0, folders: 0 };
           refreshPanel();
           const result = await readDirectory(id, signal, progress => {
             if (epoch !== state.scanEpoch) return;
+            state.progress = { ...progress, name: node.name };
             state.notice = node.name + ' · 已读 ' + progress.offset + '/' + progress.total + ' 项';
             ui.msg.textContent = state.notice;
+            refreshScanProgress();
           });
           if (epoch !== state.scanEpoch || signal.aborted) return;
           node.directVideos = result.directVideos;
@@ -945,9 +986,11 @@
     } catch (error) {
       if (epoch !== state.scanEpoch) return;
       if (signal.aborted || error.name === 'AbortError') {
+        if (state.connectionStatus === 'checking') state.connectionStatus = 'idle';
         state.notice = '扫描已暂停，点击「继续探索」可从当前目录继续读取。';
         state.paused = true;
       } else {
+        state.connectionStatus = connectionStateForError(error);
         state.notice = '探索暂时中断：' + String(error.message || error).slice(0, 140);
         state.paused = true;
       }
@@ -1110,6 +1153,25 @@
     window.open(url.href, '_blank', 'noopener,noreferrer');
   }
 
+  function refreshScanProgress() {
+    const active = state.mode === 'real' && (state.running || (state.paused && state.queue.length));
+    ui.scanProgress.hidden = !active;
+    if (!active) return;
+    const progress = state.progress;
+    ui.scanProgressLabel.textContent = progress
+      ? (progress.name || '当前目录') + (progress.total == null
+        ? ' · 正在请求115目录…'
+        : ' · 已读取 ' + progress.offset + '/' + progress.total + ' 项')
+      : '正在连接115目录…';
+    ui.scanProgressCount.textContent = state.scanningCount + '/' + MAX_DIRECTORIES +
+      ' 目录 · 待探索 ' + state.queue.length;
+    const percent = progress && Number(progress.total) > 0
+      ? Math.min(100, Math.round(progress.offset / progress.total * 100))
+      : 5;
+    ui.scanProgressFill.style.width = percent + '%';
+    ui.scanProgressFill.classList.toggle('indeterminate', state.running && (!progress || progress.total == null || !progress.total));
+  }
+
   function refreshPanel() {
     const node = state.nodes.get(state.selected) || state.nodes.get(state.rootId);
     if (!node) return;
@@ -1124,16 +1186,26 @@
     $('#metric-folders').textContent = String(Math.max(0, state.nodes.size - 1));
     $('#metric-videos').textContent = state.discoveredVideos.toLocaleString();
     $('#metric-visited').textContent = String(state.visited.size);
+    const connectionText = {
+      idle: '尚未验证115登录状态',
+      checking: '正在验证115会话并读取目录',
+      connected: '115会话已验证',
+      login: '需要在115官方页面重新登录或检查目录权限',
+      verify: '115要求先完成官方人机验证',
+      limited: '115暂时限制请求，请稍后再继续',
+      error: '115连接失败，请检查网络或稍后重试'
+    }[state.connectionStatus] || '115连接状态未知';
+    ui.note.dataset.status = state.mode === 'demo' ? 'demo' : state.connectionStatus;
     ui.note.textContent = state.mode === 'demo'
       ? '模拟演示数据，非真实115内容。'
-      : (state.running
-        ? '正在读取真实115目录；仅展示已返回并校验的数据。'
+      : connectionText + ' · ' + (state.running
+        ? '正在读取真实目录；仅展示已返回并校验的数据。'
         : (state.queue.length && state.paused
-          ? '本批已暂停 · 还有 ' + state.queue.length + ' 个目录待探索。'
+          ? '本批暂停 · 还有 ' + state.queue.length + ' 个目录待探索。'
           : (state.scanEnded
             ? '当前选择的目录探索完成；数量不代表网盘全盘。'
             : (!node.scanned
-              ? '真实115模式已就绪，尚未读取目录。点击「探索真实115宇宙」开始。'
+              ? '真实数据尚未读取。'
               : '已读取真实115数据；可点击未探索星球继续深入。'))));
     ui.msg.textContent = state.notice || '点击星球深入探索，或点击「随机跃迁」。';
     ui.folder.disabled = state.mode === 'demo';
@@ -1144,7 +1216,11 @@
       (state.mode === 'demo' ? ' · 演示数据' : '');
     ui.moonToggle.textContent = state.moonsVisible ? '隐藏卫星' : '显示卫星';
     ui.moonToggle.setAttribute('aria-pressed', String(state.moonsVisible));
-    ui.scan.textContent = state.paused && state.mode === 'real' && state.queue.length ? '继续探索' : '探索真实115宇宙';
+    ui.scan.textContent = state.mode === 'real' && state.queue.length && state.paused
+      ? (state.connectionStatus === 'login' ? '登录后重新尝试'
+        : state.connectionStatus === 'verify' ? '验证后继续' : '继续探索')
+      : '探索真实115宇宙';
+    refreshScanProgress();
     const neighborhood = state.orbitActive ?
       orbitNeighborhood(state.nodes, node.id, state.orbitPage) : null;
     ui.orbitList.textContent = '';
