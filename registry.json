@@ -43,8 +43,8 @@
     },
     {
       "id": "115-video-universe",
-      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.8）",
-      "description": "独立实验：真实115会话诊断、HTML登录页识别、扫描进度条与失败后重试；默认真实模式、只读目录扫描和批次续扫。",       "source": "userscripts/115-video-universe.user.js",
-      "channel": "独立公开测试版 · v0.2.8（真实115账号验收待进行）",      "enabled": true
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.9）",
+      "description": "独立实验：HLS短预览采用自动码率并限制到预览窗口尺寸，显示当前清晰度；115官方播放页仍是完整播放入口。",       "source": "userscripts/115-video-universe.user.js",
+      "channel": "独立公开测试版 · v0.2.9（真实115视频播放待验收）",      "enabled": true
     }
   ]}

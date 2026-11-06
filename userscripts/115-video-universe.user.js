@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.8
-// @description  115独立3D视频宇宙：真实115会话诊断、扫描进度和中断恢复；默认真实目录，演示需手动开启。
+// @version      0.2.9
+// @description  115独立3D视频宇宙：真实目录探索、115官方播放交接与自适应画质HLS短预览。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.8';
-  const DELIVERY = 'VU-028-01';
+  const VERSION = '0.2.9';
+  const DELIVERY = 'VU-029-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -277,6 +277,24 @@
     if (type.includes('manifest') || type.includes('level') || type.includes('frag') ||
         type.includes('network')) return '视频源无法加载（可能是网络或跨域限制）';
     return '该视频暂时无法短预览';
+  }
+
+  // Small hover previews should begin in adaptive mode and never request a
+  // rendition larger than the rendered preview box.
+  function motionPreviewHlsConfig() {
+    return {
+      startLevel: -1,
+      capLevelToPlayerSize: true,
+      ignoreDevicePixelRatio: true,
+      maxBufferSize: 4 * 1024 * 1024,
+      maxBufferLength: 3,
+      maxMaxBufferLength: 6,
+      backBufferLength: 0,
+      manifestLoadingMaxRetry: 0,
+      levelLoadingMaxRetry: 0,
+      fragLoadingMaxRetry: 0,
+      xhrSetup(xhr) { xhr.withCredentials = true; }
+    };
   }
 
   function humanFileSize(bytes) {
@@ -565,7 +583,7 @@
   // One bounded, muted media session. Every pointer change destroys stale streams.
   const hoverMotion = {
     generation: 0, delay: null, timeout: null, hls: null, activeId: null,
-    failedIds: new Set(), lastFailure: '', played: false
+    failedIds: new Set(), lastFailure: '', played: false, qualityLabel: '自动画质'
   };
 
   function hlsEngine() {
@@ -601,6 +619,7 @@
     hoverMotion.timeout = null;
     hoverMotion.activeId = null;
     hoverMotion.played = false;
+    hoverMotion.qualityLabel = '自动画质';
     if (hoverMotion.hls) {
       try { hoverMotion.hls.destroy(); } catch {}
       hoverMotion.hls = null;
@@ -621,6 +640,7 @@
     const video = ui.moonVideo;
     const native = !!video.canPlayType('application/vnd.apple.mpegurl');
     const Engine = hlsEngine();
+    hoverMotion.qualityLabel = Engine ? '自动画质' : '浏览器原生';
     if (!canStartMotionPreview(state.mode, state.motionEnabled, window.location.origin,
       moon.record, native, !!Engine)) {
       ui.moonPreviewStatus.textContent = state.mode !== 'real'
@@ -648,13 +668,7 @@
       // All requests use the user's existing 115 session. No Cookie is read or stored.
       if (Engine) {
         try {
-          const player = new Engine({
-            startLevel: 0, capLevelToPlayerSize: true,
-            maxBufferSize: 4 * 1024 * 1024,
-            maxBufferLength: 3, maxMaxBufferLength: 6, backBufferLength: 0,
-            manifestLoadingMaxRetry: 0, levelLoadingMaxRetry: 0, fragLoadingMaxRetry: 0,
-            xhrSetup(xhr) { xhr.withCredentials = true; }
-          });
+          const player = new Engine(motionPreviewHlsConfig());
           hoverMotion.hls = player;
           player.on(Engine.Events.ERROR, (_, data) => {
             if (generation === hoverMotion.generation && data?.fatal) {
@@ -662,6 +676,18 @@
               failMoonMotion(expectedId, generation, data?.details || data?.type, status);
             }
           });
+          if (Engine.Events.LEVEL_SWITCHED) {
+            player.on(Engine.Events.LEVEL_SWITCHED, (_, data) => {
+              if (generation !== hoverMotion.generation || hoverMotion.activeId !== expectedId) return;
+              const level = player.levels?.[Number(data?.level)];
+              const height = Number(level?.height);
+              hoverMotion.qualityLabel = height > 0 ? height + 'p' : '自动画质';
+              if (!video.hidden) {
+                ui.moonPreviewStatus.textContent = '真实视频短预览 · ' +
+                  hoverMotion.qualityLabel + ' · 静音 · 3秒';
+              }
+            });
+          }
           player.on(Engine.Events.MANIFEST_PARSED, () => {
             if (generation !== hoverMotion.generation) return;
             video.play().catch(() => {
@@ -696,7 +722,7 @@
     const generation = hoverMotion.generation;
     ui.moonVideo.hidden = false;
     ui.moonPeekPoster.hidden = true;
-    ui.moonPreviewStatus.textContent = '真实视频短预览 · 静音 · 3秒';
+    ui.moonPreviewStatus.textContent = '真实视频短预览 · ' + hoverMotion.qualityLabel + ' · 静音 · 3秒';
     clearTimeout(hoverMotion.timeout);
     hoverMotion.timeout = setTimeout(() => {
       if (generation === hoverMotion.generation) {

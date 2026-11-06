@@ -62,8 +62,8 @@
 | 0 | v0.2.6（已完成） | 3 秒 HLS 短预览、错误归类、重试 | 178 项测试通过；模拟浏览器通过；真实账号仍待验收 |
 | 1 | v0.2.7（已完成，待真实账号验收） | 真实模式优先启动；修正 115 目录查询参数；补齐真实视频字段；扫描批次可继续 | 180 项单元测试通过；真实 API 契约模拟及 82 目录分批续扫在 WebGL/Canvas 通过；真实账号验收仍待 HOME 登录态 |
 | 2 | v0.2.8（代码完成，待真实账号验收） | 真实会话诊断、HTML登录页识别、扫描进度、失败后保留队列并重试 | 182项单测通过；Chrome WebGL/Canvas登录失效→重试→真实目录契约模拟通过；真实账号验收待HOME登录态 |
-| 3 | v0.2.9（下一阶段） | 真实播放链路打磨：pickcode 校验、115 官方播放页、HLS master playlist/多清晰度兼容、封面降级 | 所有播放入口都来自真实记录；HLS失败不影响官方播放；真实账号验证待用户回家 |
-| 4 | v0.3.0 | 正式试用体验：新手引导、搜索/定位、空状态、进度、移动端布局、性能 | 真实数据流程可连续操作，无模拟默认路径 |
+| 3 | v0.2.9（代码完成，待真实视频验收） | 115官方播放交接、HLS自动画质、预览尺寸限级、当前档位提示 | 183项单测通过；实际Hls.js 1.7.4接受全部配置；WebGL/Canvas预览事件模拟通过；真实账号视频流仍待HOME验收 |
+| 4 | v0.3.0（下一阶段） | 探索效率：已发现星球/视频样本搜索、视频卫星换批、目录路径提示、交互细节 | 搜索只返回已扫描数据；卫星换批不重复且不泄漏播放器；真实模式无模拟数据 |
 | 5 | v0.3.1 | HOME 真实账号试用候选；发布说明、安装说明、回滚包、已知问题清单 | 代码与模拟测试全通过；用户回家后只需一次真实账号验收 |
 | 6 | v1.0.0 | 正式版 | 至少完成真实根目录/指定目录、多个真实视频播放、失败恢复、性能和长时间使用验收 |
 
@@ -73,7 +73,7 @@
 - 当前目录查询把 natsort=1 固定打开。社区维护的 p115client 接口文档提示：该参数在部分较小目录上可能只返回统计、不返回文件；v0.2.7 去掉它，并明确 cur=1 只读当前目录。
 - 当前请求设置 record_open_time=1，可能记录目录打开时间；v0.2.7 改为 record_open_time=0，让目录扫描更接近纯只读。
 - 现有 MAX_DIRECTORIES=80 是单次扫描批次上限，不应该让用户误以为剩余队列已经完成。v0.2.7 让达到批次上限后的队列可继续，且状态明确；81 个子目录的 82 次 API 请求回归已通过。
-- 115 社区接口参考：https://p115client.readthedocs.io/en/latest/reference/module/client.html（fs_files / fs_files_app 小节）。该文档不是 115 官方承诺；最终以 HOME 登录态真实接口验证为准。
+- 115 社区接口参考：https://p115client.readthedocs.io/en/latest/reference/module/client.html（fs_files / fs_files_app 小节）。该文档不是 115 官方承诺；最终以 HOME 登录态真实接口验证为准。\n- HLS.js 官方文档说明 startLevel=-1 会根据首段下载带宽自动选择起始档位；capLevelToPlayerSize 按视频元素尺寸限制清晰度，ignoreDevicePixelRatio 可按CSS尺寸严格限制。v0.2.9 已用实际仓库内 hls.js 1.7.4 实例化核验这些配置：https://github.com/video-dev/hls.js/blob/master/docs/API.md
 - 当前代码使用 https://webapi.115.com/files；115 OpenAPI 的 OAuth 接口与当前网页登录态不是同一认证路径。本轮不擅自迁移到新授权体系。\n- 115 官方网页播放跳转保留 ct=play、ac=location、pickcode、hls=1 参数；第三方公开脚本可找到同类调用，但最终仍须用用户账号验证跳转是否仍有效：https://greasyfork.org/zh-CN/scripts/531243-%E5%8F%91%E9%80%81%E5%88%B0115/code\n- 另一份公开115脚本将 https://115.com/api/video/m3u8/{pickcode}.m3u8 作为 master playlist，并解析多清晰度列表；这为 HLS 预览实现提供了社区交叉参考，不是官方接口保证：https://greasyfork.org/zh-CN/scripts/408466-115%E4%BC%98%E5%8C%96%E5%A4%A7%E5%B8%88/code
 
 ## 当前工作约束与真实账号验收边界
