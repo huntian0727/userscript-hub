@@ -18,7 +18,7 @@ function coreOf(script = source) {
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.3');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.4');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-023-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-024-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /演示数据，不代表真实115文件/);
@@ -108,8 +108,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /不在宇宙中解码视频/);
 });
 
-test('v0.2.3 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.3.user.js');
+test('v0.2.4 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.4.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -156,7 +156,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-023-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-024-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -170,7 +170,7 @@ test('v0.2.0 is retained and single-click must focus rather than only select', (
   assert.equal(readMetadata(previous).namespace, readMetadata(source).namespace);
   assert.match(source, /if \(planet\) selectPlanet\(planet\.id, true\);/);
   assert.doesNotMatch(source, /if \(planet\) selectPlanet\(planet\.id, false\);/);
-  assert.match(source, /单击目录星球居中/);
+  assert.match(source, /点击星球居中/);
 });
 
 test('focused planets expand to a deterministic paginated neighborhood and leaf shows siblings', () => {
@@ -247,4 +247,46 @@ test('v0.2.3 parent navigation uses real directory ancestry and never a video re
   assert.match(source, /ui\.parent\.addEventListener\('click', returnToParent\)/);
   assert.match(source, /ui\.moonToggle\.addEventListener\('click'/);
   assert.doesNotMatch(source, /indexedDB\.deleteDatabase|GM_setValue/);
+});
+
+
+test('v0.2.4 only accepts trusted HTTPS 115-domain image references', () => {
+  const url = 'https://thumb.115.com/preview/video.png?size=320';
+  assert.equal(core.trusted115Poster(url), url);
+  assert.equal(core.trusted115Poster('//img.115.com/cover.jpg'), 'https://img.115.com/cover.jpg');
+  assert.equal(core.trusted115Poster('https://img.115cdn.com/a.jpg'), 'https://img.115cdn.com/a.jpg');
+  for (const bad of [null, '', 'file:///c:/bad', 'javascript:alert(1)',
+    'data:image/svg+xml;base64,xxx', 'https://not-115.com/a.jpg',
+    'https://115.com.bad.site/thumb', 'http://thumb.115.com/a.jpg',
+    'https://user:pass@115.com/cover', 'https://thumb.115.com:8443/a.jpg',
+    'https://115.com.evil.org/a.jpg', 'https://example.org/a.jpg',
+    'https://115.com/a'.padEnd(3000, 'x')]) {
+    assert.equal(core.trusted115Poster(bad), null, 'untrusted source must not load: ' + String(bad).slice(0, 40));
+  }
+  const one = core.recordOf({
+    fid: '8811', n: 'film.mkv', pc: 'A1234567', s: '1048576',
+    v_img: 'https://thumb.115.com/film.jpg', thumb: 'https://evil.example/skip'
+  }, '17');
+  assert.equal(one.posterUrl, 'https://thumb.115.com/film.jpg');
+  const two = core.recordOf({
+    fid: '8812', n: 'film.mp4', thumb: 'https://115.com/thumb/image.png'
+  }, '17');
+  assert.equal(two.posterUrl, 'https://115.com/thumb/image.png');
+  const bad = core.recordOf({ fid: '8813', n: 'film.ts', v_img: 'javascript:alert(1)' }, '17');
+  assert.equal(bad.posterUrl, null);
+});
+
+test('v0.2.4 fallback poster labeling is deterministic and metadata-only', () => {
+  const video = { id: '9001', name: 'season.01.mkv' };
+  const a = core.videoPosterInfo(video);
+  assert.deepEqual(a, core.videoPosterInfo(video));
+  assert.equal(a.kind, 'MKV');
+  assert.equal(a.image, null);
+  assert.ok(a.hue >= 195 && a.hue < 330);
+  assert.equal(core.videoPosterInfo({ id: '42', name: '1.ts' }).kind, 'TS');
+  assert.equal(core.videoPosterInfo({ id: '42', name: '无后缀' }).kind, 'VIDEO');
+  assert.match(source, /ui\.previewPoster\.replaceChildren\(makePoster\(record\)\)/);
+  assert.match(source, /ui\.moonPeekPoster\.replaceChildren\(makePoster\(moon\.record\)\)/);
+  assert.match(source, /const poster = coverImage\(node\.record\)/);
+  assert.match(source, /MAX_POSTER_CACHE = 24/);
 });

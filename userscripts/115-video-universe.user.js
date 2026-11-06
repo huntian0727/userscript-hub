@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.3
-// @description  115独立3D视频宇宙：聚焦星球后显示可点击的环绕视频卫星、返回上级星球、视频信息预览与115原生播放入口。
+// @version      0.2.4
+// @description  115独立3D视频宇宙：视频卫星支持115封面和悬停预览；缺封面自动生成格式海报，保留星球聚焦、只读扫描、原生播放入口。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -14,8 +14,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.3';
-  const DELIVERY = 'VU-023-01';
+  const VERSION = '0.2.4';
+  const DELIVERY = 'VU-024-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -27,6 +27,7 @@
   const ORBIT_PAGE_SIZE = 12;
   const ORBIT_TRANSITION_MS = 750;
   const VIDEO_MOON_LIMIT = 9;
+  const MAX_POSTER_CACHE = 24;
   const VIDEO_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;
   const DEMO = [
     ['影像星云', 142, 7], ['旧时光', 86, 5], ['银河档案', 203, 9],
@@ -67,6 +68,32 @@
     return { total, records: payload.data };
   }
 
+  function trusted115Poster(value) {
+    if (typeof value !== 'string' || value.length > 2048) return null;
+    const raw = value.trim();
+    if (!raw.startsWith('https://') && !raw.startsWith('//')) return null;
+    try {
+      const url = new URL(raw.startsWith('//') ? 'https:' + raw : raw);
+      const host = url.hostname.toLowerCase();
+      if (url.protocol !== 'https:' || url.username || url.password ||
+          (url.port && url.port !== '443') ||
+          !(host === '115.com' || host.endsWith('.115.com') ||
+            host === '115cdn.com' || host.endsWith('.115cdn.com'))) return null;
+      return url.href;
+    } catch { return null; }
+  }
+
+  function videoPosterInfo(record) {
+    const ext = String(record?.name || '').split('.').pop().toUpperCase();
+    const kind = /^[A-Z0-9]{2,5}$/.test(ext) ? ext : 'VIDEO';
+    return {
+      kind, hue: 195 + hashId(record?.id || record?.name || 'video') % 135,
+      image: trusted115Poster(record?.posterUrl),
+      label: kind === 'TS' || kind === 'M2TS' ? 'TRANSPORT STREAM' :
+        kind === 'MP4' || kind === 'MKV' ? 'VIDEO FILE' : 'VIDEO ARCHIVE'
+    };
+  }
+
   function recordOf(raw, parentId) {
     if (!raw || typeof raw !== 'object') return null;
     const name = String(raw.n == null ? raw.name || '' : raw.n).trim();
@@ -77,7 +104,8 @@
       return {
         type: 'video', id: numericId(raw.fid), parentId,
         name, pickcode: String(raw.pc || raw.pick_code || raw.pickcode || '').trim(),
-        size: Math.max(0, Number(raw.s || 0)) || 0
+        size: Math.max(0, Number(raw.s || raw.fs || 0)) || 0,
+        posterUrl: trusted115Poster(raw.v_img) || trusted115Poster(raw.thumb) || null
       };
     }
     if (raw.cid != null && raw.pid != null) {
@@ -269,8 +297,8 @@
     'box-shadow:0 0 38px #3173d785, inset -15px -15px 27px #0008;margin:12px auto;}',
     '.info{background:#1723419c;border:1px solid #638cd62e;border-radius:13px;padding:12px;font-size:12px;color:#b5c6e7;',
     'line-height:1.7}.title-sm{font-size:13px;font-weight:730}.video-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}',
-    '.video-card{border:1px solid #6789be35;border-radius:10px;padding:8px;background:linear-gradient(160deg,#172a4b,#181638);',
-    'min-height:83px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;cursor:pointer;}',
+    '.video-card{border:1px solid #6789be35;border-radius:10px;padding:6px;background:linear-gradient(160deg,#172a4b,#181638);',
+    'min-height:112px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;cursor:pointer;}',
     '.video-card:hover{border-color:#87c9ff}.video-icon{color:#b6cdfb;font-size:19px}',
     '.video-label{font-size:10px;color:#c9d5ef;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{flex:1}.foot{color:#7388aa;font-size:11px;line-height:1.6;}',
@@ -286,7 +314,19 @@
     'border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:9px;}',
     '.video-preview[hidden]{display:none!important}.preview-stage{min-height:112px;border-radius:10px;',
     'background:radial-gradient(circle at 40% 30%,#4875a9,#171735 78%);display:flex;align-items:center;justify-content:center;}',
-    '.preview-stage span{font-size:46px;color:#d6f4ff}.preview-name{font-size:13px;font-weight:750;word-break:break-word;}',
+    '.poster-tile{height:67px;width:100%;position:relative;overflow:hidden;border-radius:8px;display:flex;align-items:center;',
+    'justify-content:center;background:linear-gradient(145deg,hsl(var(--poster-hue) 55% 35%),#0b1532 86%);}',
+    '.poster-tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}',
+    '.poster-format{position:relative;font-size:23px;font-weight:800;color:#e0f6ff;text-shadow:0 2px 15px #000e;}',
+    '.poster-tile.has-image .poster-format{position:absolute;right:5px;bottom:5px;font-size:11px;',
+    'background:#091326bb;padding:3px 5px;border-radius:5px;}',
+    '.preview-stage .poster-tile{height:150px}.preview-stage .poster-format{font-size:38px;}',
+    '.moon-peek{position:absolute;pointer-events:none;z-index:8;width:190px;max-width:50vw;',
+    'padding:8px;background:#07162be9;border:1px solid #85c2ff9c;border-radius:12px;',
+    'box-shadow:0 10px 32px #000b;display:flex;flex-direction:column;gap:6px;}',
+    '.moon-peek[hidden]{display:none!important}.moon-peek .poster-tile{height:95px;}',
+    '.moon-peek-name{font-size:11px;color:#e0f4ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.moon-peek-note{font-size:10px;color:#9ebcda}.preview-name{font-size:13px;font-weight:750;word-break:break-word;}',
     '.preview-detail{font-size:11px;color:#aec5e7;line-height:1.6}.preview-actions{display:flex;gap:6px;flex-wrap:wrap;}',
     '.preview-actions button{flex:1;min-width:90px;}',
     '.message{font-size:12px;min-height:22px;color:#b1cbed;line-height:1.6;}',
@@ -320,7 +360,11 @@
         '<div class="scene">',
           '<canvas id="universe-canvas" aria-label="3D星球宇宙：单击星球即移动到中心，拖动旋转，滚轮缩放"></canvas>',
           '<canvas id="universe-label-layer" class="label-layer" aria-hidden="true"></canvas>',
-          '<div class="hint" id="instruction">单击目录星球居中 · 点击发光视频卫星查看信息 · 拖动旋转 · 滚轮缩放 · 空白返回全景</div>',
+          '<div class="hint" id="instruction">点击星球居中 · 悬停视频卫星看封面 · 点击看详情 · 拖动旋转 · 空白回全景</div>',
+          '<div class="moon-peek" id="moon-peek" hidden>',
+            '<div id="moon-peek-poster"></div><div class="moon-peek-name" id="moon-peek-name"></div>',
+            '<div class="moon-peek-note">点击卫星查看视频详情</div>',
+          '</div>',
           '<div class="hud">',
             '<div class="metric"><div id="metric-folders" class="num">0</div><div class="tiny">已发现星球</div></div>',
             '<div class="metric"><div id="metric-videos" class="num">0</div><div class="tiny">已扫描视频</div></div>',
@@ -350,7 +394,7 @@
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
           '<div class="video-preview" id="video-preview" hidden>',
-            '<div class="preview-stage"><span aria-hidden="true">▶</span></div>',
+            '<div class="preview-stage" id="preview-poster"></div>',
             '<div class="preview-name" id="preview-name"></div>',
             '<div class="preview-detail" id="preview-detail"></div>',
             '<div class="preview-actions">',
@@ -378,6 +422,8 @@
     orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
     moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), preview: $('#video-preview'),
     previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
+    previewPoster: $('#preview-poster'), moonPeek: $('#moon-peek'),
+    moonPeekPoster: $('#moon-peek-poster'), moonPeekName: $('#moon-peek-name'),
     previewPlay: $('#preview-play')
   };
   const labelCanvas = $('#universe-label-layer');
@@ -390,8 +436,67 @@
     discoveredVideos: 0, visited: new Set(), scanEnded: false, notice: '',
     pointer: null, hoverId: null, projected: [], seed: 1,
     orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
-    videoProjected: [], moonsVisible: true
+    videoProjected: [], moonsVisible: true, hoveredVideoId: null
   };
+  // Reuses images within a bounded cache. Failures keep the luminous sphere.
+  const posterImages = new Map();
+  function coverImage(record) {
+    const url = trusted115Poster(record?.posterUrl);
+    if (!url) return null;
+    if (posterImages.has(url)) return posterImages.get(url);
+    const entry = { ready: false, failed: false, image: new Image() };
+    entry.image.referrerPolicy = 'no-referrer';
+    entry.image.decoding = 'async';
+    entry.image.onload = () => { entry.ready = true; };
+    entry.image.onerror = () => { entry.failed = true; };
+    entry.image.src = url;
+    posterImages.set(url, entry);
+    if (posterImages.size > MAX_POSTER_CACHE) posterImages.delete(posterImages.keys().next().value);
+    return entry;
+  }
+
+  function makePoster(record) {
+    const info = videoPosterInfo(record);
+    const tile = document.createElement('div');
+    tile.className = 'poster-tile';
+    tile.style.setProperty('--poster-hue', String(info.hue));
+    const kind = document.createElement('span');
+    kind.className = 'poster-format';
+    kind.textContent = info.kind;
+    tile.append(kind);
+    if (info.image) {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('load', () => tile.classList.add('has-image'), { once: true });
+      img.addEventListener('error', () => img.remove(), { once: true });
+      img.src = info.image;
+      tile.appendChild(img);
+    }
+    return tile;
+  }
+
+  function updateMoonPeek(moon, clientX, clientY) {
+    if (!moon) {
+      ui.moonPeek.hidden = true;
+      state.hoveredVideoId = null;
+      return;
+    }
+    ui.moonPeek.hidden = false;
+    if (state.hoveredVideoId !== moon.id) {
+      state.hoveredVideoId = moon.id;
+      ui.moonPeekPoster.replaceChildren(makePoster(moon.record));
+      ui.moonPeekName.textContent = moon.record.name;
+    }
+    const rect = ui.canvas.getBoundingClientRect();
+    ui.moonPeek.style.left = Math.round(clamp(clientX - rect.left + 16, 5,
+      Math.max(5, rect.width - 201))) + 'px';
+    ui.moonPeek.style.top = Math.round(clamp(clientY - rect.top + 16, 5,
+      Math.max(5, rect.height - 157))) + 'px';
+  }
+
   const starfield = Array.from({ length: 230 }, (_, i) => ({
     x: ((hashId('star-x-' + i) % 10000) / 10000),
     y: ((hashId('star-y-' + i) % 10000) / 10000),
@@ -696,6 +801,7 @@
       card.setAttribute('aria-pressed', String(card.dataset.videoId === String(record.id)));
     }
     ui.previewName.textContent = record.name;
+    ui.previewPoster.replaceChildren(makePoster(record));
     ui.previewDetail.textContent = humanFileSize(record.size) +
       ' · ' + (state.mode === 'demo' ? '演示数据（无法播放）' : '真实115文件 · 从115官方页面播放');
     ui.previewPlay.disabled = state.mode !== 'real' || !videoPlaybackUrl(record);
@@ -719,6 +825,7 @@
     });
     state.previewRecord = null;
     state.videoProjected = [];
+    updateMoonPeek(null);
     ui.preview.hidden = true;
     state.visited.add(id);
     if (state.mode === 'real' && !node.scanned && node.depth <= MAX_DEPTH) {
@@ -824,9 +931,7 @@
         card.type = 'button';
         card.dataset.videoId = String(record.id);
         card.setAttribute('aria-pressed', String(state.previewRecord?.id === record.id));
-        const icon = document.createElement('span');
-        icon.className = 'video-icon';
-        icon.textContent = '▣';
+        const icon = makePoster(record);
         const label = document.createElement('span');
         label.className = 'video-label';
         label.textContent = record.name;
@@ -1128,6 +1233,19 @@
       overlay.beginPath(); overlay.arc(screen.x, screen.y, radius + 11, 0, Math.PI * 2); overlay.fill();
       overlay.fillStyle = picked ? '#ffdd8f' : '#a2e8ff';
       overlay.beginPath(); overlay.arc(screen.x, screen.y, radius * 0.65, 0, Math.PI * 2); overlay.fill();
+      const poster = coverImage(node.record);
+      if (poster?.ready && !poster.failed) {
+        const side = Math.min(poster.image.naturalWidth, poster.image.naturalHeight);
+        if (side > 0) {
+          overlay.save();
+          overlay.beginPath(); overlay.arc(screen.x, screen.y, radius * .82, 0, Math.PI * 2);
+          overlay.clip();
+          overlay.drawImage(poster.image, (poster.image.naturalWidth - side) / 2,
+            (poster.image.naturalHeight - side) / 2, side, side,
+            screen.x - radius, screen.y - radius, radius * 2, radius * 2);
+          overlay.restore();
+        }
+      }
       if (picked || hovered) {
         overlay.strokeStyle = '#f4faff';
         overlay.lineWidth = 1.8;
@@ -1155,6 +1273,7 @@
     if (event.button !== 0 && event.button !== 2) return;
     stopAutoSpin();
     state.camera.glide = null;
+    updateMoonPeek(null);
     state.pointer = {
       x: event.clientX, y: event.clientY, yaw: state.camera.yaw, pitch: state.camera.pitch,
       panX: state.camera.panX, panY: state.camera.panY,
@@ -1181,6 +1300,7 @@
       const hovered = hitPlanet(event.clientX, event.clientY);
       state.hoverId = hovered?.id || null;
       ui.canvas.style.cursor = hovered?.type === 'video' ? 'pointer' : 'grab';
+      updateMoonPeek(hovered?.type === 'video' ? hovered : null, event.clientX, event.clientY);
     }
   });
   ui.canvas.addEventListener('pointerup', event => {
@@ -1196,7 +1316,9 @@
   });
   ui.canvas.addEventListener('pointercancel', () => {
     state.pointer = null; ui.canvas.classList.remove('drag');
+    updateMoonPeek(null);
   });
+  ui.canvas.addEventListener('pointerleave', () => updateMoonPeek(null));
   ui.canvas.addEventListener('dblclick', event => {
     event.preventDefault();
     const planet = hitPlanet(event.clientX, event.clientY);
@@ -1214,6 +1336,7 @@
   function toggle(open) {
     ui.shell.hidden = !open;
     ui.launch.hidden = open;
+    if (!open) updateMoonPeek(null);
     if (open) refreshPanel();
   }
   ui.launch.addEventListener('click', () => toggle(true));
@@ -1226,7 +1349,7 @@
   ui.parent.addEventListener('click', returnToParent);
   ui.moonToggle.addEventListener('click', () => {
     state.moonsVisible = !state.moonsVisible;
-    if (!state.moonsVisible) state.videoProjected = [];
+    if (!state.moonsVisible) { state.videoProjected = []; updateMoonPeek(null); }
     refreshPanel();
   });
   ui.orbitPrev.addEventListener('click', () => changeOrbitPage(-1));
