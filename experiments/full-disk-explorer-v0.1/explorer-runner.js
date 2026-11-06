@@ -144,9 +144,11 @@ function createExplorerRunner(options = {}) {
               directoryId: page.cid,
               directoryOffset: page.nextOffset,
               directoryTotal: page.totalCount,
+              // Only publish a provisional sample after the matching IndexedDB transaction commits.
+              // It is uniform over the scanned prefix, not the entire disk until completion.
+              sample: checkpoint.reservoir.items.slice(),
               ...progressSummary(checkpoint)
-            });
-          }
+            });          }
         });
 
         if (checkpoint.currentDirectory &&

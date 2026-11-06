@@ -55,7 +55,7 @@ function indexRequestFromRealSource(script) {
   return new Function('GM_xmlhttpRequest', originDeclaration + '\n' + requestFunction + '\nreturn requestText;')(gmRequest);
 }
 
-test('v1.6.1 failure reproduces; v1.6.2 initializes real player session without undefined constants', () => {
+test('v1.6.1 failure reproduces; v1.7.0 initializes real player session without undefined constants', () => {
   assert.throws(() => playerSessionFromRealSource(previous), /MAX_VIDEOS is not defined/);
   const session = playerSessionFromRealSource(current);
   assert.equal(session.cells.length, 12);
@@ -65,7 +65,7 @@ test('v1.6.1 failure reproduces; v1.6.2 initializes real player session without 
   assert.equal(playerSessionFromRealSource(current, { dualSmallCount: 2 }).dualSmallCount, 2);
 });
 
-test('v1.6.2 real index-manager request code uses a defined API origin and rejects unexpected origins', async () => {
+test('v1.7.0 real index-manager request code uses a defined API origin and rejects unexpected origins', async () => {
   const oldRequest = indexRequestFromRealSource(previous);
   await assert.rejects(() => oldRequest('https://webapi.115.com/files?cid=0'), /API_ORIGIN is not defined/);
   const request = indexRequestFromRealSource(current);
@@ -78,8 +78,7 @@ test('v1.6.2 real index-manager request code uses a defined API origin and rejec
 });
 
 test('all restored constants and both independent host IDs exist in the exact release source', () => {
-  assert.match(current, /^\/\/ @version\s+1\.6\.2$/m);
-  assert.match(current, /const MAX_VIDEOS = 12;/);
+  assert.match(current, /^\/\/ @version\s+1\.7\.0$/m);  assert.match(current, /const MAX_VIDEOS = 12;/);
   assert.match(current, /const DEFAULT_DUAL_SMALL_COUNT = 3;/);
   assert.match(current, /const API_ORIGIN = 'https:\/\/webapi\.115\.com';/);
   const hosts = [...current.matchAll(/const HOST_ID = '([^']+)';/g)].map(match => match[1]);
