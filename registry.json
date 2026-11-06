@@ -40,6 +40,13 @@
       "source": "userscripts/115-multiview-full-disk.user.js",
       "channel": "独立公开测试版 · v1.7.0（真实115账号验收后置）",
       "enabled": true
+    },
+    {
+      "id": "115-video-universe",
+      "displayName": "拉面视频宇宙 · 115独立探索实验（v0.1.0）",
+      "description": "115文件夹化身星球：模拟星图、真实目录只读探索、数量星光、缩放漫游、迷雾、随机跃迁和九格视频发现。独立安装与更新，不影响稳定版和全盘探索版。",
+      "source": "userscripts/115-video-universe.user.js",
+      "channel": "探索实验独立版 v0.1.0（真实115账号验收后置）",
+      "enabled": true
     }
-  ]
-}
+  ]}
