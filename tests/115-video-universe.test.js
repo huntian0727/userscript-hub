@@ -18,7 +18,7 @@ function coreOf(script = source) {
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason, connectionStateForError, motionPreviewHlsConfig, searchUniverse, folderPath };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason, connectionStateForError, motionPreviewHlsConfig, searchUniverse, folderPath, normalizePlanetFavorites, togglePlanetFavorite, readPlanetFavorites, writePlanetFavorites, FAVORITE_STORAGE_KEY, MAX_PLANET_FAVORITES };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.3.1');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.3.4');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-031-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-034-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /体验演示星图/);
@@ -136,8 +136,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /完整播放交给115官方页面/);
 });
 
-test('v0.3.1 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.3.1.user.js');
+test('v0.3.4 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.3.4.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -184,7 +184,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-031-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-034-01';/)});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -391,6 +391,71 @@ test('v0.3.1 search and satellite batch UI state are wired to real in-memory dis
   assert.match(source, /function folderPath\(nodes, id\)/);
   assert.match(source, /ui\.breadcrumbs\.replaceChildren\(\)/);
   assert.match(source, /crumb\.addEventListener\('click', \(\) => selectPlanet\(item\.id, true\)\)/);
+});
+
+test('v0.3.4 planet favorites sanitize IDs, names, duplicates and bounded size', () => {
+  const raw = [
+    { id: '12', name: '  科幻   电影  ' }, { id: '12', name: '重复' },
+    { id: '../13', name: '非法' }, null, { id: '14', name: '' }
+  ];
+  assert.deepEqual(core.normalizePlanetFavorites(raw), [
+    { id: '12', name: '科幻 电影' }, { id: '14', name: '目录 14' }
+  ]);
+  const oversized = Array.from({ length: 40 }, (_, i) => ({ id: String(i + 1), name: '目录 ' + i }));
+  assert.equal(core.normalizePlanetFavorites(oversized).length, core.MAX_PLANET_FAVORITES);
+  assert.equal(core.FAVORITE_STORAGE_KEY, 'ramen-video-universe:planet-favorites:v1');
+});
+
+test('v0.3.4 planet favorites toggle by CID and keep the newest entries within the limit', () => {
+  let favorites = core.togglePlanetFavorite([], { id: '100', name: '电影' });
+  assert.deepEqual(favorites, [{ id: '100', name: '电影' }]);
+  favorites = core.togglePlanetFavorite(favorites, { id: '100', name: '电影' });
+  assert.deepEqual(favorites, []);
+  favorites = [];
+  for (let i = 1; i <= 30; i++) favorites = core.togglePlanetFavorite(favorites, { id: String(i), name: '目录 ' + i });
+  assert.equal(favorites.length, 24);
+  assert.equal(favorites[0].id, '7');
+  assert.equal(favorites.at(-1).id, '30');
+  assert.deepEqual(core.togglePlanetFavorite(favorites, { id: 'invalid', name: '不应保存' }), favorites);
+});
+
+test('v0.3.4 planet favorites use local storage defensively without account or network credentials', () => {
+  const data = new Map();
+  const storage = {
+    getItem(key) { return data.has(key) ? data.get(key) : null; },
+    setItem(key, value) { data.set(key, value); }
+  };
+  const favorites = [{ id: '9', name: '纪录片' }, { id: '10', name: '旅行' }];
+  assert.equal(core.writePlanetFavorites(storage, favorites), true);
+  assert.deepEqual(core.readPlanetFavorites(storage), favorites);
+  data.set(core.FAVORITE_STORAGE_KEY, '{broken');
+  assert.deepEqual(core.readPlanetFavorites(storage), []);
+  const blocked = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } };
+  assert.deepEqual(core.readPlanetFavorites(blocked), []);
+  assert.equal(core.writePlanetFavorites(blocked, favorites), false);
+  assert.doesNotMatch(source, /document\.cookie|GM_getValue|GM_setValue|unsafeWindow\.cookie/);
+});
+
+test('v0.3.4 favorite panel can save, remove and reopen real folders without modifying 115', () => {
+  assert.match(source, /id="favorite-toggle"/);
+  assert.match(source, /id="favorite-list"/);
+  assert.match(source, /window\.localStorage/);
+  assert.match(source, /function openFavoritePlanet\(/);
+  assert.match(source, /clearUniverse\(favorite\.id, favorite\.name, 'real'\)/);
+  assert.match(source, /ui\.favoriteToggle\.addEventListener\('click', toggleCurrentFavorite\)/);
+  assert.match(source, /removePlanetFavorite\(favorite\.id\)/);
+  assert.match(source, /仅保存在本机/);
+});
+
+test('v0.3.4 search and favorite CSS rules are closed independent selectors', () => {
+  const searchRule = source.indexOf("'.search-results[hidden]{display:none!important}.search-result{");
+  const searchBackground = source.indexOf("'background:#152847;border:1px solid #587eb244");
+  const breadcrumbRule = source.indexOf("'.folder-breadcrumbs{");
+  const favoriteRule = source.indexOf("'.favorite-heading{");
+  assert.ok(searchRule >= 0 && searchBackground > searchRule && searchBackground < breadcrumbRule,
+    'search-result styles must close before breadcrumb selectors begin');
+  assert.ok(favoriteRule > breadcrumbRule, 'favorite selectors must remain top-level CSS rules');
+  assert.match(source.slice(searchBackground, breadcrumbRule), /font-size:11px;}'/);
 });
 
 test('v0.2.9 HLS preview uses adaptive quality capped to the small preview viewport', () => {

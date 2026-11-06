@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.3.1
-// @description  115独立3D视频宇宙：真实目录搜索、视频卫星换批、3D星球探索和115官方播放。
+// @version      0.3.4
+// @description  115独立3D视频宇宙：真实目录探索、视频卫星、星球收藏和115官方播放。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.3.1';
-  const DELIVERY = 'VU-031-01';
+  const VERSION = '0.3.4';
+  const DELIVERY = 'VU-034-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -45,6 +45,57 @@
     if (/登录|passport|login|\b401\b|\b403\b|无权访问/.test(message)) return 'login';
     if (/频繁|\b429\b|rate.?limit/.test(message)) return 'limited';
     return 'error';
+  }
+
+  const FAVORITE_STORAGE_KEY = 'ramen-video-universe:planet-favorites:v1';
+  const MAX_PLANET_FAVORITES = 24;
+
+  function normalizePlanetFavorites(value, limit = MAX_PLANET_FAVORITES) {
+    const source = Array.isArray(value) ? value : [];
+    const max = Math.max(1, Math.min(100, Math.floor(Number(limit) || MAX_PLANET_FAVORITES)));
+    const seen = new Set();
+    const result = [];
+    for (const item of source) {
+      if (!item || typeof item !== 'object') continue;
+      const id = String(item.id == null ? '' : item.id).trim();
+      if (!/^\d{1,30}$/.test(id) || seen.has(id)) continue;
+      const name = String(item.name == null ? '' : item.name).trim().replace(/\s+/g, ' ').slice(0, 120) || '目录 ' + id;
+      seen.add(id);
+      result.push({ id, name });
+      if (result.length >= max) break;
+    }
+    return result;
+  }
+
+  function togglePlanetFavorite(favorites, node, limit = MAX_PLANET_FAVORITES) {
+    const result = normalizePlanetFavorites(favorites, limit);
+    if (!node || typeof node !== 'object') return result;
+    const id = String(node.id == null ? '' : node.id).trim();
+    if (!/^\d{1,30}$/.test(id)) return result;
+    const index = result.findIndex(item => item.id === id);
+    if (index >= 0) result.splice(index, 1);
+    else {
+      const name = String(node.name == null ? '' : node.name).trim().replace(/\s+/g, ' ').slice(0, 120) || '目录 ' + id;
+      result.push({ id, name });
+      const max = Math.max(1, Math.min(100, Math.floor(Number(limit) || MAX_PLANET_FAVORITES)));
+      while (result.length > max) result.shift();
+    }
+    return result;
+  }
+
+  function readPlanetFavorites(storage) {
+    try {
+      if (!storage || typeof storage.getItem !== 'function') return [];
+      return normalizePlanetFavorites(JSON.parse(storage.getItem(FAVORITE_STORAGE_KEY) || '[]'));
+    } catch { return []; }
+  }
+
+  function writePlanetFavorites(storage, favorites) {
+    try {
+      if (!storage || typeof storage.setItem !== 'function') return false;
+      storage.setItem(FAVORITE_STORAGE_KEY, JSON.stringify(normalizePlanetFavorites(favorites)));
+      return true;
+    } catch { return false; }
   }
 
   function numericId(value) {
@@ -427,6 +478,7 @@
     '.search-caption{font-size:10px;color:#819dc1;line-height:1.5;}',
     '.search-results{display:flex;flex-direction:column;gap:4px;max-height:176px;overflow:auto;}',
     '.search-results[hidden]{display:none!important}.search-result{display:flex;align-items:center;gap:8px;text-align:left;width:100%;',
+    'background:#152847;border:1px solid #587eb244;color:#dceaff;border-radius:8px;padding:8px 9px;font-size:11px;}',
     '.folder-breadcrumbs{display:flex;align-items:center;gap:4px;min-height:25px;overflow-x:auto;white-space:nowrap;',
     'scrollbar-width:thin;padding:2px 0;color:#8fa8ca;font-size:10px;}',
     '.folder-breadcrumbs button{flex:none;border:0;background:transparent;color:#9ec8f1;padding:3px 4px;border-radius:5px;',
@@ -434,7 +486,17 @@
     '.folder-breadcrumbs button:hover{background:#203858;color:#e4f2ff;}',
     '.folder-breadcrumbs button[aria-current="location"]{color:#e4f2ff;font-weight:700;background:#1b3150;}',
     '.folder-breadcrumbs .crumb-separator{color:#6682a9;flex:none;}',
-    'background:#152847;border:1px solid #587eb244;color:#dceaff;border-radius:8px;padding:8px 9px;font-size:11px;}',
+    '.favorite-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;}',
+    '.favorite-heading .btn{padding:7px 10px;flex:none;}',
+    '.favorite-count{font-size:10px;color:#829fc4;margin-top:3px;}',
+    '.favorite-list{display:flex;flex-direction:column;gap:5px;max-height:148px;overflow:auto;}',
+    '.favorite-row{display:flex;align-items:center;gap:5px;min-width:0;}',
+    '.favorite-open{flex:1;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+    'background:#142744;border:1px solid #537aae55;color:#dcecff;border-radius:8px;padding:8px 9px;font-size:11px;}',
+    '.favorite-open:hover{background:#20395f;border-color:#83bdf0;}',
+    '.favorite-remove{flex:none;width:30px;padding:6px 0;background:#251c34;border:1px solid #87649a55;color:#d8c2ec;border-radius:8px;}',
+    '.favorite-empty{font-size:10px;color:#8299b8;padding:5px 2px;line-height:1.6;}',
+
     '.search-result:hover{border-color:#80c8ff;background:#1d355d;}.search-result-kind{flex:none;color:#92bce9;font-size:9px;',
     'background:#0b1930;border-radius:5px;padding:3px 5px;}.search-result-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.video-card[aria-pressed="true"]{border-color:#adf2ff;background:linear-gradient(160deg,#284677,#27245a);}',
@@ -490,7 +552,7 @@
   document.documentElement.appendChild(host);
   const shadow = host.attachShadow({ mode: 'open' });
   shadow.innerHTML = '<style>' + CSS + '</style>' + [
-    '<button class="launcher" type="button" id="universe-launch">✦ <span>3D 视频宇宙</span><span class="tag">实验 0.2</span></button>',
+    '<button class="launcher" type="button" id="universe-launch">✦ <span>3D 视频宇宙</span><span class="tag">v0.3.4</span></button>',
     '<section class="shell" id="universe-shell" hidden aria-label="115视频宇宙探索实验">',
       '<header class="bar">',
         '<div><div class="brand">✦ 拉面视频宇宙</div><div class="desc">从文件夹到星球 · 探索属于你的影像星系</div></div>',
@@ -538,6 +600,9 @@
           '<button class="btn" id="focus-planet" type="button">◎ 聚焦星球</button>',
            '<button class="btn" id="parent-planet" type="button">↶ 返回上级星球</button>',
           '<button class="btn" id="open-folder" type="button">在115打开目录</button></div>',
+          '<div class="favorite-heading"><div><div class="title-sm">★ 星球收藏</div><div class="favorite-count" id="favorite-count">0/24 · 仅保存在本机</div></div>',
+            '<button class="btn" id="favorite-toggle" type="button" aria-pressed="false">☆ 收藏当前</button></div>',
+          '<div class="favorite-list" id="favorite-list"></div>',
           '<div class="orbit-heading"><div class="title-sm" id="orbit-title">✦ 星球邻域</div><div>',
             '<button class="btn" id="orbit-prev" type="button" title="上一组星球">‹</button> ',
             '<button class="btn" id="orbit-next" type="button" title="下一组星球">›</button>',
@@ -584,6 +649,7 @@
     cid: $('#start-cid'), jump: $('#jump'), folder: $('#open-folder'),
     search: $('#universe-search'), searchCaption: $('#search-caption'), searchResults: $('#search-results'),
     breadcrumbs: $('#folder-breadcrumbs'),
+    favoriteToggle: $('#favorite-toggle'), favoriteCount: $('#favorite-count'), favoriteList: $('#favorite-list'),
     list: $('#video-grid'), msg: $('#scan-message'), note: $('#source-note'),
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
     orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
@@ -610,7 +676,8 @@
     connectionStatus: 'idle', progress: null,
     pointer: null, hoverId: null, projected: [], seed: 1,
     orbitActive: false, orbitPage: 0, orbitFrom: null, orbitStarted: 0, previewRecord: null,
-    videoProjected: [], moonsVisible: true, moonPage: 0, hoveredVideoId: null, motionEnabled: false
+    videoProjected: [], moonsVisible: true, moonPage: 0, hoveredVideoId: null, motionEnabled: false,
+    favorites: (() => { try { return readPlanetFavorites(window.localStorage); } catch { return []; } })()
   };
   // Reuses images within a bounded cache. Failures keep the luminous sphere.
   const posterImages = new Map();
@@ -1314,6 +1381,91 @@
     ui.scanProgressFill.classList.toggle('indeterminate', state.running && (!progress || progress.total == null || !progress.total));
   }
 
+  function persistPlanetFavorites(favorites) {
+    try { return writePlanetFavorites(window.localStorage, favorites); }
+    catch { return false; }
+  }
+
+  function toggleCurrentFavorite() {
+    const node = state.nodes.get(state.selected);
+    if (!node || state.mode !== 'real') return;
+    const wasFavorite = state.favorites.some(item => item.id === node.id);
+    const next = togglePlanetFavorite(state.favorites, node);
+    if (!persistPlanetFavorites(next)) {
+      state.notice = '浏览器阻止了本机收藏存储；收藏没有更改。';
+      refreshPanel();
+      return;
+    }
+    state.favorites = next;
+    state.notice = wasFavorite ? '已取消收藏「' + node.name + '」。' : '已将「' + node.name + '」保存到本机星球收藏。';
+    refreshPanel();
+  }
+
+  function removePlanetFavorite(id) {
+    const next = state.favorites.filter(item => item.id !== String(id));
+    if (next.length === state.favorites.length) return;
+    if (!persistPlanetFavorites(next)) {
+      state.notice = '无法更新本机收藏，请检查浏览器存储权限。';
+      refreshPanel();
+      return;
+    }
+    state.favorites = next;
+    state.notice = '已从星球收藏中移除。';
+    refreshPanel();
+  }
+
+  function openFavoritePlanet(id) {
+    const favorite = state.favorites.find(item => item.id === String(id));
+    if (!favorite) return;
+    if (state.mode === 'real' && state.nodes.has(favorite.id)) {
+      selectPlanet(favorite.id, true);
+      return;
+    }
+    ui.cid.value = favorite.id;
+    clearUniverse(favorite.id, favorite.name, 'real');
+    state.queue = [favorite.id];
+    state.notice = '正在从本机收藏的目录入口重新读取真实115内容。';
+    runScan();
+  }
+
+  function refreshFavoritePanel(node) {
+    const current = state.favorites.some(item => item.id === node.id);
+    ui.favoriteToggle.disabled = state.mode !== 'real';
+    ui.favoriteToggle.textContent = current ? '★ 已收藏' : '☆ 收藏当前';
+    ui.favoriteToggle.setAttribute('aria-pressed', String(current));
+    ui.favoriteCount.textContent = state.favorites.length + '/' + MAX_PLANET_FAVORITES + ' · 仅保存在本机';
+    ui.favoriteList.replaceChildren();
+    if (!state.favorites.length) {
+      const empty = document.createElement('div');
+      empty.className = 'favorite-empty';
+      empty.textContent = state.mode === 'demo'
+        ? '演示星球不能收藏。切换到真实115目录后，可把常看的目录固定在这里。'
+        : '还没有收藏星球。聚焦一个真实目录后，点击「收藏当前」。';
+      ui.favoriteList.appendChild(empty);
+      return;
+    }
+    for (const favorite of state.favorites) {
+      const row = document.createElement('div');
+      row.className = 'favorite-row';
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'favorite-open';
+      open.textContent = (favorite.id === node.id ? '● ' : '✦ ') + favorite.name;
+      open.title = favorite.name + ' · ' + (state.mode === 'real' && state.nodes.has(favorite.id)
+        ? '回到当前星图中的星球' : '从该收藏目录重新读取真实115内容');
+      open.addEventListener('click', () => openFavoritePlanet(favorite.id));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'favorite-remove';
+      remove.textContent = '×';
+      remove.title = '移除收藏：' + favorite.name;
+      remove.setAttribute('aria-label', '移除收藏：' + favorite.name);
+      remove.addEventListener('click', () => removePlanetFavorite(favorite.id));
+      row.append(open, remove);
+      ui.favoriteList.appendChild(row);
+    }
+  }
+
   function refreshPanel() {
     const node = state.nodes.get(state.selected) || state.nodes.get(state.rootId);
     if (!node) return;
@@ -1347,6 +1499,7 @@
       ui.breadcrumbs.appendChild(crumb);
     });
     ui.breadcrumbs.hidden = pathItems.length === 0;
+    refreshFavoritePanel(node);
     $('#metric-folders').textContent = String(Math.max(0, state.nodes.size - 1));
     $('#metric-videos').textContent = state.discoveredVideos.toLocaleString();
     $('#metric-visited').textContent = String(state.visited.size);
@@ -1845,6 +1998,7 @@
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
   ui.parent.addEventListener('click', returnToParent);
+  ui.favoriteToggle.addEventListener('click', toggleCurrentFavorite);
   ui.motionRetry.addEventListener('click', () => {
     hoverMotion.failedIds.clear();
     hoverMotion.lastFailure = '';
