@@ -10,11 +10,13 @@ const source = fs.readFileSync(
   path.join(__dirname, '..', 'userscripts', '115-multiview-full-disk.user.js'),
   'utf8'
 ).replace(/\r\n/g, '\n');
-test('115 multiview v1.7.0 userscript parses and exposes multi-folder favorite controls', () => {
+test('115 multiview userscript parses and exposes multi-folder favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.ok(source.includes('// @version      1.7.0'));
-  assert.match(source, /^\/\/ @version\s+1\.7\.0$/m);
-  assert.equal(source.split("const VERSION = '1.7.0';").length - 1, 2);  assert.match(source, /id = 'btnFavorites'/);  assert.match(source, /session\.favoritesButton\.textContent = '★ 收藏 ' \+ favoriteCount/);
+  assert.ok(source.includes('// @version      1.8.0'));
+  assert.match(source, /^\/\/ @version\s+1\.8\.0$/m);
+  assert.equal(source.split("const VERSION = '1.8.0';").length - 1, 2);
+  assert.match(source, /id = 'btnFavorites'/);
+  assert.match(source, /session\.favoritesButton\.textContent = '★ 收藏 ' \+ favoriteCount/);
   assert.match(source, /点击顶部“★ 收藏”即可查看/);
   assert.match(source, /preferenceStore\.listFavoriteFolders\(session\.accountId\)/);
 });

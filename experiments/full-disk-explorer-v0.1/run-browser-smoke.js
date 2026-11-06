@@ -30,15 +30,15 @@ try {
     '  const index = document.getElementById("local-115-index-verifier-full-disk-v1-6");',
     '  const player = document.getElementById("local-115-multiview-full-disk-v1-6");',
     '  const shadow = player && player.shadowRoot;',
-    '  const open = shadow && shadow.querySelector(".full-disk-launcher");',
+    '  const open = shadow && shadow.querySelector(".launcher");',
     '  if (open) open.click();',
     '  setTimeout(() => {',
     '    const overlay = shadow && shadow.querySelector(".full-disk-overlay");',
     '    const result = {',
     '      indexHost: Boolean(index), playerHost: Boolean(player),',
     '      indexLauncher: Boolean(index && index.shadowRoot && index.shadowRoot.querySelector("button")),',
-    '      indexedButton: Boolean(shadow && shadow.querySelector(".launcher")),',
-    '      fullDiskButton: Boolean(open),',
+    '      unifiedButton: open && open.textContent === "随机探索",',
+    '      scopeChoices: shadow && [...shadow.querySelectorAll(".explore-scope-card strong")].map(el => el.textContent),',
     '      overlayOpened: Boolean(overlay && !overlay.hidden),',
     '      errors: window.__smokeErrors',
     '    };',
@@ -65,8 +65,8 @@ try {
     stdoutTail: state ? undefined : String(result.stdout || '').slice(-1200)
   };
   process.stdout.write(JSON.stringify(output, null, 2) + '\n');
-  if (!state || !state.indexHost || !state.playerHost || !state.indexedButton ||
-      !state.fullDiskButton || !state.overlayOpened || state.errors.length) {
+  if (!state || !state.indexHost || !state.playerHost || !state.unifiedButton ||
+      state.scopeChoices.join(',') !== '快速探索,全盘探索' || !state.overlayOpened || state.errors.length) {
     process.exitCode = 1;
   }
 } finally {

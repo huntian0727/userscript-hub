@@ -16,7 +16,7 @@
 |---|---|
 | 115 多画面播放器（四宫格验证版） v0.1.1 | 公开迁移验证版 |
 | [115 多画面播放器稳定版 v0.12.4](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js) | 原链接不变，服务现有用户 |
-| [115 全盘探索独立版 v1.7.0](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 公开测试：边扫描边播放、300候选、后台补充；真实115验收后置 |
+| [115 多画面播放器 · 随机探索 v1.8.0](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 公开测试。在115页面点击「随机探索」，选择「快速探索」或「全盘探索」。 |
 | [拉面视频宇宙 · 3D 探索版 v0.3.1](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | HOME真实账号试用候选：已发现星球/视频搜索、卫星换批、当前目录路径导航；默认真实115模式，完整播放交给115官方播放器。真实账号验收待进行 |
 | [视频宇宙 v0.1.0 历史快照](history/115-video-universe/0.1.0.user.js) | 2D 首个试点，独立归档供回滚 |
 **视频宇宙效果预览（仅模拟目录数据）：** [查看星系界面截图](docs/images/video-universe-v0.1.0-demo.png)。探索类独立发行规范见 [EXPLORATION-INDEPENDENT-RELEASES.md](docs/EXPLORATION-INDEPENDENT-RELEASES.md)。

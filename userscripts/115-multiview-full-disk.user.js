@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.7.0
+// @version      1.8.0
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -14,8 +14,8 @@
 // @noframes
 // @run-at       document-idle
 // @license      MIT
-// @updateURL   https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.meta.js
-// @downloadURL https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js
+// @updateURL   https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.meta.js
+// @downloadURL https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js
 // ==/UserScript==
 
 (function attach115IndexStore(root, factory) {
@@ -265,31 +265,41 @@
       const done = transactionPromise(tx);
       const selected = [];
       let matched = 0;
-      const request = tx.objectStore('records').index('byScanVideo').openCursor(only([String(scanId), 1]));
+      const scanIds = Array.isArray(scanId) ? scanId.map(String) : [String(scanId)];
+      const index = tx.objectStore('records').index('byScanVideo');
       const result = await new Promise((resolve, reject) => {
-        request.onsuccess = () => {
-          try {
-            const cursor = request.result;
-            if (!cursor) {
-              resolve({ items: selected, total: matched });
-              return;
-            }
-            const record = cursor.value;
-            if (accept(record)) {
-              matched += 1;
-              if (selected.length < count) selected.push(record);
-              else {
-                const slot = Math.floor(Math.max(0, Math.min(0.999999999999, Number(randomValue()) || 0)) * matched);
-                if (slot < count) selected[slot] = record;
-              }
-            }
-            cursor.continue();
-          } catch (error) {
-            reject(error);
-            try { tx.abort(); } catch { /* 事务可能已结束。 */ }
+        let scanIndex = 0;
+        function readNextScan() {
+          if (scanIndex >= scanIds.length) {
+            resolve({ items: selected, total: matched });
+            return;
           }
-        };
-        request.onerror = () => reject(request.error || new Error('读取视频索引游标失败'));
+          const request = index.openCursor(only([scanIds[scanIndex++], 1]));
+          request.onsuccess = () => {
+            try {
+              const cursor = request.result;
+              if (!cursor) {
+                readNextScan();
+                return;
+              }
+              const record = cursor.value;
+              if (accept(record)) {
+                matched += 1;
+                if (selected.length < count) selected.push(record);
+                else {
+                  const slot = Math.floor(Math.max(0, Math.min(0.999999999999, Number(randomValue()) || 0)) * matched);
+                  if (slot < count) selected[slot] = record;
+                }
+              }
+              cursor.continue();
+            } catch (error) {
+              reject(error);
+              try { tx.abort(); } catch { /* 事务可能已结束。 */ }
+            }
+          };
+          request.onerror = () => reject(request.error || new Error('读取视频索引游标失败'));
+        }
+        readNextScan();
       });
       await done;
       return result;
@@ -2791,7 +2801,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -4582,7 +4592,7 @@ module.exports = Object.freeze({ createExplorerRunner });
 (() => {
   'use strict';
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -4618,6 +4628,10 @@ module.exports = Object.freeze({ createExplorerRunner });
   let fullDiskAccountId = null;
   let fullDiskLatestTask = null;
   let fullDiskLastError = null;
+  let fullDiskAutoPlay = null;
+  let fullDiskOpening = false;
+  let exploreScope = 'quick';
+  let exploreDialogRevision = 0;
   let recycleBinMutationQueue = Promise.resolve();
   function trustedUrl(value, base = 'https://115.com/') {
     const url = new URL(value, base);
@@ -4628,15 +4642,23 @@ module.exports = Object.freeze({ createExplorerRunner });
     return url.href;
   }
 
-  function requestIndexText(url) {
+  function requestIndexText(url, signal) {
     return new Promise((resolve, reject) => {
+      let handle;
       let settled = false;
       const finish = (error, value) => {
         if (settled) return;
         settled = true;
+        signal?.removeEventListener('abort', cancel);
         if (error) reject(error);
         else resolve(value);
       };
+      const cancel = () => {
+        finish(new DOMException('115账号识别请求已取消', 'AbortError'));
+        try { handle?.abort?.(); } catch { /* 请求可能已完成。 */ }
+      };
+      if (signal?.aborted) return cancel();
+      signal?.addEventListener('abort', cancel, { once: true });
       let parsed;
       try { parsed = new URL(url); }
       catch { finish(new Error('115账号识别地址无效')); return; }
@@ -4649,7 +4671,7 @@ module.exports = Object.freeze({ createExplorerRunner });
         return;
       }
       try {
-        GM_xmlhttpRequest({
+        handle = GM_xmlhttpRequest({
           method: 'GET',
           url: parsed.href,
           timeout: 20000,
@@ -4671,7 +4693,8 @@ module.exports = Object.freeze({ createExplorerRunner });
             } catch (error) { finish(error); }
           },
           onerror: () => finish(new Error('115账号识别请求失败，请检查网络和油猴跨域授权')),
-          ontimeout: () => finish(new Error('115账号识别请求超时（20秒）'))
+          ontimeout: () => finish(new Error('115账号识别请求超时（20秒）')),
+          onabort: () => finish(new DOMException('115账号识别请求已取消', 'AbortError'))
         });
       } catch (error) { finish(error); }
     });
@@ -4774,10 +4797,13 @@ module.exports = Object.freeze({ createExplorerRunner });
     return operation;
   }
 
-  async function resolveAccountId() {
+  async function resolveAccountId(signal) {
     let payload;
-    try { payload = JSON.parse(await requestIndexText(INDEX_API_ORIGIN + '/offine/downpath')); }
-    catch (error) { throw new Error('无法识别当前115账号：' + String(error && error.message || error)); }
+    try { payload = JSON.parse(await requestIndexText(INDEX_API_ORIGIN + '/offine/downpath', signal)); }
+    catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      throw new Error('无法识别当前115账号：' + String(error && error.message || error));
+    }
     const userId = payload && payload.state === true && Array.isArray(payload.data) && payload.data[0]
       ? payload.data[0].user_id : null;
     if (userId === null || userId === undefined || String(userId).trim() === '') {
@@ -4870,7 +4896,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     const min = filters.minSizeMB === '' ? null : Number(filters.minSizeMB);
     const max = filters.maxSizeMB === '' ? null : Number(filters.maxSizeMB);
     if (min !== null || max !== null) {
-      const sizeBytes = Number(record.sizeBytes);
+      const sizeBytes = record.sizeBytes == null ? NaN : Number(record.sizeBytes);
       if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return false;
       if (min !== null && sizeBytes < min * 1024 * 1024) return false;
       if (max !== null && sizeBytes > max * 1024 * 1024) return false;
@@ -4931,7 +4957,7 @@ module.exports = Object.freeze({ createExplorerRunner });
 
   async function collectVideos(filters, expectedAccountId, options = {}) {
     const cid = currentCid();
-    if (cid === null) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
+    if (cid === null && !options.allIndexed) throw new Error('当前页面未识别到目录ID，请先进入115网盘具体文件夹。');
     const accountId = await resolveAccountId();
     if (expectedAccountId && accountId !== expectedAccountId) {
       throw new Error('当前115账号已切换，请关闭播放器后重新打开，避免跨账号混用索引。');
@@ -4945,6 +4971,31 @@ module.exports = Object.freeze({ createExplorerRunner });
     };
     const profiles = await preferenceStore.listProfiles(accountId);
     const scans = await indexStore.listScans(accountId);
+    if (options.allIndexed) {
+      const latest = new Map();
+      for (const scan of scans) {
+        const scope = String(scan.rootCid) + ':' + Boolean(scan.recursive);
+        if (Number(scan.stats?.videos) > 0 && !latest.has(scope)) latest.set(scope, scan);
+      }
+      const sources = [...latest.values()];
+      if (!sources.length) {
+        throw Object.assign(new Error('还没有已收录的视频。可以先建立目录索引，或选择全盘探索。'), {
+          code: 'N115_INDEX_NOT_FOUND'
+        });
+      }
+      const { items, total } = await indexStore.sampleVideos(
+        sources.map(scan => scan.scanId), MAX_CANDIDATES,
+        createPlayablePredicate(options.exclude || new Set(), activeFilters, preferenceState)
+      );
+      const scan = sources.find(item => String(item.rootCid) === cid) || sources[0];
+      return {
+        source: 'quick', items, total, scan, accountId, preferenceState, preferenceRecords, profiles,
+        settings, filters: activeFilters, rootPath: '已收录的视频',
+        recentDirectories: await preferenceStore.listRecentDirectories(accountId, 5),
+        statusLabel: '已收录的视频', indexedVideoCount: total,
+        isComplete: sources.every(item => item.status === 'complete' && item.complete === true)
+      };
+    }
     const scopedScans = scans.filter(item => String(item.rootCid) === cid);
     const recursiveScans = scopedScans.filter(item => item.recursive === true);
     const directScans = scopedScans.filter(item => item.recursive !== true);
@@ -5542,9 +5593,20 @@ module.exports = Object.freeze({ createExplorerRunner });
       ? '同目录 · ' + folderMode.folderPath + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
       : favoriteMode ? '收藏夹 · ' + favoriteMode.folderName + ' · ' + candidateTotal + ' 个视频 · ' + layoutLabel
         : '共 ' + candidateTotal + ' 个视频 · ' + layoutLabel;
+    const scopeLabel = session.fullDiskSource ? '全盘探索 · ' + ({
+      scanning: '扫描中，仅已扫描范围',
+      complete: '扫描完成',
+      paused: '扫描已暂停，仅已扫描范围',
+      incomplete: '扫描未完成，仅已扫描范围'
+    }[session.scan.status] || '准备扫描')
+      : '快速探索 · 已收录的视频';
     const playbackSourceLabel = folderMode
       ? '同目录「' + folderMode.folderPath + '」'
-      : favoriteMode ? '收藏夹「' + favoriteMode.folderName + '」' : '全局候选池';
+      : favoriteMode ? '收藏夹「' + favoriteMode.folderName + '」' : scopeLabel;
+    if (session.exploreScopeStatus) {
+      const status = playbackSourceLabel + ' · 待播 ' + remaining;
+      if (session.exploreScopeStatus.textContent !== status) session.exploreScopeStatus.textContent = status;
+    }
     if (session.favoritePlaybackStatus) {
       session.favoritePlaybackStatus.textContent = '当前播放来源：' + playbackSourceLabel;
       session.favoritePlaybackStatus.setAttribute('aria-label', '当前播放来源：' + playbackSourceLabel);
@@ -6470,7 +6532,9 @@ module.exports = Object.freeze({ createExplorerRunner });
     }
     const item = collectNextItem(session);
     if (!item) {
-      session.roundMessage = '本轮候选已用完，请开启新一轮';
+      session.roundMessage = session.fullDiskSource && session.scan.status === 'scanning'
+        ? '当前候选已用完，扫描仍在继续'
+        : '本轮候选已用完，请开启新一轮';
       updateRoundControls(session);
       return;
     }
@@ -6642,35 +6706,19 @@ module.exports = Object.freeze({ createExplorerRunner });
       return;
     }
     if (session.fullDiskSource) {
+      const previousSource = session.fullDiskSource;
       session.roundRefreshing = true;
-      session.roundMessage = '正在从本次全盘随机候选池抽取新一轮…';
+      session.roundMessage = '正在准备全盘新一轮…';
       updateRoundControls(session);
-      const activePickcodes = new Set(session.cells.filter(cell => cell && cell.item).map(cell => itemKey(cell.item)));
       try {
-        const predicate = createPlayablePredicate(new Set(), session.filters, session.preferenceState, { trackSeen: false });
-        const candidates = session.fullDiskSource.items
-          .filter(predicate)
-          .filter(item => !activePickcodes.has(itemKey(item)));
-        if (session.closed) return;
-        session.roundNumber++;
-        session.failedCount = 0;
-        session.failedPickcodes.clear();
-        session.usedPickcodes = activePickcodes;
-        session.availableItems = shuffleItems(candidates);
-        session.roundPoolSize = session.availableItems.length;
-        session.roundMessage = candidates.length
-          ? (message || '新一轮已从全盘随机候选池抽取')
-          : '本次全盘候选池已无可替换视频，请重新扫描获取新样本';
-        for (const cell of session.cells) {
-          if (!cell || cell.index >= session.layoutCount || cell.item) continue;
-          const item = collectNextItem(session);
-          if (item) replaceCell(session, cell, item);
+        if (fullDiskActivePromise) {
+          fullDiskController?.abort();
+          await fullDiskActivePromise;
         }
-      } catch (error) {
-        if (!session.closed) session.roundMessage = '全盘候选池抽取失败：' + String(error?.message || error).slice(0, 90);
+        if (!session.closed) await runFullDiskScan(false, { session, message });
       } finally {
-        session.roundRefreshing = false;
-        if (!session.closed) {
+        if (!session.closed && session.fullDiskSource === previousSource) {
+          session.roundRefreshing = false;
           processPendingAutoAdvances(session);
           updateRoundControls(session);
         }
@@ -6684,7 +6732,9 @@ module.exports = Object.freeze({ createExplorerRunner });
     try {
       // 目录索引管理可能刚刚写入了新目录；开启新一轮时重新读取最新扫描检查点和偏好，
       // 让新增索引立即进入候选池，同时保持当前115账号隔离。
-      const indexed = await collectVideos(session.filters, session.accountId, { recordRecent: false });
+      const indexed = await collectVideos(session.filters, session.accountId, {
+        recordRecent: false, allIndexed: session.quickExplore, exclude: activePickcodes
+      });
       if (session.closed) return;
       session.scan = indexed.scan;
       session.candidateTotal = indexed.total;
@@ -6694,7 +6744,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       session.settings = indexed.settings;
       session.recentDirectories = indexed.recentDirectories;
       session.filters = indexed.filters;
-      const fullIndexSummary = '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
+      const fullIndexSummary = session.quickExplore ? '快速探索 · 已收录的视频 · ' + indexed.total + ' 个可换候选'
+        : '索引状态：' + indexed.statusLabel + ' · 目录范围：' +
         (indexed.scan.recursive ? '含子目录' : '当前目录') + ' · ' +
         (indexed.isComplete ? '完整索引' : '当前使用已索引的部分视频') +
         ' · 已索引视频记录 ' + indexed.indexedVideoCount + ' 条 · 可播放候选 ' +
@@ -6702,18 +6753,18 @@ module.exports = Object.freeze({ createExplorerRunner });
       if (session.bar) session.bar.title = fullIndexSummary;
       if (session.description) {
         session.description.title = fullIndexSummary;
-        session.description.setAttribute('aria-label', '115 多画面播放 · 索引版 v' + VERSION + ' · ' + fullIndexSummary);
+        session.description.setAttribute('aria-label', '115 多画面播放 · 快速探索 v' + VERSION + ' · ' + fullIndexSummary);
         const summary = session.description.querySelector('small');
-        if (summary) summary.textContent = '索引版 v' + VERSION + ' · ' + indexed.total + ' 个候选';
+        if (summary) summary.textContent = '快速探索 v' + VERSION + ' · ' + indexed.total + ' 个候选';
       }
       if (session.versionBadge) session.versionBadge.textContent = 'v' + VERSION;
 
-      let sampled = await indexStore.sampleVideos(
+      let sampled = session.quickExplore ? { items: indexed.items, total: indexed.total } : await indexStore.sampleVideos(
         session.scan.scanId, MAX_CANDIDATES,
         createPlayablePredicate(activePickcodes, session.filters, session.preferenceState)
       );
       let candidates = sampled.items;
-      if (!sampled.total) {
+      if (!sampled.total && !session.quickExplore) {
         sampled = await indexStore.sampleVideos(
           session.scan.scanId, MAX_CANDIDATES,
           createPlayablePredicate(new Set(), session.filters, session.preferenceState)
@@ -6777,6 +6828,10 @@ module.exports = Object.freeze({ createExplorerRunner });
   }
 
   async function applyCurrentFilters(session, filters = readFilterControls(session), message = '筛选已应用') {
+    if (session.roundRefreshing) {
+      setFilterMessage(session, '正在准备本轮探索，请稍后再应用筛选。', true);
+      return false;
+    }
     const normalized = normalizeFilters(filters);
     const validation = validateFilters(normalized);
     if (validation) {
@@ -9860,7 +9915,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       folderPath: fullDiskFolderInput.value,
       minSizeMB: fullDiskMinSizeInput.value.trim(),
       maxSizeMB: fullDiskMaxSizeInput.value.trim(),
-      replaceCount: 0,
+      replaceCount: fullDiskReplaceCountInput.value,
       favoritesOnly: fullDiskFavoritesOnlyInput.checked
     });
   }
@@ -9872,6 +9927,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     fullDiskFolderInput.value = value.folderPath;
     fullDiskMinSizeInput.value = value.minSizeMB;
     fullDiskMaxSizeInput.value = value.maxSizeMB;
+    fullDiskReplaceCountInput.value = String(value.replaceCount);
     fullDiskFavoritesOnlyInput.checked = value.favoritesOnly;
   }
 
@@ -9975,7 +10031,10 @@ module.exports = Object.freeze({ createExplorerRunner });
   function renderFullDiskProgress(update = {}) {
     const progress = update.progress || update;
     const phase = String(update.phase || progress.phase || 'scanning');
-    if (phase === 'page-committed' && Array.isArray(update.sample)) syncLiveFullDiskCandidates(update);
+    if (phase === 'page-committed' && Array.isArray(update.sample)) {
+      syncLiveFullDiskCandidates(update);
+      maybeAutoPlayFullDisk(update.taskId, update.sample.length);
+    }
     updateFullDiskMetrics(progress);
     fullDiskProgressBar.classList.toggle('is-active', !['scan-paused', 'scan-invalidated'].includes(phase));
     fullDiskPauseButton.disabled = !fullDiskController;
@@ -10029,7 +10088,8 @@ module.exports = Object.freeze({ createExplorerRunner });
     fullDiskStartButton.textContent = ['paused', 'complete', 'incomplete'].includes(task.status)
       ? '重新扫描全盘' : '开始全盘扫描';
     fullDiskBackgroundButton.disabled = !isRunningHere;
-    fullDiskResumeButton.hidden = task.status !== 'paused';
+    fullDiskResumeButton.hidden = task.status !== 'paused' ||
+      Boolean(active?.fullDiskSource && active.fullDiskSource.taskId !== task.taskId);
     fullDiskPlayButton.hidden = sampleCount === 0 || !['running', 'paused', 'complete'].includes(task.status) || Boolean(active) || opening;
     fullDiskPlayButton.textContent = task.status === 'complete' ? '播放全盘随机结果' : '边扫边播（仅已扫描范围）';    fullDiskProgressBar.classList.toggle('is-active', task.status === 'running');
     fullDiskBadge.hidden = !isRunningHere && task.status !== 'running';
@@ -10083,16 +10143,47 @@ module.exports = Object.freeze({ createExplorerRunner });
     return task;
   }
 
-  async function openFullDiskDialog() {
+  function selectExploreScope(scope) {
+    exploreScope = scope;
+    const wholeDisk = scope === 'full-disk';
+    quickScopeButton.setAttribute('aria-pressed', String(!wholeDisk));
+    fullDiskScopeButton.setAttribute('aria-pressed', String(wholeDisk));
+    quickExploreControls.hidden = wholeDisk;
+    fullDiskScanControls.hidden = !wholeDisk;
+    if (!wholeDisk) fullDiskAutoPlay = null;
+  }
+
+  function closeExploreDialog() {
+    exploreDialogRevision++;
+    fullDiskAutoPlay = null;
+    fullDiskOverlay.hidden = true;
+    (active?.exploreScopeStatus || launcher).focus({ preventScroll: true });
+  }
+
+  async function openExploreDialog(scope = 'quick') {
+    const revision = ++exploreDialogRevision;
     fullDiskOverlay.hidden = false;
-    fullDiskStatus.textContent = '正在识别115账号并读取上次扫描任务…';
+    exploreScopePicker.hidden = Boolean(active);
+    fullDiskFields.hidden = Boolean(active);
+    selectExploreScope(scope);
+    quickExploreStatus.textContent = '正在读取探索设置…';
+    quickExploreStart.disabled = true;
+    fullDiskStartButton.disabled = true;
+    fullDiskStatus.textContent = '正在读取扫描进度…';
     fullDiskWarning.hidden = true;
+    fullDiskCloseButton.focus({ preventScroll: true });
     try {
       const accountId = await resolveAccountId();
+      if (revision !== exploreDialogRevision) return;
+      if (active && active.accountId !== accountId) throw new Error('当前115账号已切换，请退出播放器后重新开始探索。');
       fullDiskAccountId = accountId;
       const settings = await preferenceStore.getPlayerSettings(accountId);
+      if (revision !== exploreDialogRevision) return;
+      writeFullDiskFilters(settings.filters);
+      quickExploreStatus.textContent = '从当前账号已收录的视频中抽取。';
+      quickExploreStart.disabled = false;
       const task = await refreshFullDiskTask(accountId);
-      writeFullDiskFilters(task && task.filters ? task.filters : settings.filters);
+      if (revision !== exploreDialogRevision) return;
       renderFullDiskTask(task);
       if (task && task.status === 'running' && !fullDiskActivePromise) {
         const ageMs = Math.max(0, Date.now() - Number(task.updatedAt || Date.now()));
@@ -10101,22 +10192,63 @@ module.exports = Object.freeze({ createExplorerRunner });
           Math.ceil(remainingMs / 1000) + ' 秒后再恢复，或稍后点击“刷新状态”。';
       }
     } catch (error) {
+      if (revision !== exploreDialogRevision) return;
+      quickExploreStatus.textContent = String(error && error.message || error);
       renderFullDiskTask(null, '无法读取全盘扫描状态：' + String(error && error.message || error));
       fullDiskWarning.hidden = false;
       fullDiskWarning.textContent = '请确认115已登录，并刷新网盘页面后重试。';
     }
   }
 
-  async function runFullDiskScan(resume = false) {
-    if (fullDiskActivePromise) return;
+  async function startQuickExplore() {
+    const revision = exploreDialogRevision;
+    const filters = readFullDiskFilters();
+    const validation = validateFilters(filters);
+    if (validation) {
+      quickExploreStatus.textContent = validation;
+      return;
+    }
+    quickExploreStart.disabled = true;
+    quickExploreStatus.textContent = '正在从已收录的视频中抽取…';
     try {
-      const accountId = await resolveAccountId();
-      if (fullDiskAccountId && fullDiskAccountId !== accountId) {
+      const indexed = await collectVideos(filters, fullDiskAccountId, { allIndexed: true });
+      if (revision !== exploreDialogRevision || exploreScope !== 'quick') return;
+      if (!indexed.items.length) {
+        quickExploreStatus.textContent = '没有符合当前筛选条件的已收录视频。可以调整筛选或切换探索范围。';
+        return;
+      }
+      await preferenceStore.savePlayerSettings(indexed.accountId, { filters });
+      if (revision !== exploreDialogRevision || exploreScope !== 'quick') return;
+      closeExploreDialog();
+      await openPlayer(indexed);
+    } catch (error) {
+      if (revision === exploreDialogRevision) quickExploreStatus.textContent = String(error?.message || error);
+    } finally {
+      if (revision === exploreDialogRevision) quickExploreStart.disabled = false;
+    }
+  }
+
+  function runFullDiskScan(resume = false, options = {}) {
+    if (fullDiskActivePromise) return fullDiskActivePromise;
+    const controller = new AbortController();
+    fullDiskController = controller;
+    fullDiskActivePromise = executeFullDiskScan(resume, options, controller);
+    return fullDiskActivePromise;
+  }
+
+  async function executeFullDiskScan(resume, { session, message, autoPlayRevision } = {}, controller) {
+    try {
+      const accountId = await resolveAccountId(controller.signal);
+      const expectedAccountId = session?.accountId || fullDiskAccountId;
+      if (expectedAccountId && expectedAccountId !== accountId) {
         throw Object.assign(new Error('当前115账号已切换，请重新打开全盘随机探索，避免跨账号混用数据。'), {
           code: 'N115_ACCOUNT_CHANGED'
         });
       }
       fullDiskAccountId = accountId;
+      if (session?.closed || controller.signal.aborted) return;
+      const latest = await refreshFullDiskTask(accountId);
+      if (latest?.status === 'running') throw new Error('当前账号已有全盘扫描正在运行，请稍后继续。');
 
       let task = resume ? fullDiskLatestTask : null;
       let filters;
@@ -10132,7 +10264,7 @@ module.exports = Object.freeze({ createExplorerRunner });
         filters = normalizeFilters(task.filters || readFullDiskFilters());
         writeFullDiskFilters(filters);
       } else {
-        filters = readFullDiskFilters();
+        filters = normalizeFilters(session?.filters || readFullDiskFilters());
         const validation = validateFilters(filters);
         if (validation) throw new Error(validation);
       }
@@ -10156,8 +10288,14 @@ module.exports = Object.freeze({ createExplorerRunner });
         : new Set();
       const matchesVideo = createPlayablePredicate(resumedSampleKeys, filters, preferenceState);
       const taskId = resume ? task.taskId : createFullDiskTaskId();
-      const controller = new AbortController();
-      fullDiskController = controller;
+      if (autoPlayRevision === exploreDialogRevision && !active && !fullDiskOverlay.hidden && exploreScope === 'full-disk') {
+        const settings = await preferenceStore.getPlayerSettings(accountId);
+        if (!resume) await preferenceStore.savePlayerSettings(accountId, { filters });
+        if (autoPlayRevision === exploreDialogRevision && exploreScope === 'full-disk') {
+          fullDiskAutoPlay = { taskId, revision: autoPlayRevision, minimum: Number(settings.layoutCount) || 4 };
+        }
+      }
+      if (session?.closed || controller.signal.aborted) return;
       fullDiskTaskId = taskId;
       fullDiskLastError = null;
       fullDiskStartButton.disabled = true;
@@ -10176,15 +10314,31 @@ module.exports = Object.freeze({ createExplorerRunner });
         matchesVideo,
         preferenceSnapshot,
         signal: controller.signal,
-        beforePage: async () => {
-          const currentAccountId = await resolveAccountId();
+        beforePage: async (_page, _checkpoint, signal) => {
+          const currentAccountId = await resolveAccountId(signal);
           if (currentAccountId !== accountId) {
             throw Object.assign(new Error('当前115账号已切换，已暂停扫描，未提交其他账号的分页数据。'), {
               code: 'N115_ACCOUNT_CHANGED'
             });
           }
         },
-        onProgress: renderFullDiskProgress
+        onProgress: update => {
+          if (session && update.phase === 'scan-started' && !session.closed) {
+            session.fullDiskSource = { taskId, items: [], sampleSeen: 0, isComplete: false };
+            session.scan = { ...session.scan, scanId: taskId, status: 'scanning', complete: false };
+            session.roundNumber++;
+            session.failedCount = 0;
+            session.failedPickcodes.clear();
+            session.cells.forEach(cell => { if (cell) cancelPendingSkip(cell); });
+            session.usedPickcodes = new Set(session.cells.filter(cell => cell?.item).map(cell => itemKey(cell.item)));
+            session.availableItems = [];
+            session.candidateTotal = session.roundPoolSize = 0;
+            session.roundRefreshing = false;
+            session.roundMessage = (message ? message + ' · ' : '') + '正在扫描全盘并补充新候选';
+            updateRoundControls(session);
+          }
+          renderFullDiskProgress(update);
+        }
       };
       const runPromise = resume
         ? fullDiskRunner.resumeScan(config)
@@ -10195,7 +10349,6 @@ module.exports = Object.freeze({ createExplorerRunner });
           maxDirectories: 20000,
           sampleLimit: MAX_CANDIDATES
         }));
-      fullDiskActivePromise = runPromise;
       const result = await runPromise;
       fullDiskLastError = result.error && result.error.message ? result.error.message : '';
       const savedTask = await fullDiskStore.getTask(taskId);
@@ -10204,9 +10357,15 @@ module.exports = Object.freeze({ createExplorerRunner });
           taskId, sample: savedTask.reservoir.items, sampleSeen: savedTask.reservoir.seen,
           matchedVideos: savedTask.matchedVideos, status: savedTask.status
         }, savedTask.status === 'complete');
+        if (savedTask.status === 'complete') maybeAutoPlayFullDisk(taskId, savedTask.reservoir.items.length, true);
       }
-      renderFullDiskTask(savedTask, fullDiskLastError);    } catch (error) {
+      renderFullDiskTask(savedTask, fullDiskLastError);
+    } catch (error) {
       fullDiskLastError = String(error && error.message || error);
+      if (session && !session.closed) {
+        session.roundMessage = '全盘探索未能启动：' + fullDiskLastError;
+        updateRoundControls(session);
+      }
       fullDiskStatus.textContent = '全盘扫描未能启动或恢复：' + fullDiskLastError;
       fullDiskWarning.hidden = false;
       fullDiskWarning.textContent = '已保留之前成功保存的扫描进度；可以刷新状态后重试。';
@@ -10240,11 +10399,9 @@ module.exports = Object.freeze({ createExplorerRunner });
     const filters = normalizeFilters(task.filters || settings.filters);
     const currentFavorites = preferenceRecords.filter(item => item.favorite).map(item => String(item.pickcode || '').toLowerCase());
     const currentExclusions = preferenceRecords.filter(item => item.excluded).map(item => String(item.pickcode || '').toLowerCase());
-    const scanPreferences = task.preferenceSnapshot || {};
     const preferenceState = {
-      favoritePickcodes: new Set(filters.favoritesOnly && Array.isArray(scanPreferences.favoritePickcodes)
-        ? scanPreferences.favoritePickcodes : currentFavorites),
-      excludedPickcodes: new Set([...(scanPreferences.excludedPickcodes || []), ...currentExclusions])
+      favoritePickcodes: new Set(currentFavorites),
+      excludedPickcodes: new Set(currentExclusions)
     };
     const predicate = createPlayablePredicate(new Set(), filters, preferenceState, { trackSeen: false });
     const items = task.reservoir.items.filter(predicate).slice(0, MAX_CANDIDATES);
@@ -10257,7 +10414,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       rootCid: '0',
       recursive: true,
       rootPath: '/网盘根目录',
-      status: completed ? 'complete' : 'scanning',
+      status: completed ? 'complete' : task.status === 'running' ? 'scanning' : task.status,
       complete: completed,      stats: { videos: matchedVideos }
     };
     return {
@@ -10283,17 +10440,39 @@ module.exports = Object.freeze({ createExplorerRunner });
       isComplete: completed    };
   }
 
-  async function playFullDiskResult() {
+  function maybeAutoPlayFullDisk(taskId, count, complete = false) {
+    const plan = fullDiskAutoPlay;
+    if (!plan || plan.taskId !== taskId || plan.revision !== exploreDialogRevision ||
+        fullDiskOverlay.hidden || exploreScope !== 'full-disk' || active || opening || fullDiskOpening) return;
+    if (count >= plan.minimum || (complete && count > 0)) void playFullDiskResult(taskId, plan);
+  }
+
+  async function playFullDiskResult(taskId = fullDiskLatestTask?.taskId || fullDiskTaskId, autoPlay = null) {
+    if (active || opening || fullDiskOpening || !taskId) return;
+    const revision = exploreDialogRevision;
+    fullDiskOpening = true;
     try {
-      const task = fullDiskTaskId ? await fullDiskStore.getTask(fullDiskTaskId)
-        : fullDiskLatestTask;
-      const indexed = await buildFullDiskPlaybackData(task);      fullDiskOverlay.hidden = true;
+      const task = await fullDiskStore.getTask(taskId);
+      const indexed = await buildFullDiskPlaybackData(task);
+      if (revision !== exploreDialogRevision || exploreScope !== 'full-disk' ||
+          (autoPlay && autoPlay !== fullDiskAutoPlay)) return;
+      closeExploreDialog();
       await openPlayer(indexed);
+      // Pages may have committed while preferences and the player were loading.
+      const latest = await fullDiskStore.getTask(taskId);
+      if (latest?.reservoir) syncLiveFullDiskCandidates({
+        taskId, sample: latest.reservoir.items, sampleSeen: latest.reservoir.seen,
+        matchedVideos: latest.matchedVideos, status: latest.status
+      });
     } catch (error) {
+      if (revision !== exploreDialogRevision) return;
       fullDiskStatus.textContent = '无法打开全盘随机候选：' + String(error && error.message || error);
       fullDiskOverlay.hidden = false;
       fullDiskWarning.hidden = false;
-      fullDiskWarning.textContent = '请确认已发现可播放视频，且当前115账号与扫描任务一致。';    }
+      fullDiskWarning.textContent = '请确认已发现可播放视频，且当前115账号与扫描任务一致。';
+    } finally {
+      fullDiskOpening = false;
+    }
   }
 
   function closePlayer() {
@@ -10310,27 +10489,26 @@ module.exports = Object.freeze({ createExplorerRunner });
     if (session.layoutReflowFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(session.layoutReflowFrame);
     if (session.layoutResizeHandler) window.removeEventListener('resize', session.layoutResizeHandler);
     active = null;
+    host.classList.remove('is-playing');
     session.abort.abort();
     session.cells.forEach(cell => { if (cell) disposeCell(cell); });
     session.panel.remove();
     globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
     shadow.removeEventListener('keydown', session.onKey, true);
-    if (session.fullDiskSource && fullDiskLauncher) fullDiskLauncher.focus();
-    else launcher.focus();
+    launcher.focus();
   }
 
   async function openPlayer(preloaded = null) {
     if (active || opening) return;
     opening = true;
     launcher.disabled = true;
-    if (fullDiskLauncher) fullDiskLauncher.disabled = true;
     try {
       const indexed = preloaded || await collectVideos();
       const items = indexed.items;
       const panel = element('section', 'panel');
       panel.setAttribute('role', 'dialog');
       panel.setAttribute('aria-modal', 'true');
-      panel.setAttribute('aria-label', indexed.source === 'full-disk' ? '115全盘随机探索多画面播放' : '115索引多画面播放');
+      panel.setAttribute('aria-label', '115随机探索多画面播放');
       panel.tabIndex = -1;
       const bar = element('div', 'bar toolbar');
       bar.id = 'topbar';
@@ -10346,7 +10524,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       const grid = element('div', 'grid');
       const session = {
         panel, grid, scan: indexed.scan, accountId: indexed.accountId, candidateTotal: indexed.total,
-        fullDiskSource: indexed.fullDiskSource || null,
+        fullDiskSource: indexed.fullDiskSource || null, quickExplore: indexed.source === 'quick',
         preferenceState: indexed.preferenceState, profiles: indexed.profiles, filters: indexed.filters,
         settings: indexed.settings, recentDirectories: indexed.recentDirectories,
         favoriteSelected: new Set(), favoriteEntries: [], favoriteVisibleEntries: [], favoriteFolders: [],
@@ -10381,6 +10559,14 @@ module.exports = Object.freeze({ createExplorerRunner });
         favoriteRemoveSelectedButton: null, favoriteFolderPlayButton: null, favoriteFolderExitButton: null,
         favoriteFilterInput: null, favoriteMinSizeInput: null, favoriteMaxSizeInput: null,
         onKey: event => {
+          if (!fullDiskOverlay.hidden) {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              event.stopPropagation();
+              closeExploreDialog();
+            }
+            return;
+          }
           if (event.key === 'Tab') revealToolbar(session, false, 'keyboard');
           const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
           const formEditing = eventPath.some(target => target instanceof Element && target.matches('input,textarea,select,[contenteditable="true"]'));
@@ -10550,7 +10736,7 @@ module.exports = Object.freeze({ createExplorerRunner });
         updateGlobalControls(session);
       };
 
-      session.toolsButton = element('button', 'tools-toggle', '🎲 随机探索');
+      session.toolsButton = element('button', 'tools-toggle', '筛选与管理');
       session.toolsButton.id = 'btnExplore';
       session.toolsButton.type = 'button';
       session.toolsButton.setAttribute('aria-label', '工具');
@@ -10709,12 +10895,19 @@ module.exports = Object.freeze({ createExplorerRunner });
         event.stopPropagation();
         closePlayer();
       };
+      session.exploreScopeStatus = element(indexed.fullDiskSource ? 'button' : 'span', 'explore-scope-status');
+      session.exploreScopeStatus.setAttribute('aria-live', 'polite');
+      if (indexed.fullDiskSource) {
+        session.exploreScopeStatus.type = 'button';
+        session.exploreScopeStatus.title = '查看全盘扫描进度';
+        session.exploreScopeStatus.onclick = () => { void openExploreDialog('full-disk'); };
+      }
       session.description = element('div', 'description');
       session.description.hidden = true;
       session.description.title = fullIndexSummary;
-      session.description.setAttribute('aria-label', '115 多画面播放 · ' + (indexed.source === 'full-disk' ? '全盘随机探索' : '索引版') + ' v' + VERSION + ' · ' + fullIndexSummary);
+      session.description.setAttribute('aria-label', '115 多画面播放 · ' + (indexed.source === 'full-disk' ? '全盘探索' : '快速探索') + ' v' + VERSION + ' · ' + fullIndexSummary);
       session.description.append(element('strong', '', '115 多画面播放'),
-        element('small', '', (indexed.source === 'full-disk' ? '全盘随机探索' : '索引版') + ' v' + VERSION + ' · ' + indexed.total + ' 个候选'));
+        element('small', '', (indexed.source === 'full-disk' ? '全盘探索' : '快速探索') + ' v' + VERSION + ' · ' + indexed.total + ' 个候选'));
       session.versionBadge = element('span', 'version', 'v' + VERSION);
       session.versionBadge.id = 'versionBadge';
 
@@ -10722,7 +10915,8 @@ module.exports = Object.freeze({ createExplorerRunner });
         session.toolsButton, session.favoritesButton, session.newRoundButton, session.audioSourceSelect,
         session.endModeSelect, session.aspectModeSelect, session.layoutPickerButton,
         session.infoText, session.versionBadge);
-      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus, session.description, session.favoriteToast, session.exitButton);
+      panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus,
+        session.description, session.favoriteToast, session.exitButton, session.exploreScopeStatus);
       shadow.append(panel);
       panel.addEventListener('click', event => {
         if (!session.layoutPickerOpen || layoutPickerMenu.contains(event.target) || session.layoutPickerButton?.contains(event.target)) return;
@@ -10732,6 +10926,7 @@ module.exports = Object.freeze({ createExplorerRunner });
       const updateToolsDrawerOffset = () => { toolsLayer.style.top = '0px'; };
       updateToolsDrawerOffset();
       active = session;
+      host.classList.add('is-playing');
       globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
       const isToolbarRevealZone = event => event.clientY - panel.getBoundingClientRect().top < TOOLBAR_REVEAL_ZONE_PX;
       panel.addEventListener('pointermove', event => {
@@ -10783,7 +10978,6 @@ module.exports = Object.freeze({ createExplorerRunner });
       }
     } finally {
       opening = false;
-      if (fullDiskLauncher) fullDiskLauncher.disabled = false;
       launcher.disabled = false;
     }
   }
@@ -10974,9 +11168,14 @@ module.exports = Object.freeze({ createExplorerRunner });
       .tools-drawer{width:min(380px,96vw)}
       .player-exit-button{top:50px;right:8px;min-height:32px;padding:6px 9px;font-size:11px}
     }
-    .full-disk-launcher{pointer-events:auto;position:absolute;right:22px;bottom:58px;padding:10px 15px;border:1px solid #4fae8b;border-radius:9px;background:linear-gradient(135deg,#155e4b,#174b66);color:#f0fff8;font-size:13px;font-weight:800;box-shadow:0 5px 20px #0007}
-    .full-disk-launcher:hover{background:linear-gradient(135deg,#1d7b60,#1b6385)}
-    .full-disk-launcher:disabled{opacity:.45;cursor:not-allowed}
+    .explore-scope-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .explore-scope-card{display:grid;gap:5px;text-align:left;padding:12px;border:1px solid #42566b;border-radius:9px;background:#1a2635;color:#edf5ff}
+    .explore-scope-card[aria-pressed="true"]{border-color:#70c7ac;background:#183632}
+    .explore-scope-card span{font-size:12px;line-height:1.5;color:#b8c8da}
+    .explore-scope-status{position:absolute;bottom:8px;left:8px;z-index:12;max-width:calc(100% - 16px);padding:5px 8px;border:1px solid #43586e;border-radius:6px;background:#0e1924e8;color:#dceaff;font:inherit;font-size:12px}
+    .explore-scan-controls,.explore-quick-controls{display:grid;gap:12px}
+    .explore-scope-picker[hidden],.explore-scan-controls[hidden],.explore-quick-controls[hidden],.full-disk-fields[hidden]{display:none!important}
+    :host(.is-playing) .full-disk-badge{display:none!important}
     .full-disk-badge{pointer-events:auto;position:absolute;top:18px;right:20px;z-index:2147483647;max-width:min(360px,calc(100vw - 32px));padding:10px 14px;border:1px solid #54c49a;border-radius:999px;background:linear-gradient(135deg,#123d31,#112a38);color:#c9ffe7;font-size:12px;font-weight:800;box-shadow:0 6px 24px #0009;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
     .full-disk-badge[hidden]{display:none!important}
     .full-disk-overlay{pointer-events:auto;position:absolute;inset:0;z-index:180;display:flex;align-items:center;justify-content:center;padding:18px;background:#05080de8}
@@ -11007,47 +11206,56 @@ module.exports = Object.freeze({ createExplorerRunner });
     .full-disk-status{min-height:44px;white-space:pre-line;overflow-wrap:anywhere;font-size:13px;line-height:1.7;color:#d6e4f2}
     .full-disk-warning{padding:10px 12px;border:1px solid #795e38;border-radius:8px;background:#352918;color:#ffdda3;font-size:12px;line-height:1.65;white-space:pre-line}
     .full-disk-warning[hidden]{display:none!important}
-    @media(max-width:560px){.full-disk-dialog{padding:15px}.full-disk-fields{grid-template-columns:1fr}.full-disk-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.full-disk-launcher{right:12px;bottom:58px;padding:9px 11px;font-size:12px}.full-disk-badge{top:8px;right:8px;max-width:calc(100vw - 16px);font-size:11px;padding:8px 10px}}
+    @media(max-width:560px){.full-disk-dialog{padding:15px}.full-disk-fields,.explore-scope-picker{grid-template-columns:1fr}.full-disk-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.full-disk-badge{top:8px;right:8px;max-width:calc(100vw - 16px);font-size:11px;padding:8px 10px}}
     @media(hover:none){
       .cell-tools{opacity:1;visibility:visible}
       .main-screen-actions{opacity:0;visibility:hidden;pointer-events:none}
       .cell.is-selected .main-screen-actions{opacity:1;visibility:visible;pointer-events:auto}
     }
   `;
-  const launcher = element('button', 'launcher', '多画面播放');
+  const launcher = element('button', 'launcher', '随机探索');
   launcher.type = 'button';
-  launcher.setAttribute('aria-label', '多画面播放');
-  launcher.title = '打开多宫格播放器；首次使用时会提示建立目录索引';
-  launcher.onclick = () => { void openPlayer(); };
-  const fullDiskLauncher = element('button', 'full-disk-launcher', '🌐 全盘随机探索');
-  fullDiskLauncher.type = 'button';
-  fullDiskLauncher.setAttribute('aria-label', '全盘随机探索');
-  fullDiskLauncher.title = '无需建立目录索引，递归扫描整个115网盘并抽取全盘随机视频';
-  fullDiskLauncher.onclick = () => { void openFullDiskDialog(); };
+  launcher.setAttribute('aria-label', '随机探索');
+  launcher.title = '选择探索范围并开始多宫格播放';
+  launcher.onclick = () => { void openExploreDialog(); };
 
   const fullDiskBadge = element('button', 'full-disk-badge', '● 全盘扫描中');
   fullDiskBadge.type = 'button';
   fullDiskBadge.hidden = true;
   fullDiskBadge.title = '点击查看全盘扫描进度';
-  fullDiskBadge.onclick = () => { void openFullDiskDialog(); };
+  fullDiskBadge.onclick = () => { void openExploreDialog('full-disk'); };
 
   const fullDiskOverlay = element('section', 'full-disk-overlay');
   fullDiskOverlay.hidden = true;
   fullDiskOverlay.setAttribute('role', 'dialog');
   fullDiskOverlay.setAttribute('aria-modal', 'true');
-  fullDiskOverlay.setAttribute('aria-label', '115全盘随机探索');
+  fullDiskOverlay.setAttribute('aria-label', '随机探索');
 
   const fullDiskDialog = element('div', 'full-disk-dialog');
   const fullDiskHeader = element('header', 'full-disk-head');
-  const fullDiskTitle = element('div', 'full-disk-title', '🌐 115 全盘随机探索');
-  const fullDiskVersion = element('span', 'full-disk-version', 'v1.7.0 · FDX-170-01');
+  const fullDiskTitle = element('div', 'full-disk-title', '随机探索');
+  const fullDiskVersion = element('span', 'full-disk-version', 'v' + VERSION);
   const fullDiskCloseButton = element('button', 'full-disk-close', '收起');
   fullDiskCloseButton.type = 'button';
-  fullDiskCloseButton.setAttribute('aria-label', '收起全盘随机探索窗口');
+  fullDiskCloseButton.setAttribute('aria-label', '收起随机探索窗口');
   fullDiskHeader.append(fullDiskTitle, fullDiskVersion, fullDiskCloseButton);
 
+  const exploreScopePicker = element('div', 'explore-scope-picker');
+  exploreScopePicker.setAttribute('role', 'group');
+  exploreScopePicker.setAttribute('aria-label', '探索范围');
+  function createScopeButton(scope, title, range, description) {
+    const button = element('button', 'explore-scope-card');
+    button.type = 'button';
+    button.append(element('strong', '', title), element('span', '', range), element('span', '', description));
+    button.onclick = () => selectExploreScope(scope);
+    exploreScopePicker.append(button);
+    return button;
+  }
+  const quickScopeButton = createScopeButton('quick', '快速探索', '已收录的视频', '从已收录的视频中直接抽取，适合日常使用。');
+  const fullDiskScopeButton = createScopeButton('full-disk', '全盘探索', '整个 115 网盘', '发现尚未收录的视频，边扫描边播放。');
+  const exploreHint = element('div', 'full-disk-hint', '两种范围共用筛选、随机换片、锁定、本轮去重和收藏。');
   const fullDiskHint = element('div', 'full-disk-hint',
-    '从网盘根目录开始递归读取全部子文件夹，不需要预先建立目录索引。扫描只读取目录与视频元数据，不下载、不移动、不删除或修改网盘文件。扫描中发现候选后即可边扫边播（仅已扫描范围），后台继续补充；完整扫描结束后保留最多300个全局随机候选。扫描最多遍历20,000个目录、递归深度20层；触及上限会标记为未完整，不会冒充全盘扫描完成。扫描期间请尽量不要在115端新增、上传、移动、删除或重命名文件；发现目录总数变化会中止任务。');
+    '从网盘根目录开始扫描。候选够填满当前布局时自动开始播放，并继续补充。扫描上限为 20,000 个目录及 20 层深度，触及上限会显示扫描未完成。');
 
   const fullDiskFields = element('div', 'full-disk-fields');
   function createFullDiskField(labelText, input) {
@@ -11074,17 +11282,23 @@ module.exports = Object.freeze({ createExplorerRunner });
   fullDiskMaxSizeInput.min = '0';
   fullDiskMaxSizeInput.step = '0.1';
   fullDiskMaxSizeInput.placeholder = '不限';
+  const fullDiskReplaceCountInput = element('input');
+  fullDiskReplaceCountInput.type = 'number';
+  fullDiskReplaceCountInput.min = '0';
+  fullDiskReplaceCountInput.max = '12';
+  fullDiskReplaceCountInput.step = '1';
   fullDiskFields.append(
     createFullDiskField('包含关键词（全部匹配）', fullDiskKeywordInput),
     createFullDiskField('排除关键词', fullDiskExcludeInput),
     createFullDiskField('文件夹路径筛选', fullDiskFolderInput),
     createFullDiskField('最小文件大小（MB）', fullDiskMinSizeInput),
-    createFullDiskField('最大文件大小（MB）', fullDiskMaxSizeInput)
+    createFullDiskField('最大文件大小（MB）', fullDiskMaxSizeInput),
+    createFullDiskField('本次替换数量（0 为全部未锁定窗口）', fullDiskReplaceCountInput)
   );
   const fullDiskFavoritesLabel = element('label', 'full-disk-checkbox');
   const fullDiskFavoritesOnlyInput = element('input');
   fullDiskFavoritesOnlyInput.type = 'checkbox';
-  fullDiskFavoritesLabel.append(fullDiskFavoritesOnlyInput, element('span', '', '仅扫描已收藏的视频'));
+  fullDiskFavoritesLabel.append(fullDiskFavoritesOnlyInput, element('span', '', '仅已收藏的视频'));
   fullDiskFields.append(fullDiskFavoritesLabel);
 
   const fullDiskActions = element('div', 'full-disk-actions');
@@ -11136,33 +11350,54 @@ module.exports = Object.freeze({ createExplorerRunner });
   const fullDiskWarning = element('div', 'full-disk-warning');
   fullDiskWarning.hidden = true;
 
-  fullDiskDialog.append(
-    fullDiskHeader, fullDiskHint, fullDiskFields, fullDiskActions,
-    fullDiskMetrics, fullDiskProgressTrack, fullDiskStatus, fullDiskWarning
-  );
+  const quickExploreControls = element('div', 'explore-quick-controls');
+  const quickExploreStatus = element('div', 'full-disk-status');
+  quickExploreStatus.setAttribute('role', 'status');
+  const quickExploreActions = element('div', 'full-disk-actions');
+  const quickExploreStart = element('button', 'full-disk-action full-disk-primary', '开始探索');
+  quickExploreStart.type = 'button';
+  quickExploreStart.onclick = () => { void startQuickExplore(); };
+  const manageCollection = element('button', 'full-disk-action', '收录文件夹');
+  manageCollection.type = 'button';
+  manageCollection.onclick = () => {
+    closeExploreDialog();
+    globalThis.N115IndexManagerUI?.open?.(launcher);
+  };
+  quickExploreActions.append(quickExploreStart, manageCollection);
+  quickExploreControls.append(quickExploreActions, quickExploreStatus);
+  const fullDiskScanControls = element('div', 'explore-scan-controls');
+  fullDiskScanControls.append(fullDiskHint, fullDiskActions, fullDiskMetrics, fullDiskProgressTrack, fullDiskStatus, fullDiskWarning);
+  fullDiskDialog.append(fullDiskHeader, exploreScopePicker, exploreHint, fullDiskFields, quickExploreControls, fullDiskScanControls);
   fullDiskOverlay.append(fullDiskDialog);
-  fullDiskCloseButton.onclick = () => { fullDiskOverlay.hidden = true; };
-  fullDiskBackgroundButton.onclick = () => { fullDiskOverlay.hidden = true; };
-  fullDiskStartButton.onclick = () => { void runFullDiskScan(false); };
-  fullDiskResumeButton.onclick = () => { void runFullDiskScan(true); };
+  fullDiskCloseButton.onclick = closeExploreDialog;
+  fullDiskBackgroundButton.onclick = closeExploreDialog;
+  fullDiskStartButton.onclick = () => {
+    if (active?.fullDiskSource) void startNewRound(active);
+    else void runFullDiskScan(false, { autoPlayRevision: exploreDialogRevision });
+  };
+  fullDiskResumeButton.onclick = () => {
+    void runFullDiskScan(true, { session: active, autoPlayRevision: exploreDialogRevision });
+  };
   fullDiskPauseButton.onclick = () => {
     if (!fullDiskController) return;
     fullDiskStatus.textContent = '正在暂停扫描并保存最近一次成功提交的分页…';
     fullDiskController.abort();
   };
-  fullDiskRefreshButton.onclick = () => { void openFullDiskDialog(); };
-  fullDiskPlayButton.onclick = () => { void playFullDiskResult(); };
+  fullDiskRefreshButton.onclick = () => { void openExploreDialog('full-disk'); };
+  fullDiskPlayButton.onclick = () => {
+    void playFullDiskResult(fullDiskActivePromise ? fullDiskTaskId : fullDiskLatestTask?.taskId);
+  };
   fullDiskOverlay.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
-      fullDiskOverlay.hidden = true;
+      closeExploreDialog();
     }
   });
   fullDiskOverlay.addEventListener('click', event => {
-    if (event.target === fullDiskOverlay) fullDiskOverlay.hidden = true;
+    if (event.target === fullDiskOverlay) closeExploreDialog();
   });
 
-  shadow.append(style, launcher, fullDiskLauncher, fullDiskBadge, fullDiskOverlay);
+  shadow.append(style, launcher, fullDiskBadge, fullDiskOverlay);
   document.documentElement.append(host);
   globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
   const handleFullscreenChange = () => {

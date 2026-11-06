@@ -159,7 +159,7 @@ test('completed scan correctly transitions a provisional playback session', () =
 });
 
 test('actual saved scan data can start provisional playback, but incomplete or empty data cannot masquerade as full-disk complete', async () => {
-  const code = extract('  async function buildFullDiskPlaybackData(task) {', '  async function playFullDiskResult() {');
+  const code = extract('  async function buildFullDiskPlaybackData(task) {', '  function maybeAutoPlayFullDisk(');
   const make = new Function('resolveAccountId', 'preferenceStore', 'normalizeFilters',
     'createPlayablePredicate', 'MAX_CANDIDATES',
     code + '\nreturn buildFullDiskPlaybackData;')(
@@ -202,20 +202,23 @@ test('progress interface only receives committed samples and unlocks provisional
   let synced = 0;
   const play = box();
   const formatFullDiskCount = count => String(Number(count || 0));
-  const render = new Function('syncLiveFullDiskCandidates', 'updateFullDiskMetrics',
+  let autoPlayChecks = 0;
+  const render = new Function('syncLiveFullDiskCandidates', 'maybeAutoPlayFullDisk', 'updateFullDiskMetrics',
     'fullDiskProgressBar', 'fullDiskPauseButton', 'fullDiskResumeButton',
     'fullDiskPlayButton', 'fullDiskStartButton', 'fullDiskBackgroundButton',
     'fullDiskBadge', 'fullDiskStatus', 'fullDiskController', 'active', 'opening',
     'formatFullDiskCount',
     code + '\nreturn renderFullDiskProgress;')(
-    () => { synced++; }, () => {}, box(), box(), box(),
+    () => { synced++; }, () => { autoPlayChecks++; }, () => {}, box(), box(), box(),
     play, box(), box(), box(), box(), null, null, false, formatFullDiskCount
   );
   render({ phase: 'directory-page', sampleSize: 0, matchedVideos: 0 });
   assert.equal(synced, 0);
+  assert.equal(autoPlayChecks, 0);
   assert.equal(play.hidden, true);
   render({ phase: 'page-committed', sampleSize: 2, matchedVideos: 2, sample: [item(1), item(2)] });
   assert.equal(synced, 1);
+  assert.equal(autoPlayChecks, 1);
   assert.equal(play.hidden, false);
   assert.match(play.textContent, /边扫边播/);
 });
