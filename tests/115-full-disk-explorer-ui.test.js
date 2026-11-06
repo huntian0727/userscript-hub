@@ -17,13 +17,16 @@ test('the player and directory manager have separate DOM hosts', () => {
     'local-115-multiview-full-disk-v1-6'
   ]);
   assert.equal(new Set(hostIds).size, 2);
-  assert.match(source, /const VERSION = '1\.8\.0';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const VERSION = '1\.8\.1';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
   assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
 });
 
-test('one launcher opens a scope picker with quick and whole-disk exploration', () => {
-  assert.match(source, /const launcher = element\('button', 'launcher', '随机探索'\)/);
-  assert.match(source, /launcher\.onclick = \(\) => \{ void openExploreDialog\(\); \}/);
+test('direct playback opens the current folder while one exploration launcher opens both scopes', () => {
+  assert.match(source, /const launcher = element\('button', 'launcher', '多画面播放'\)/);
+  assert.match(source, /launcher\.onclick = \(\) => \{ void openPlayer\(\); \}/);
+  assert.match(source, /const indexed = preloaded \|\| await collectVideos\(\)/);
+  assert.match(source, /const exploreLauncher = element\('button', 'launcher explore-launcher', '随机探索'\)/);
+  assert.match(source, /exploreLauncher\.onclick = \(\) => \{ void openExploreDialog\(\); \}/);
   assert.match(source, /createScopeButton\('quick', '快速探索', '已收录的视频'/);
   assert.match(source, /createScopeButton\('full-disk', '全盘探索', '整个 115 网盘'/);
   assert.ok(!source.includes('full-disk-launcher'));

@@ -30,7 +30,7 @@ try {
     '  const index = document.getElementById("local-115-index-verifier-full-disk-v1-6");',
     '  const player = document.getElementById("local-115-multiview-full-disk-v1-6");',
     '  const shadow = player && player.shadowRoot;',
-    '  const open = shadow && shadow.querySelector(".launcher");',
+    '  const open = shadow && shadow.querySelector(".explore-launcher");',
     '  if (open) open.click();',
     '  setTimeout(() => {',
     '    const overlay = shadow && shadow.querySelector(".full-disk-overlay");',
@@ -38,6 +38,7 @@ try {
     '      indexHost: Boolean(index), playerHost: Boolean(player),',
     '      indexLauncher: Boolean(index && index.shadowRoot && index.shadowRoot.querySelector("button")),',
     '      unifiedButton: open && open.textContent === "随机探索",',
+    '      playbackButton: shadow && shadow.querySelector(".entry-actions > .launcher").textContent === "多画面播放",',
     '      scopeChoices: shadow && [...shadow.querySelectorAll(".explore-scope-card strong")].map(el => el.textContent),',
     '      overlayOpened: Boolean(overlay && !overlay.hidden),',
     '      errors: window.__smokeErrors',
@@ -65,7 +66,7 @@ try {
     stdoutTail: state ? undefined : String(result.stdout || '').slice(-1200)
   };
   process.stdout.write(JSON.stringify(output, null, 2) + '\n');
-  if (!state || !state.indexHost || !state.playerHost || !state.unifiedButton ||
+  if (!state || !state.indexHost || !state.playerHost || !state.unifiedButton || !state.playbackButton ||
       state.scopeChoices.join(',') !== '快速探索,全盘探索' || !state.overlayOpened || state.errors.length) {
     process.exitCode = 1;
   }

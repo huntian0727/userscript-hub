@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.0
+// @version      1.8.1
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -2801,7 +2801,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.8.0';
+  const VERSION = '1.8.1';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -4592,7 +4592,7 @@ module.exports = Object.freeze({ createExplorerRunner });
 (() => {
   'use strict';
 
-  const VERSION = '1.8.0';
+  const VERSION = '1.8.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5599,7 +5599,8 @@ module.exports = Object.freeze({ createExplorerRunner });
       paused: '扫描已暂停，仅已扫描范围',
       incomplete: '扫描未完成，仅已扫描范围'
     }[session.scan.status] || '准备扫描')
-      : '快速探索 · 已收录的视频';
+      : session.quickExplore ? '快速探索 · 已收录的视频'
+        : '当前目录' + (session.scan?.recursive ? '及子目录' : '') + ' · 多画面播放';
     const playbackSourceLabel = folderMode
       ? '同目录「' + folderMode.folderPath + '」'
       : favoriteMode ? '收藏夹「' + favoriteMode.folderName + '」' : scopeLabel;
@@ -6753,9 +6754,10 @@ module.exports = Object.freeze({ createExplorerRunner });
       if (session.bar) session.bar.title = fullIndexSummary;
       if (session.description) {
         session.description.title = fullIndexSummary;
-        session.description.setAttribute('aria-label', '115 多画面播放 · 快速探索 v' + VERSION + ' · ' + fullIndexSummary);
+        const playbackName = session.quickExplore ? '快速探索' : '当前目录播放';
+        session.description.setAttribute('aria-label', '115 多画面播放 · ' + playbackName + ' v' + VERSION + ' · ' + fullIndexSummary);
         const summary = session.description.querySelector('small');
-        if (summary) summary.textContent = '快速探索 v' + VERSION + ' · ' + indexed.total + ' 个候选';
+        if (summary) summary.textContent = playbackName + ' v' + VERSION + ' · ' + indexed.total + ' 个候选';
       }
       if (session.versionBadge) session.versionBadge.textContent = 'v' + VERSION;
 
@@ -10157,7 +10159,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     exploreDialogRevision++;
     fullDiskAutoPlay = null;
     fullDiskOverlay.hidden = true;
-    (active?.exploreScopeStatus || launcher).focus({ preventScroll: true });
+    (active?.exploreScopeStatus || exploreLauncher).focus({ preventScroll: true });
   }
 
   async function openExploreDialog(scope = 'quick') {
@@ -10495,20 +10497,23 @@ module.exports = Object.freeze({ createExplorerRunner });
     session.panel.remove();
     globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
     shadow.removeEventListener('keydown', session.onKey, true);
-    launcher.focus();
+    (session.quickExplore || session.fullDiskSource ? exploreLauncher : launcher).focus();
   }
 
   async function openPlayer(preloaded = null) {
     if (active || opening) return;
     opening = true;
     launcher.disabled = true;
+    exploreLauncher.disabled = true;
     try {
       const indexed = preloaded || await collectVideos();
       const items = indexed.items;
+      const playbackName = indexed.source === 'full-disk' ? '全盘探索'
+        : indexed.source === 'quick' ? '快速探索' : '当前目录播放';
       const panel = element('section', 'panel');
       panel.setAttribute('role', 'dialog');
       panel.setAttribute('aria-modal', 'true');
-      panel.setAttribute('aria-label', '115随机探索多画面播放');
+      panel.setAttribute('aria-label', '115多画面播放 · ' + playbackName);
       panel.tabIndex = -1;
       const bar = element('div', 'bar toolbar');
       bar.id = 'topbar';
@@ -10905,9 +10910,9 @@ module.exports = Object.freeze({ createExplorerRunner });
       session.description = element('div', 'description');
       session.description.hidden = true;
       session.description.title = fullIndexSummary;
-      session.description.setAttribute('aria-label', '115 多画面播放 · ' + (indexed.source === 'full-disk' ? '全盘探索' : '快速探索') + ' v' + VERSION + ' · ' + fullIndexSummary);
+      session.description.setAttribute('aria-label', '115 多画面播放 · ' + playbackName + ' v' + VERSION + ' · ' + fullIndexSummary);
       session.description.append(element('strong', '', '115 多画面播放'),
-        element('small', '', (indexed.source === 'full-disk' ? '全盘探索' : '快速探索') + ' v' + VERSION + ' · ' + indexed.total + ' 个候选'));
+        element('small', '', playbackName + ' v' + VERSION + ' · ' + indexed.total + ' 个候选'));
       session.versionBadge = element('span', 'version', 'v' + VERSION);
       session.versionBadge.id = 'versionBadge';
 
@@ -10979,6 +10984,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     } finally {
       opening = false;
       launcher.disabled = false;
+      exploreLauncher.disabled = false;
     }
   }
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
@@ -10991,10 +10997,14 @@ module.exports = Object.freeze({ createExplorerRunner });
   style.textContent = `
     :host{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#eee;color-scheme:dark}
     *{box-sizing:border-box}button{font:inherit;cursor:pointer}
-    .launcher,.panel{font-family:system-ui,"Microsoft YaHei",sans-serif}
-    .launcher{pointer-events:auto;position:absolute;right:22px;bottom:108px;padding:11px 17px;
+    .entry-actions,.panel{font-family:system-ui,"Microsoft YaHei",sans-serif}
+    .entry-actions{position:absolute;right:22px;bottom:108px;display:flex;gap:8px}
+    .launcher{pointer-events:auto;padding:11px 17px;
       color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
     .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
+    .explore-launcher{background:#1a2635;border-color:#536a85}
+    .explore-launcher:hover{background:#293d56}
+    .launcher:disabled{opacity:.6;cursor:wait}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
     #topbar{position:fixed;top:0;left:0;right:0;height:44px;z-index:50;display:flex;align-items:center;gap:10px;padding:0 14px;background:linear-gradient(to bottom,rgba(0,0,0,.8),transparent);transform:translateY(-100%);transition:transform .2s}
     #topbar.show{transform:translateY(0)}
@@ -11213,11 +11223,16 @@ module.exports = Object.freeze({ createExplorerRunner });
       .cell.is-selected .main-screen-actions{opacity:1;visibility:visible;pointer-events:auto}
     }
   `;
-  const launcher = element('button', 'launcher', '随机探索');
+  const entryActions = element('div', 'entry-actions');
+  const launcher = element('button', 'launcher', '多画面播放');
   launcher.type = 'button';
-  launcher.setAttribute('aria-label', '随机探索');
-  launcher.title = '选择探索范围并开始多宫格播放';
-  launcher.onclick = () => { void openExploreDialog(); };
+  launcher.title = '直接播放当前目录已收录的视频';
+  launcher.onclick = () => { void openPlayer(); };
+  const exploreLauncher = element('button', 'launcher explore-launcher', '随机探索');
+  exploreLauncher.type = 'button';
+  exploreLauncher.title = '选择快速探索或全盘探索';
+  exploreLauncher.onclick = () => { void openExploreDialog(); };
+  entryActions.append(launcher, exploreLauncher);
 
   const fullDiskBadge = element('button', 'full-disk-badge', '● 全盘扫描中');
   fullDiskBadge.type = 'button';
@@ -11361,7 +11376,7 @@ module.exports = Object.freeze({ createExplorerRunner });
   manageCollection.type = 'button';
   manageCollection.onclick = () => {
     closeExploreDialog();
-    globalThis.N115IndexManagerUI?.open?.(launcher);
+    globalThis.N115IndexManagerUI?.open?.(exploreLauncher);
   };
   quickExploreActions.append(quickExploreStart, manageCollection);
   quickExploreControls.append(quickExploreActions, quickExploreStatus);
@@ -11397,7 +11412,7 @@ module.exports = Object.freeze({ createExplorerRunner });
     if (event.target === fullDiskOverlay) closeExploreDialog();
   });
 
-  shadow.append(style, launcher, fullDiskBadge, fullDiskOverlay);
+  shadow.append(style, entryActions, fullDiskBadge, fullDiskOverlay);
   document.documentElement.append(host);
   globalThis.N115IndexManagerUI?.setLauncherVisible?.(false);
   const handleFullscreenChange = () => {

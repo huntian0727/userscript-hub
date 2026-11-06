@@ -36,9 +36,9 @@
     {
       "id": "115-multiview-full-disk",
       "displayName": "115 多画面播放器 · 随机探索",
-      "description": "统一随机探索入口。快速探索从已收录的视频中直接抽取，全盘探索边扫描边播放。两种范围共用多宫格、筛选、换片、锁定、本轮去重和收藏。全盘扫描有独立的临时候选和断点，播放中显示扫描状态。",
+      "description": "点击多画面播放可直接打开当前目录。随机探索入口提供快速探索和边扫描边播放的全盘探索，共用多宫格、筛选、换片、锁定、本轮去重和收藏。",
       "source": "userscripts/115-multiview-full-disk.user.js",
-      "channel": "公开测试版 · v1.8.0",
+      "channel": "公开测试版 · v1.8.1",
       "enabled": true
     },
     {
