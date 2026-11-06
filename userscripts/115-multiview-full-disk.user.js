@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.6.1
+// @version      1.6.2
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -2791,8 +2791,9 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
+  const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
   const N115IndexStore = globalThis.N115IndexStore;
   const N115IndexManager = globalThis.N115IndexManager;
@@ -4579,12 +4580,14 @@ module.exports = Object.freeze({ createExplorerRunner });
 (() => {
   'use strict';
 
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
   const HOST_ID = 'local-115-multiview-full-disk-v1-6';
+  const MAX_VIDEOS = 12;
   const MAX_CANDIDATES = 100;
+  const DEFAULT_DUAL_SMALL_COUNT = 3;
   const DEFAULT_ASPECT_RATIO = 16 / 9;
   const STANDARD_LAYOUTS = Object.freeze({ 2: [2, 1], 4: [2, 2], 6: [3, 2], 9: [3, 3], 12: [4, 3] });
   const INDEX_API_ORIGIN = 'https://webapi.115.com';
@@ -10944,7 +10947,7 @@ module.exports = Object.freeze({ createExplorerRunner });
   const fullDiskDialog = element('div', 'full-disk-dialog');
   const fullDiskHeader = element('header', 'full-disk-head');
   const fullDiskTitle = element('div', 'full-disk-title', '🌐 115 全盘随机探索');
-  const fullDiskVersion = element('span', 'full-disk-version', 'v1.6.1 · FDX-161-01');
+  const fullDiskVersion = element('span', 'full-disk-version', 'v1.6.2 · FDX-162-01');
   const fullDiskCloseButton = element('button', 'full-disk-close', '收起');
   fullDiskCloseButton.type = 'button';
   fullDiskCloseButton.setAttribute('aria-label', '收起全盘随机探索窗口');
