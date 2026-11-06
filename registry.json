@@ -43,8 +43,8 @@
     },
     {
       "id": "115-video-universe",
-      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.5）",
-      "description": "独立实验：新增默认关闭的3秒静音HLS短预览；在115主站悬停时按需取流，失败自动回退封面；独立于原稳定播放器。",       "source": "userscripts/115-video-universe.user.js",
-      "channel": "独立公开测试版 · v0.2.5（真实115账号动态预览待验收）",      "enabled": true
+      "displayName": "拉面视频宇宙 · 3D立体星图（v0.2.6）",
+      "description": "独立实验：HLS短预览增加登录/网络/转码/编解码等错误说明与手动重试；优化低画质视频缓存和3秒停止计时，失败仍自动回退封面。",       "source": "userscripts/115-video-universe.user.js",
+      "channel": "独立公开测试版 · v0.2.6（真实115视频流待验收）",      "enabled": true
     }
   ]}

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         拉面视频宇宙 · 115独立探索实验
 // @namespace    https://huntian0727.github.io/userscript-hub/115-video-universe
-// @version      0.2.5
-// @description  115独立3D视频宇宙：可选的3秒静音HLS卫星动态预览，延时按需请求115播放清单，失败回退封面。
+// @version      0.2.6
+// @description  115独立3D视频宇宙：短预览错误诊断、手动重试与低画质加载优化，保留3秒静音HLS、封面回退及原生播放入口。
 // @match        https://115.com/*
 // @match        https://*.115.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
   'use strict';
   if (window.top !== window.self || document.getElementById('ramen-video-universe-root')) return;
 
-  const VERSION = '0.2.5';
-  const DELIVERY = 'VU-025-01';
+  const VERSION = '0.2.6';
+  const DELIVERY = 'VU-026-01';
   const API_ORIGIN = 'https://webapi.115.com';
   const HOST_ID = 'ramen-video-universe-root';
   const PAGE_SIZE = 500;
@@ -247,6 +247,23 @@
       !!videoHlsManifestUrl(record) && !!(nativeHls || hlsAvailable);
   }
 
+  // Map media errors to readable categories without exposing file IDs, URLs or cookies.
+  function previewFailureReason(details, responseCode = 0) {
+    const status = Number(responseCode);
+    if (status === 401 || status === 403 || status === 911) return '115登录或访问权限受限';
+    if (status === 404) return '暂未找到可播放的转码视频';
+    if (status === 429) return '请求过于频繁，建议稍后再试';
+    if (status >= 500 && status < 600) return '115视频服务暂时不可用';
+    const type = String(details || '').toLowerCase();
+    if (type.includes('timeout')) return '视频流加载超时';
+    if (type.includes('notallowed') || type.includes('autoplay')) return '浏览器阻止了自动播放';
+    if (type.includes('media') || type.includes('buffer') || type.includes('decode') ||
+        type.includes('codec')) return '当前视频编码或浏览器解码不兼容';
+    if (type.includes('manifest') || type.includes('level') || type.includes('frag') ||
+        type.includes('network')) return '视频源无法加载（可能是网络或跨域限制）';
+    return '该视频暂时无法短预览';
+  }
+
   function humanFileSize(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return '大小未知';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -347,6 +364,10 @@
     'height:100%;object-fit:cover;background:#050915;pointer-events:none;}',
     '.moon-visual video[hidden]{display:none!important}.moon-visual .poster-wrap[hidden]{display:none!important}',
     '.moon-preview-status{font-size:10px;color:#9dcbee;}',
+    '.motion-diagnostics{border:1px solid #7d9bd34a;background:#152341a6;color:#b7d4f9;',
+    'padding:8px;border-radius:9px;font-size:11px;line-height:1.6;display:flex;gap:8px;',
+    'align-items:center;justify-content:space-between;}',
+    '.motion-diagnostics[hidden]{display:none!important}.motion-diagnostics .btn{padding:6px 8px;flex:none;}',
     '.preview-detail{font-size:11px;color:#aec5e7;line-height:1.6}.preview-actions{display:flex;gap:6px;flex-wrap:wrap;}',
     '.preview-actions button{flex:1;min-width:90px;}',
     '.message{font-size:12px;min-height:22px;color:#b1cbed;line-height:1.6;}',
@@ -416,6 +437,10 @@
             '<button class="btn moon-switch" id="toggle-motion" type="button" aria-pressed="false" title="开启后才会读取真实视频流">短预览：关</button>',
             '<button class="btn moon-switch" id="toggle-moons" type="button" aria-pressed="true">隐藏卫星</button></div>',
           '<div class="moon-count" id="moon-count">选择一颗星球后即可查看视频卫星</div>',
+          '<div class="motion-diagnostics" id="motion-diagnostics" hidden>',
+            '<span id="motion-diagnostic-text"></span>',
+            '<button class="btn" type="button" id="retry-motion">重新尝试</button>',
+          '</div>',
           '<div class="title-sm">✦ 星球发现 · 九格样本</div>',
           '<div class="video-list" id="video-grid"></div>',
           '<div class="video-preview" id="video-preview" hidden>',
@@ -445,7 +470,9 @@
     kicker: $('#side-kicker'), title: $('#side-title'), summary: $('#side-summary'),
     orbitList: $('#orbit-neighbors'), orbitTitle: $('#orbit-title'), orbitStatus: $('#orbit-status'),
     orbitPrev: $('#orbit-prev'), orbitNext: $('#orbit-next'), parent: $('#parent-planet'),
-    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), motionToggle: $('#toggle-motion'), preview: $('#video-preview'),
+    moonCount: $('#moon-count'), moonToggle: $('#toggle-moons'), motionToggle: $('#toggle-motion'),
+    motionDiagnostics: $('#motion-diagnostics'), motionDiagnosticText: $('#motion-diagnostic-text'),
+    motionRetry: $('#retry-motion'), preview: $('#video-preview'),
     previewName: $('#preview-name'), previewDetail: $('#preview-detail'),
     previewPoster: $('#preview-poster'), moonPeek: $('#moon-peek'),
     moonPeekPoster: $('#moon-peek-poster'), moonPeekName: $('#moon-peek-name'),
@@ -507,7 +534,7 @@
   // One bounded, muted media session. Every pointer change destroys stale streams.
   const hoverMotion = {
     generation: 0, delay: null, timeout: null, hls: null, activeId: null,
-    failedIds: new Set()
+    failedIds: new Set(), lastFailure: '', played: false
   };
 
   function hlsEngine() {
@@ -518,6 +545,23 @@
     return null;
   }
 
+  function refreshMotionDiagnostics() {
+    const count = hoverMotion.failedIds.size;
+    ui.motionDiagnostics.hidden = count === 0;
+    ui.motionDiagnosticText.textContent = count
+      ? '已跳过 ' + count + ' 条失败预览 · ' + hoverMotion.lastFailure
+      : '';
+  }
+
+  function failMoonMotion(id, generation, detail, code = 0) {
+    if (generation !== hoverMotion.generation || hoverMotion.activeId !== id) return;
+    const reason = previewFailureReason(detail, code);
+    hoverMotion.failedIds.add(id);
+    hoverMotion.lastFailure = reason;
+    stopMoonMotion(reason + ' · 已恢复封面');
+    refreshMotionDiagnostics();
+  }
+
   function stopMoonMotion(message = '') {
     hoverMotion.generation++;
     clearTimeout(hoverMotion.delay);
@@ -525,6 +569,7 @@
     hoverMotion.delay = null;
     hoverMotion.timeout = null;
     hoverMotion.activeId = null;
+    hoverMotion.played = false;
     if (hoverMotion.hls) {
       try { hoverMotion.hls.destroy(); } catch {}
       hoverMotion.hls = null;
@@ -553,7 +598,7 @@
       return;
     }
     if (hoverMotion.failedIds.has(expectedId)) {
-      ui.moonPreviewStatus.textContent = '当前视频无法短预览';
+      ui.moonPreviewStatus.textContent = '已跳过失败预览，可在右侧重新尝试';
       return;
     }
     ui.moonPreviewStatus.textContent = '正在请求 115 视频流…';
@@ -566,47 +611,44 @@
       if (!mediaUrl) return;
       hoverMotion.timeout = setTimeout(() => {
         if (generation === hoverMotion.generation) {
-          hoverMotion.failedIds.add(expectedId);
-          stopMoonMotion('预览请求超时，已恢复封面');
+          failMoonMotion(expectedId, generation, 'videoLoadTimeout');
         }
       }, 8000);
       // All requests use the user's existing 115 session. No Cookie is read or stored.
       if (Engine) {
         try {
           const player = new Engine({
-            startLevel: 0,
-            maxBufferLength: 4, maxMaxBufferLength: 6, backBufferLength: 0,
+            startLevel: 0, capLevelToPlayerSize: true,
+            maxBufferSize: 4 * 1024 * 1024,
+            maxBufferLength: 3, maxMaxBufferLength: 6, backBufferLength: 0,
             manifestLoadingMaxRetry: 0, levelLoadingMaxRetry: 0, fragLoadingMaxRetry: 0,
             xhrSetup(xhr) { xhr.withCredentials = true; }
           });
           hoverMotion.hls = player;
           player.on(Engine.Events.ERROR, (_, data) => {
             if (generation === hoverMotion.generation && data?.fatal) {
-              hoverMotion.failedIds.add(expectedId);
-              stopMoonMotion('无法播放当前流，已恢复封面');
+              const status = data?.response?.code || data?.networkDetails?.status || 0;
+              failMoonMotion(expectedId, generation, data?.details || data?.type, status);
             }
           });
           player.on(Engine.Events.MANIFEST_PARSED, () => {
             if (generation !== hoverMotion.generation) return;
             video.play().catch(() => {
               if (generation === hoverMotion.generation) {
-                hoverMotion.failedIds.add(expectedId);
-                stopMoonMotion('浏览器阻止自动播放，已恢复封面');
+                failMoonMotion(expectedId, generation, 'notAllowedError');
               }
             });
           });
           player.attachMedia(video);
           player.loadSource(mediaUrl);
         } catch {
-          hoverMotion.failedIds.add(expectedId);
-          stopMoonMotion('视频流未就绪，已恢复封面');
+          failMoonMotion(expectedId, generation, 'networkError');
         }
       } else if (native) {
         video.src = mediaUrl;
         video.play().catch(() => {
           if (generation === hoverMotion.generation) {
-            hoverMotion.failedIds.add(expectedId);
-            stopMoonMotion('浏览器无法自动播放，已恢复封面');
+            failMoonMotion(expectedId, generation, 'notAllowedError');
           }
         });
       }
@@ -618,6 +660,8 @@
       stopMoonMotion();
       return;
     }
+    if (hoverMotion.played) return;
+    hoverMotion.played = true;
     const generation = hoverMotion.generation;
     ui.moonVideo.hidden = false;
     ui.moonPeekPoster.hidden = true;
@@ -631,8 +675,10 @@
   });
   ui.moonVideo.addEventListener('error', () => {
     if (hoverMotion.activeId) {
-      hoverMotion.failedIds.add(hoverMotion.activeId);
-      stopMoonMotion('该视频流不可用，已恢复封面');
+      const id = hoverMotion.activeId;
+      const generation = hoverMotion.generation;
+      const code = ui.moonVideo.error?.code;
+      failMoonMotion(id, generation, code === 3 || code === 4 ? 'mediaDecodeError' : 'networkError');
     }
   });
 
@@ -688,6 +734,8 @@
   function clearUniverse(rootCid, rootName, mode) {
     updateMoonPeek(null);
     hoverMotion.failedIds.clear();
+    hoverMotion.lastFailure = '';
+    refreshMotionDiagnostics();
     state.scanEpoch++;
     if (state.scanAbort) state.scanAbort.abort();
     state.scanAbort = null;
@@ -1516,6 +1564,19 @@
   ui.jump.addEventListener('click', jumpRandom);
   ui.folder.addEventListener('click', () => open115Folder(state.selected));
   ui.parent.addEventListener('click', returnToParent);
+  ui.motionRetry.addEventListener('click', () => {
+    hoverMotion.failedIds.clear();
+    hoverMotion.lastFailure = '';
+    refreshMotionDiagnostics();
+    if (state.motionEnabled && state.hoveredVideoId) {
+      const current = state.videoProjected.find(item => item.node.id === state.hoveredVideoId);
+      if (current) {
+        stopMoonMotion();
+        hoverMotion.activeId = current.node.id;
+        startMoonMotion(current.node);
+      }
+    }
+  });
   ui.motionToggle.addEventListener('click', () => {
     state.motionEnabled = !state.motionEnabled;
     ui.motionToggle.textContent = state.motionEnabled ? '短预览：开' : '短预览：关';
@@ -1559,6 +1620,9 @@
   });
   $('#reset-camera').addEventListener('click', resetOverview);
   window.addEventListener('keydown', event => { if (event.key === 'Escape' && !ui.shell.hidden) toggle(false); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) updateMoonPeek(null);
+  });
   const currentCid = new URLSearchParams(window.location.search).get('cid');
   if (currentCid && /^\d{1,30}$/.test(currentCid)) ui.cid.value = currentCid;
   renderer = createWebGLRenderer();

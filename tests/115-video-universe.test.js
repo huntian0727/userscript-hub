@@ -18,7 +18,7 @@ function coreOf(script = source) {
     "const API_ORIGIN = 'https://webapi.115.com'; const PAGE_SIZE = 500;" +
     "const MAX_SAMPLE_PER_PLANET = 16;const ORBIT_PAGE_SIZE = 12;const VIDEO_MOON_LIMIT = 9;const VIDEO_RE = /\\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mts|mpg|mpeg|rmvb|rm|3gp|vob)$/i;\n" +
     script.slice(a, b) +
-    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview };'
+    '\nreturn { numericId, createListUrl, parsePage, recordOf, hashId, boundedSampleAdd, sizeOfPlanet, placeChild, cameraDefaults, clamp, projectedPlanet, nearestPlanetAt, orbitNeighborhood, orbitTarget, videoPlaybackUrl, humanFileSize, orbitingVideoMoons, focusedParent, trusted115Poster, videoPosterInfo, videoHlsManifestUrl, canStartMotionPreview, previewFailureReason };'
   )();
 }
 
@@ -29,7 +29,7 @@ test('standalone video universe has unique name, namespace, metadata version and
   const universe = readMetadata(source);
   const stable = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-indexed.user.js'), 'utf8'));
   const explorer = readMetadata(fs.readFileSync(path.join(root, 'userscripts/115-multiview-full-disk.user.js'), 'utf8'));
-  assert.equal(universe.version, '0.2.5');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
+  assert.equal(universe.version, '0.2.6');  assert.match(source, /^\/\/ @match\s+https:\/\/115\.com\/\*$/m);
   assert.match(source, /^\/\/ @match\s+https:\/\/\*\.115\.com\/\*$/m);
   assert.equal(source.split(/^\/\/ @match\s+/gm).length - 1, 2);
 
@@ -47,7 +47,7 @@ test('standalone video universe has unique name, namespace, metadata version and
 
 test('the video-universe experiment is read-only and uses its own DOM root', () => {
   assert.match(source, /const HOST_ID = 'ramen-video-universe-root';/);
-  assert.match(source, /const DELIVERY = 'VU-025-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
+  assert.match(source, /const DELIVERY = 'VU-026-01';/);  assert.match(source, /GM_xmlhttpRequest\(\{\s*method: 'GET'/);
   assert.doesNotMatch(source, /\bGM_setValue\b|\bindexedDB\.deleteDatabase\b|\bGM_deleteValue\b/);
   assert.match(source, /state\.mode === 'demo'/);
   assert.match(source, /演示数据，不代表真实115文件/);
@@ -108,8 +108,8 @@ test('galaxy pilot has bounded scope and makes partial counts explicit', () => {
   assert.match(source, /手动开启短预览后/);
 });
 
-test('v0.2.5 install snapshot matches source except generated update headers', () => {
-  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.5.user.js');
+test('v0.2.6 install snapshot matches source except generated update headers', () => {
+  const pathToSnapshot = path.join(root, 'history/115-video-universe/0.2.6.user.js');
   assert.ok(fs.existsSync(pathToSnapshot), 'new immutable version snapshot should exist');
   const served = withUpdateUrls(source, '115-video-universe', registry.pagesBaseUrl).content;
   assert.equal(fs.readFileSync(pathToSnapshot, 'utf8'), served);
@@ -156,7 +156,7 @@ test('3D WebGL lighting and controls do not alter existing data transport or acc
   assert.match(source, /addEventListener\('pointermove'/);
   assert.match(source, /function flyToPlanet\(/);
   assert.match(source, /function stopAutoSpin\(/);
-  assert.match(source, /const DELIVERY = 'VU-025-01';/);});
+  assert.match(source, /const DELIVERY = 'VU-026-01';/);});
 
 test('v0.1.0 remains an immutable independently installed historical release', () => {
   const old = fs.readFileSync(path.join(root, 'history/115-video-universe/0.1.0.user.js'), 'utf8');
@@ -318,4 +318,35 @@ test('v0.2.5 motion preview is opt-in, 115-only, and never runs in demo mode', (
   assert.match(source, /manifestLoadingMaxRetry: 0/);
   assert.match(source, /@require\s+https:\/\/huntian0727\.github\.io\/userscript-hub\/vendor\/hls-1\.7\.4\.min\.js/);
   assert.doesNotMatch(source, /document\.cookie\s*=/);
+});
+
+
+test('v0.2.6 HLS errors are grouped into actionable safe categories', () => {
+  assert.match(core.previewFailureReason('manifestLoadError', 403), /权限/);
+  assert.match(core.previewFailureReason('manifestLoadError', 401), /登录/);
+  assert.match(core.previewFailureReason('manifestLoadError', 404), /转码/);
+  assert.match(core.previewFailureReason('manifestLoadError', 429), /频繁/);
+  assert.match(core.previewFailureReason('manifestLoadError', 503), /115视频服务/);
+  assert.match(core.previewFailureReason('fragLoadTimeout'), /超时/);
+  assert.match(core.previewFailureReason('notAllowedError'), /自动播放/);
+  assert.match(core.previewFailureReason('mediaDecodeError'), /解码/);
+  assert.match(core.previewFailureReason('manifestLoadError'), /网络或跨域/);
+  assert.match(core.previewFailureReason('levelLoadError'), /网络或跨域/);
+  assert.match(core.previewFailureReason('unknown'), /无法短预览/);
+  const injected = 'https://example.net/secret?token=PrivateToken123';
+  assert.doesNotMatch(core.previewFailureReason(injected), /PrivateToken123|example\.net/);
+});
+
+test('v0.2.6 retry flow and video resource limits stay opt-in and bounded', () => {
+  assert.match(source, /ui\.motionRetry\.addEventListener\('click'/);
+  assert.match(source, /hoverMotion\.failedIds\.clear\(\)/);
+  assert.match(source, /function failMoonMotion\(/);
+  assert.match(source, /const status = data\?\.response\?\.code \|\| data\?\.networkDetails\?\.status/);
+  assert.match(source, /capLevelToPlayerSize: true/);
+  assert.match(source, /maxBufferSize: 4 \* 1024 \* 1024/);
+  assert.match(source, /if \(hoverMotion\.played\) return;/);
+  assert.match(source, /document\.addEventListener\('visibilitychange'/);
+  assert.match(source, /id="motion-diagnostics"/);
+  assert.match(source, /id="retry-motion"/);
+  assert.match(source, /MOTION_PREVIEW_MS = 3000/);
 });
