@@ -17,7 +17,7 @@ test('the player and directory manager have separate DOM hosts', () => {
     'local-115-multiview-full-disk-v1-6'
   ]);
   assert.equal(new Set(hostIds).size, 2);
-  assert.match(source, /const VERSION = '1\.9\.0';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const VERSION = '1\.9\.1';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
   assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
 });
 
@@ -31,6 +31,21 @@ test('direct playback opens the current folder while one exploration launcher op
   assert.match(source, /createScopeButton\('full-disk', '全盘探索', '整个 115 网盘'/);
   assert.ok(!source.includes('full-disk-launcher'));
 });
+test('entry launchers stack vertically with equal compact widths and distinct premium colors', () => {
+  const styleStart = source.indexOf('  style.textContent = \`', source.indexOf('const host = element'));
+  const styleEnd = source.indexOf('\n  \`;', styleStart);
+  assert.ok(styleStart >= 0 && styleEnd > styleStart, 'launcher stylesheet is present');
+  const css = source.slice(styleStart, styleEnd);
+  assert.match(css, /\.entry-actions\{[^}]*flex-direction:column[^}]*align-items:stretch[^}]*width:max-content/);
+  assert.match(css, /\.launcher\{[^}]*width:100%[^}]*padding:8px 12px[^}]*font-size:14px/);
+  assert.match(css, /\.launcher\{[^}]*background:linear-gradient\(135deg,#123f86/);
+  assert.match(css, /\.explore-launcher\{background:linear-gradient\(120deg,#5425c8 0%,#a31b8e 56%,#ed6b2d 100%\)/);
+  assert.match(source, /entryActions\.append\(launcher, exploreLauncher\)/);
+  assert.match(source, /element\('button', 'launcher', '多画面播放'\)/);
+  assert.match(source, /element\('button', 'launcher explore-launcher', '随机探索'\)/);
+  assert.doesNotMatch(source, /element\('button', 'launcher[^']*', '[^']*[🎲✨⚡★⭐]/);
+});
+
 
 test('quick exploration uses one classification for displayed rows and playable candidates', () => {
   const start = source.indexOf('  function recordFolderNames(record) {');

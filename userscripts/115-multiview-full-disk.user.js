@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.9.0
+// @version      1.9.1
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -2876,7 +2876,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.9.0';
+  const VERSION = '1.9.1';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -3426,7 +3426,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.9.0';
+  const VERSION = '1.9.1';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -10067,12 +10067,18 @@
     :host{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#eee;color-scheme:dark}
     *{box-sizing:border-box}button{font:inherit;cursor:pointer}
     .entry-actions,.panel{font-family:system-ui,"Microsoft YaHei",sans-serif}
-    .entry-actions{position:absolute;right:22px;bottom:108px;display:flex;gap:8px}
-    .launcher{pointer-events:auto;padding:11px 17px;
-      color:white;background:#245dd6;border:1px solid #6995f5;border-radius:8px;font-size:14px;box-shadow:0 4px 18px #0005}
-    .launcher:hover{background:#3474ef}.launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
-    .explore-launcher{background:#1a2635;border-color:#536a85}
-    .explore-launcher:hover{background:#293d56}
+    .entry-actions{position:absolute;right:22px;bottom:108px;display:flex;flex-direction:column;align-items:stretch;gap:8px;width:max-content;max-width:calc(100vw - 44px)}
+    .launcher{pointer-events:auto;display:block;width:100%;min-width:0;padding:8px 12px;white-space:nowrap;line-height:1.35;
+      color:#fff;background:linear-gradient(135deg,#123f86 0%,#176de2 56%,#1745a4 100%);
+      border:1px solid #58a7ff;border-radius:10px;font-size:14px;font-weight:700;
+      box-shadow:0 4px 16px rgba(0,0,0,.42),0 0 14px rgba(44,132,255,.3);
+      transition:transform .16s ease,filter .16s ease,box-shadow .16s ease}
+    .launcher:hover{filter:brightness(1.14);transform:translateY(-1px);box-shadow:0 6px 20px rgba(0,0,0,.48),0 0 18px rgba(44,132,255,.42)}
+    .launcher:active{transform:translateY(0) scale(.98)}
+    .launcher:focus-visible,.close:focus-visible{outline:2px solid #fff;outline-offset:3px}
+    .explore-launcher{background:linear-gradient(120deg,#5425c8 0%,#a31b8e 56%,#ed6b2d 100%);border-color:#ed8bdf;
+      box-shadow:0 4px 18px rgba(0,0,0,.45),0 0 16px rgba(190,52,220,.32),0 0 22px rgba(255,133,54,.14)}
+    .explore-launcher:hover{filter:brightness(1.16);box-shadow:0 6px 22px rgba(0,0,0,.5),0 0 20px rgba(190,52,220,.45),0 0 26px rgba(255,133,54,.22)}
     .launcher:disabled{opacity:.6;cursor:wait}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
     #topbar{position:fixed;top:0;left:0;right:0;height:44px;z-index:50;display:flex;align-items:center;gap:10px;padding:0 14px;background:linear-gradient(to bottom,rgba(0,0,0,.8),transparent);transform:translateY(-100%);transition:transform .2s}
