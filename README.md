@@ -16,14 +16,14 @@
 |---|---|
 | 115 多画面播放器（四宫格验证版） v0.1.1 | 公开迁移验证版 |
 | [115 多画面播放器稳定版 v0.12.4](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js) | 原链接不变，服务现有用户 |
-| [115 多画面播放器 · 随机探索 v1.9.0](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 独立公开测试版。全盘随机发现视频后，可按需切换到所在文件夹整页播放，保留锁定窗口；真实115账号体验反馈持续收集。 |
+| [115 多画面播放器 · 随机探索 v1.9.1](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 独立公开测试版。全盘随机发现视频后，可按需切换到所在文件夹整页播放；入口按钮已重新设计，保留锁定窗口；真实115账号体验反馈持续收集。 |
 | [拉面视频宇宙 · 3D 探索版 v0.3.1](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | HOME真实账号试用候选：已发现星球/视频搜索、卫星换批、当前目录路径导航；默认真实115模式，完整播放交给115官方播放器。真实账号验收待进行 |
 | [视频宇宙 v0.1.0 历史快照](history/115-video-universe/0.1.0.user.js) | 2D 首个试点，独立归档供回滚 |
 **视频宇宙效果预览（仅模拟目录数据）：** [查看星系界面截图](docs/images/video-universe-v0.1.0-demo.png)。探索类独立发行规范见 [EXPLORATION-INDEPENDENT-RELEASES.md](docs/EXPLORATION-INDEPENDENT-RELEASES.md)。
 **产品路线图：** [真实115产品化路线图](VIDEO_UNIVERSE_PRODUCT_ROADMAP.md)。
 **3D 星系演示（模拟数据）：** [v0.2.0 效果图](docs/images/video-universe-v0.2.0-demo.png) · [交互测试说明](experiments/video-universe-v0.2.1/README.md)。
 **独立公开试点 v0.2.2：** 聚焦星球展开子/同级星球，提供分页漫游和视频信息预览；115原生播放跳转待真实账号验收。详情见 [v0.2.2 验收记录](experiments/video-universe-v0.2.2/README.md)。
-**安装提醒：** 当前线上稳定基线仍为 v0.12.4；独立随机探索公开测试版已更新至 v1.9.0，和稳定版并行，不覆盖原有入口。真实115账号扫描与播放验收仍待实际体验反馈。完整版本与回滚记录见 [RELEASES.md](RELEASES.md)。
+**安装提醒：** 当前线上稳定基线仍为 v0.12.4；独立随机探索公开测试版更新至 v1.9.1，与稳定版并行，不覆盖原有入口。真实115账号扫描与播放验收仍待实际体验反馈。完整版本与回滚记录见 [RELEASES.md](RELEASES.md)。
 
 1. 只将明确批准公开的完整 .user.js 放入 userscripts/。
 2. 在 registry.json 中登记脚本白名单，不自动扫描或导入其他脚本。

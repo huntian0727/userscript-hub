@@ -38,7 +38,7 @@
       "displayName": "115 多画面播放器 · 随机探索",
       "description": "全盘探索支持从 115 的关键词搜索结果随机抽取；新增从全盘样本按需切换到视频所在目录的整页同目录随机播放，不要求提前扫描整个网盘，锁定窗口保持不变。",
       "source": "userscripts/115-multiview-full-disk.user.js",
-      "channel": "独立公开测试版 · v1.9.0（真实115账号验收后置）",
+      "channel": "独立公开测试版 · v1.9.1（按钮 UI 优化；真实115账号验收后置）",
       "enabled": true
     },
     {
