@@ -5288,6 +5288,10 @@
       pendingSlotIds: new Set(targetSlotIds)
     };
     session.sameFolderMode = state;
+    // The mode is page-wide, so even preserved locked cells must show its active state.
+    for (const existingCell of session.cells) {
+      if (existingCell) updateCellControls(session, existingCell);
+    }
     session.candidateTotal = 0;
     session.roundPoolSize = 0;
     session.roundMessage = session.fullDiskSource

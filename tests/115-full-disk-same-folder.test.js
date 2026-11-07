@@ -18,7 +18,7 @@ function extract(startMarker, endMarker) {
 }
 
 function createStartHarness() {
-  const calls = { ensure: [], cancelled: [], cleared: [], statuses: [] };
+  const calls = { ensure: [], cancelled: [], cleared: [], statuses: [], controls: [] };
   const startCode = extract(
     '  async function startSameFolderPlayback(session, cell) {',
     '  function swapSameFolderCell(session, cell) {'
@@ -26,7 +26,7 @@ function createStartHarness() {
   const start = new Function(
     'exitSameFolderPlayback', 'ensureSameFolderIndex', 'cancelPendingSkip', 'itemKey',
     'exitFavoriteFolderPlayback', 'clearCellForSameFolder', 'applyLayoutPositions',
-    'updateRoundControls', 'setStatus',
+    'updateCellControls', 'updateRoundControls', 'setStatus',
     startCode + '\nreturn startSameFolderPlayback;'
   )(
     () => {},
@@ -36,6 +36,7 @@ function createStartHarness() {
     () => {},
     (_session, cell) => { calls.cleared.push(cell.slotId); cell.item = null; },
     () => {},
+    (_session, cell) => { calls.controls.push(cell.slotId); },
     () => {},
     (cell, message) => calls.statuses.push({ slotId: cell.slotId, message })
   );
@@ -96,6 +97,7 @@ test('full-disk sample can switch the whole grid to its video folder and index o
   assert.deepEqual(session.sameFolderRestore.availableItems, globalPoolBefore);
   assert.equal(calls.ensure.length, 1);
   assert.equal(calls.ensure[0], state);
+  assert.deepEqual(calls.controls, ['slot-1', 'slot-2', 'slot-3'], 'all cells, including locked cells, must reflect page-wide same-folder mode');
   assert.match(session.roundMessage, /按需索引/);
 });
 

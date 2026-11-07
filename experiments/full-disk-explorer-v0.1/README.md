@@ -63,4 +63,19 @@ The isolated store now implements this boundary: task-level metadata and the glo
 
 Automated tests include source-level player startup, synthetic streaming and IndexedDB page-commit checks, provisional playback filtering, bounded replenishment, account isolation, and locked-window preservation. Synthetic tests cannot establish actual 115 login status, real API rate limits or browser playback success.
 
-Validation boundary: the local headless Chrome DOM smoke verified both launchers and the full-disk dialog, without uncaught initialization errors. The v1.9.0 local development candidate passes 192/192 automated tests and the static installation-center build. It is not published. Actual logged-in 115 scans, real playback and API rate limiting remain unverified and must be checked before public release.
+## Headless Chrome UI smoke
+
+Run the baseline cases and the same-folder interaction cases:
+
+```powershell
+node experiments/full-disk-explorer-v0.1/run-browser-smoke.js
+node experiments/full-disk-explorer-v0.1/run-browser-smoke.js --keyword
+node experiments/full-disk-explorer-v0.1/run-browser-smoke.js --same-folder
+node experiments/full-disk-explorer-v0.1/run-browser-smoke.js --keyword --same-folder
+```
+
+The same-folder UI smoke stubs `N115IndexManagerUI.requestPriorityScan` with three normalized fixture records. It verifies the requested folder ID and forced refresh, fills all unlocked cells, preserves the locked cell and its active-mode indicator, and exits back to global exploration. This validates the player-side UI integration only; it does not verify live 115 API pagination or persisted real-account indexing.
+
+## Validation boundary
+
+The v1.9.0 local development candidate passes 192/192 automated tests, baseline and same-folder headless Chrome smoke tests with and without a keyword, and the static installation-center build. It is not published. Actual logged-in 115 scans, real playback and API rate limiting remain unverified and must be checked before public release.
