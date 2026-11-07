@@ -78,7 +78,7 @@ test('real index-manager request code uses a defined API origin and rejects unex
 });
 
 test('all restored constants and both independent host IDs exist in the exact release source', () => {
-  assert.match(current, /^\/\/ @version\s+1\.8\.4$/m);
+  assert.match(current, /^\/\/ @version\s+1\.9\.0$/m);
   assert.match(current, /const MAX_VIDEOS = 12;/);
   assert.match(current, /const DEFAULT_DUAL_SMALL_COUNT = 3;/);
   assert.match(current, /const API_ORIGIN = 'https:\/\/webapi\.115\.com';/);

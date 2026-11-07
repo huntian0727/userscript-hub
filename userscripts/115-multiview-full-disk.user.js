@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.4
+// @version      1.9.0
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -2876,7 +2876,7 @@
 (function boot115IndexVerifier() {
   'use strict';
 
-  const VERSION = '1.8.4';
+  const VERSION = '1.9.0';
   const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';
   const API_ORIGIN = 'https://webapi.115.com';
   const N115Adapter = globalThis.N115DataAdapter;
@@ -3426,7 +3426,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.8.4';
+  const VERSION = '1.9.0';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -4243,10 +4243,10 @@
       cell.sameFolderButton.textContent = enabled ? '📂✓' : '📂';
       cell.sameFolderButton.title = enabled
         ? '整页已切换到：' + mode.folderPath + '；点击退出同目录模式'
-        : fullDiskMode ? '全盘随机探索模式暂不支持同目录索引切换' : '将当前整页多宫格切换到此视频所在文件夹';
+        : fullDiskMode ? '将整页多宫格切换到此视频所在文件夹（按需建立该目录索引）' : '将当前整页多宫格切换到此视频所在文件夹';
       cell.sameFolderButton.setAttribute('aria-pressed', String(enabled));
       cell.sameFolderButton.hidden = !cell.item && !enabled;
-      cell.sameFolderButton.disabled = enabled ? false : (!hasFolder || fullDiskMode);
+      cell.sameFolderButton.disabled = enabled ? false : !hasFolder;
     }
     if (cell.folderButton) {
       const hasParentFolder = Boolean(cell.item && /^\d+$/.test(String(cell.item.parentId ?? '')));
@@ -4988,18 +4988,21 @@
     const state = session.sameFolderMode;
     if (!state || !state.active) return;
     const cells = session.cells.filter(cell => cell && cell.index < session.layoutCount);
-    const nextIds = new Set(cells.map(cell => cell.slotId));
+    const nextIds = new Set(cells.filter(cell => !cell.locked).map(cell => cell.slotId));
     state.pendingSlotIds = new Set(Array.from(state.pendingSlotIds).filter(slotId => nextIds.has(slotId)));
     state.targetSlotIds = nextIds;
     for (const cell of cells) {
+      if (cell.locked) continue;
       const isSameFolder = cell.item && String(cell.item.parentId || '') === state.folderId;
-      if (isSameFolder) continue;
+      if (isSameFolder) {
+        state.pendingSlotIds.delete(cell.slotId);
+        continue;
+      }
       state.pendingSlotIds.add(cell.slotId);
       clearCellForSameFolder(session, cell);
     }
     fillSameFolderCells(session, state);
   }
-
   // 大目录候选池可能增长到数万条；随机下标+末尾交换删除，避免shift引发整表搬移。
   function takeSameFolderItem(state) {
     while (state.availableItems.length) {
@@ -5021,6 +5024,10 @@
     for (const slotId of Array.from(state.pendingSlotIds)) {
       const cell = sameFolderCells(session, state).find(item => item.slotId === slotId);
       if (!cell) {
+        state.pendingSlotIds.delete(slotId);
+        continue;
+      }
+      if (cell.locked) {
         state.pendingSlotIds.delete(slotId);
         continue;
       }
@@ -5219,8 +5226,8 @@
     }
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
     updateRoundControls(session);
+    if (restoreGlobal && session.fullDiskSource) refillSessionFullDisk(session);
   }
-
   async function startSameFolderPlayback(session, cell) {
     if (session.closed) return;
     const currentMode = session.sameFolderMode;
@@ -5230,25 +5237,33 @@
       exitSameFolderPlayback(session);
       return;
     }
-    if (session.fullDiskSource) {
-      if (cell) setStatus(cell, '全盘随机探索模式暂不支持同目录索引切换；可以通过“在新标签页打开文件夹”查看原目录');
-      return;
-    }
     if (session.authBlocked || session.roundRefreshing || !cell || !cell.item) return;
     const folderId = clickedFolderId;
     if (!/^\d+$/.test(folderId)) { setStatus(cell, '无法识别当前视频所在目录'); return; }
-    if (session.favoriteFolderPlayback && session.favoriteFolderPlayback.active) exitFavoriteFolderPlayback(session, false, false);
+    const hasUnlockedVisibleCell = session.cells.some(item =>
+      item && item.index < session.layoutCount && !item.locked
+    );
+    if (!hasUnlockedVisibleCell) {
+      setStatus(cell, '当前布局的窗口全部已锁定，请先解锁一个窗口再切换同目录');
+      return;
+    }
+    if (session.favoriteFolderPlayback && session.favoriteFolderPlayback.active) {
+      exitFavoriteFolderPlayback(session, false, false);
+    }
+    const cells = session.cells.filter(item => item && item.index < session.layoutCount);
+    const targetCells = cells.filter(item => !item.locked);
     for (const existingCell of session.cells) if (existingCell) cancelPendingSkip(existingCell);
-    if (!session.sameFolderRestore) { session.sameFolderRestore = { availableItems: session.availableItems.slice(),        usedPickcodes: new Set(session.usedPickcodes),
+    if (!session.sameFolderRestore) {
+      session.sameFolderRestore = {
+        availableItems: session.availableItems.slice(),
+        usedPickcodes: new Set(session.usedPickcodes),
         candidateTotal: session.candidateTotal,
         roundPoolSize: session.roundPoolSize,
         filtersKey: JSON.stringify(session.filters)
       };
     }
     if (currentMode) currentMode.active = false;
-
-    const cells = session.cells.filter(item => item && item.index < session.layoutCount);
-    const targetSlotIds = new Set(cells.map(item => item.slotId));
+    const targetSlotIds = new Set(targetCells.map(item => item.slotId));
     const initialFolderPickcodes = new Set(cells
       .filter(item => item.item && String(item.item.parentId || '') === folderId)
       .map(item => itemKey(item.item)).filter(Boolean));
@@ -5275,11 +5290,12 @@
     session.sameFolderMode = state;
     session.candidateTotal = 0;
     session.roundPoolSize = 0;
-    session.roundMessage = '正在将整页多宫格切换到：' + state.folderPath;
-    for (const target of cells) clearCellForSameFolder(session, target);
+    session.roundMessage = session.fullDiskSource
+      ? '正在按需索引视频所在目录并切换整页多宫格：' + state.folderPath
+      : '正在将整页多宫格切换到：' + state.folderPath;
+    for (const target of targetCells) clearCellForSameFolder(session, target);
     applyLayoutPositions(session);
     updateRoundControls(session);
-
     try {
       await ensureSameFolderIndex(session, state);
     } catch (error) {
@@ -7436,6 +7452,7 @@
     });
     cell.lockButton = makeTool('cell-lock', '🔓', () => {
       cell.locked = !cell.locked;
+      if (session.sameFolderMode && session.sameFolderMode.active) syncSameFolderLayout(session);
       updateCellControls(session, cell);
       updateRoundControls(session);
     });
@@ -8837,7 +8854,7 @@
     fullDiskStartButton.textContent = session ? '继续抽取' : '开始全盘探索';
     fullDiskStartButton.disabled = session
       ? Boolean(source.refilling || source.exhausted || source.accountChanged || session.authBlocked ||
-          session.favoriteFolderPlayback?.active)
+          session.favoriteFolderPlayback?.active || session.sameFolderMode?.active)
       : !fullDiskAccountId || Boolean(active || opening || source?.starting);
     fullDiskMetricValues.videos.textContent = source?.count == null ? '—' : formatFullDiskCount(source.count);
     fullDiskMetricValues.videoLabel.textContent = source ? fullDiskCountLabel(source) : '115 视频范围';
@@ -8927,7 +8944,7 @@
     if (!session) return;
     session.candidateTotal = source.count ?? 0;
     session.roundPoolSize = source.accepted;
-    if (!session.authBlocked && !session.favoriteFolderPlayback?.active) {
+    if (!session.authBlocked && !session.favoriteFolderPlayback?.active && !session.sameFolderMode?.active) {
       for (const cell of session.cells) {
         if (!cell || cell.index >= session.layoutCount || cell.locked || cell.deleting) {
           if (cell) source.pendingSwaps.delete(cell);
@@ -8972,9 +8989,8 @@
     const session = fullDiskSession(source);
     if (!session) return preparedFullDisk === source && source.items.length < 2;
     return session.filters === source.filters && !session.authBlocked && !session.favoriteFolderPlayback?.active &&
-      session.availableItems.length < FULL_DISK_RESERVE;
+      !session.sameFolderMode?.active && session.availableItems.length < FULL_DISK_RESERVE;
   }
-
   function refillFullDisk(source) {
     if (source.refilling || source.controller.signal.aborted || source.accountChanged || source.exhausted ||
         !fullDiskNeedsItems(source)) return source.refilling;
@@ -9079,14 +9095,14 @@
 
   function refillSessionFullDisk(session) {
     const source = session.fullDiskSource;
-    if (!source || session.closed || session.favoriteFolderPlayback?.active) return;
+    if (!source || session.closed || session.favoriteFolderPlayback?.active || session.sameFolderMode?.active) return;
     updateFullDiskPlayer(source);
     void refillFullDisk(source);
   }
 
   function queueFullDiskSwap(session, cell) {
     const source = session.fullDiskSource;
-    if (!source || source.exhausted || source.accountChanged || session.favoriteFolderPlayback?.active) return false;
+    if (!source || source.exhausted || source.accountChanged || session.favoriteFolderPlayback?.active || session.sameFolderMode?.active) return false;
     source.pendingSwaps.set(cell, cell.generation);
     if (session.fullDiskSource) refillSessionFullDisk(session);
     return true;

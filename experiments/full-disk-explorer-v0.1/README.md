@@ -1,16 +1,19 @@
 # Full-disk random explorer — algorithm lab v0.1
 
-Status: v1.7.0 public-test release candidate / delivery FDX-170-01. A persisted page exposes only its committed bounded reservoir to active playback. The player can open provisional candidates while scanning, replenish a bounded queue without replacing active/locked cells, and distinguish partial-prefix results from a completed whole-drive sample. The independent v0.12.4 stable release and immutable v1.6.x snapshots remain unchanged.## What the current code already proves
+Status: v1.9.0 local development candidate / delivery FDX-190-01. A persisted page exposes only its committed bounded reservoir to active playback. The player can open provisional candidates while scanning, replenish a bounded queue without replacing active/locked cells, and distinguish partial-prefix results from a completed whole-drive sample. The independent v0.12.4 stable release and immutable v1.6.x–v1.8.4 snapshots remain unchanged.
 
-- The production adapter builds `/files` requests from a CID and accepts root CID `0`; its default page size is 1,150.
+## What the current code already proves
+
+- The production adapter builds /files requests from a CID and accepts root CID 0; its default page size is 1,150.
 - The adapter normalizes file records, video flags, pickcodes, byte sizes, folder IDs and path segments.
-- The existing recursive `scanTree` collects every record into an in-memory `Map`, with default safety ceilings of 2,000 directories and 50,000 files. That is not suitable as the final no-index explorer engine.
-- Existing `listDirectory({ collectRecords: false })` still retains a directory-wide `Set` of record keys and a folder array.
-- New additive `streamDirectory` reuses the production normalizer, emits one normalized page at a time, returns no full file collection, and retains only a two-page recent-key window for overlap detection.
-- Existing `sampleVideos` samples only from records already persisted in the index database; existing same-folder page ingestion is not one global reservoir across the entire disk.
-- `explorer-core.js` implements the bounded global reservoir, recursive directory queue, strict page reducer and resumable checkpoint.
-- `explorer-idb-store.js` uses a separate `115-multiview-explorer` database with `tasks` and `directories` stores; page offsets, sample state, recent keys and newly discovered folders commit in one transaction.
-- `explorer-runner.js` orchestrates start, recursive traversal, pause/resume, account checks and fail-closed invalidation when directory pagination changes.
+- The existing recursive scanTree collects every record into an in-memory Map, with default safety ceilings of 2,000 directories and 50,000 files. That is not suitable as the final no-index explorer engine.
+- Existing listDirectory({ collectRecords: false }) still retains a directory-wide Set of record keys and a folder array.
+- New additive streamDirectory reuses the production normalizer, emits one normalized page at a time, returns no full file collection, and retains only a two-page recent-key window for overlap detection.
+- Existing sampleVideos samples only from records already persisted in the index database; existing same-folder page ingestion is not one global reservoir across the entire disk.
+- explorer-core.js implements the bounded global reservoir, recursive directory queue, strict page reducer and resumable checkpoint.
+- explorer-idb-store.js uses a separate 115-multiview-explorer database with tasks and directories stores; page offsets, sample state, recent keys and newly discovered folders commit in one transaction.
+- explorer-runner.js orchestrates start, recursive traversal, pause/resume, account checks and fail-closed invalidation when directory pagination changes.
+
 
 ## Player integration (development build)
 
@@ -18,29 +21,32 @@ Status: v1.7.0 public-test release candidate / delivery FDX-170-01. A persisted 
 - The dialog supports include/exclude keywords, folder-path filtering, minimum/maximum file size and favorites-only filtering.
 - It shows directory, record, matched-video and sample counts; scanning can pause, continue in the background, resume after refresh, or open the completed result in the existing multi-grid player.
 - The scan task stores its filter and favorite/exclusion preference snapshots and is bound to the current 115 account. Account identity is checked before each page is committed; resuming does not silently change the original scan criteria.
+- Full-disk samples can switch the unlocked grid to the sampled video's parent folder. The first click requests a priority index for that folder only; the whole drive is never pre-indexed for this action. Existing same-folder filters, deduplication, incremental page ingestion and candidate sampling are reused.
+- Locked cells remain untouched when entering same-folder mode, changing the layout, swapping, starting a new round or locking/unlocking during playback. Full-disk global replenishment is suspended while same-folder mode owns playback and resumes after returning to the global pool.
 - Favorite snapshots created from full-disk results preserve the file's parent directory so the existing favorite-list playback and folder navigation can use them without an index record.
-- Same-folder index mode is intentionally disabled only while playing a full-disk sample because that feature depends on the indexed directory pool; direct folder opening remains available.
 - The UI currently caps traversal at 20,000 directories and depth 20. Hitting either limit produces an incomplete task, never a successful global-random result.
 
 ## Prototype design
 
-1. Traverse from root CID `0`, recursively listing folders. Process one directory page at a time.
+1. Traverse from root CID 0, recursively listing folders. Process one directory page at a time.
 2. Use the additive `streamDirectory` adapter path; it does not retain every file key or folder object and awaits the page callback before requesting the next page.
 3. The page contract is strict: `records` contains normalized unique records, `unknownCount` and `duplicateCount` are page deltas, and `records.length + unknownCount + duplicateCount === rawCount`. Any mismatch fails closed.
 4. A bounded two-page recent-key window detects duplicates within a page and overlaps near page boundaries. Its keys are included in the checkpoint so refresh/resume preserves the window.
-5. Feed every unique matching video into one global reservoir of at most 300 candidates for newly started v1.7.0 tasks. Older scan checkpoints retain their original persisted reservoir limits; do not merge per-page independent samples.6. Persist only traversal metadata, counters, the recent-key window and the bounded sample; do not persist every discovered video as an index record.
-7. Commit the sample state, directory offset and newly discovered folder queue entries atomically. A committed offset is the replay fence after refresh.
-8. Bind a task to the 115 account ID. Re-check the account before resume; a changed account must fail closed.
-9. If a directory's reported total changes mid-scan, invalidate the whole scan and restart with a new scan ID. Mixing old and new directory pages would bias the reservoir.
-10. Pause on login/human-verification errors and preserve the last committed page. Resume only after the user has resolved the 115 prompt.
-11. Keep the initial implementation single-request-at-a-time. Do not add parallel traversal until real-account throttling and API behavior have been measured.
-12. Use an O(1) directory-ID lookup and a queue cursor; do not use repeated linear `includes()` checks or `Array.shift()` for a large folder tree.
-13. A scan with unknown records, duplicate records, depth limits or directory limits is `incomplete`, never a successful “全盘随机” result.
+5. Persist only traversal metadata, counters, the recent-key window and the bounded sample; do not persist every discovered video as an index record.
+6. Commit the sample state, directory offset and newly discovered folder queue entries atomically. A committed offset is the replay fence after refresh.
+7. Bind a task to the 115 account ID. Re-check the account before resume; a changed account must fail closed.
+8. If a directory's reported total changes mid-scan, invalidate the whole scan and restart with a new scan ID. Mixing old and new directory pages would bias the reservoir.
+9. Pause on login/human-verification errors and preserve the last committed page. Resume only after the user has resolved the 115 prompt.
+10. Keep the initial implementation single-request-at-a-time. Do not add parallel traversal until real-account throttling and API behavior have been measured.
+11. Use an O(1) directory-ID lookup and a queue cursor; do not use repeated linear `includes()` checks or `Array.shift()` for a large folder tree.
+12. A scan with unknown records, duplicate records, depth limits or directory limits is `incomplete`, never a successful “全盘随机” result.
+
 ## Randomness and user experience
 
 For a completed traversal of (N) unique matching videos, reservoir sampling of size (K) gives each video inclusion probability (min(K,N)/N), independent of directory order and page order.
 
-A partial scan can only be uniform over the subset already visited. The v1.7.0 UI labels this as “扫描中临时候选（仅已扫描范围）”, permits live playback from committed pages, and replenishes a bounded queue as scanning continues. Only a fully complete scan may claim a global random result. At scan completion no new videos can materialize without another traversal or retained full index; the current queue is finite.
+A partial scan can only be uniform over the subset already visited. The v1.9.0 UI labels this as “扫描中临时候选（仅已扫描范围）”, permits live playback from committed pages, and replenishes a bounded queue as scanning continues. Only a fully complete scan may claim a global random result. At scan completion no new videos can materialize without another traversal or retained full index; the current queue is finite.
+
 ## Pagination consistency limitation
 
 The recent-key window is bounded to the latest two pages. It catches duplicates caused by adjacent-page overlap and is restored after refresh, but it cannot prove that a same-count reorder more than two pages behind the cursor did not omit or repeat a file. The first real-account validation must confirm the 115 listing order is stable during a scan. Until that is verified, users should avoid adding, uploading, deleting, moving or renaming files during a scan; a changed total, unknown item, duplicate or short page is treated as incomplete. Do not advertise a mathematically exact whole-drive sample if the listing changed during traversal.
@@ -57,4 +63,4 @@ The isolated store now implements this boundary: task-level metadata and the glo
 
 Automated tests include source-level player startup, synthetic streaming and IndexedDB page-commit checks, provisional playback filtering, bounded replenishment, account isolation, and locked-window preservation. Synthetic tests cannot establish actual 115 login status, real API rate limits or browser playback success.
 
-Validation boundary: the local headless Chrome DOM smoke verified both launchers and the full-disk dialog, without uncaught initialization errors. Automated tests and the static installation-center build pass. Actual logged-in 115 scans, real playback and API rate limiting remain unverified; those limitations apply to the public-test release.
+Validation boundary: the local headless Chrome DOM smoke verified both launchers and the full-disk dialog, without uncaught initialization errors. The v1.9.0 local development candidate passes 192/192 automated tests and the static installation-center build. It is not published. Actual logged-in 115 scans, real playback and API rate limiting remain unverified and must be checked before public release.

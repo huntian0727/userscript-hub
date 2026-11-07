@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（全盘探索独立版）
 // @namespace    local.115.multiview.full-disk
-// @version      1.8.4
+// @version      1.9.0
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com

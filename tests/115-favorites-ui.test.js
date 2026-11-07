@@ -12,9 +12,9 @@ const source = fs.readFileSync(
 ).replace(/\r\n/g, '\n');
 test('115 multiview userscript parses and exposes multi-folder favorite controls', () => {
   assert.doesNotThrow(() => new vm.Script(source));
-  assert.ok(source.includes('// @version      1.8.4'));
-  assert.match(source, /^\/\/ @version\s+1\.8\.4$/m);
-  assert.equal(source.split("const VERSION = '1.8.4';").length - 1, 2);
+  assert.ok(source.includes('// @version      1.9.0'));
+  assert.match(source, /^\/\/ @version\s+1\.9\.0$/m);
+  assert.equal(source.split("const VERSION = '1.9.0';").length - 1, 2);
   assert.match(source, /id = 'btnFavorites'/);
   assert.match(source, /session\.favoritesButton\.textContent = '★ 收藏 ' \+ favoriteCount/);
   assert.match(source, /点击顶部“★ 收藏”即可查看/);
@@ -175,10 +175,11 @@ test('directory-page progress includes active-directory counts already committed
   assert.match(source, /已保存文件 ' \+ progress\.filesStored/);
 });
 
-test('v1.0.0 switches the entire active grid into one shared same-folder pool', () => {
+test('v1.0.0 switches all unlocked visible cells into one shared same-folder pool', () => {
   assert.match(source, /session\.sameFolderMode = state/);
   assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
-  assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
+  assert.match(source, /const targetCells = cells\.filter\(item => !item\.locked\)/);
+  assert.match(source, /for \(const target of targetCells\) clearCellForSameFolder\(session, target\)/);
   assert.match(source, /function fillSameFolderCells\(session, state\)/);
   assert.match(source, /state\.targetSlotIds/);
   assert.match(source, /state\.pendingSlotIds/);
@@ -195,13 +196,18 @@ test('single next, all swap and new round stay inside the active shared folder p
   assert.match(source, /state\.playedPickcodes\.add\(key\)/);
 });
 
-test('same-folder controls remain available on empty cells to exit the page-wide mode', () => {
+test('same-folder controls can enter from full-disk exploration and remain available on empty cells to exit', () => {
   assert.match(source, /cell\.sameFolderButton\.hidden = !cell\.item && !enabled/);
-  assert.match(source, /const fullDiskMode = Boolean\(session\.fullDiskSource\)/);
-  assert.match(source, /cell\.sameFolderButton\.disabled = enabled \? false : \(!hasFolder \|\| fullDiskMode\)/);
-  assert.match(source, /全盘随机探索模式暂不支持同目录索引切换/);  assert.match(source, /if \(currentMode && currentMode\.active &&[\s\S]*?exitSameFolderPlayback\(session\)/);
+  assert.match(source, /cell\.sameFolderButton\.disabled = enabled \? false : !hasFolder/);
+  assert.match(source, /按需建立该目录索引/);
+  assert.doesNotMatch(source, /全盘随机探索模式暂不支持同目录索引切换/);
+  assert.match(source, /const targetCells = cells\.filter\(item => !item\.locked\)/);
+  assert.match(source, /if \(session\.sameFolderMode && session\.sameFolderMode\.active\) syncSameFolderLayout\(session\)/);
+  assert.match(source, /if \(restoreGlobal && session\.fullDiskSource\) refillSessionFullDisk\(session\)/);
+  assert.match(source, /if \(currentMode && currentMode\.active &&[\s\S]*?exitSameFolderPlayback\(session\)/);
   assert.ok(source.includes('function exitSameFolderPlayback(session, restoreGlobal = true)'));
 });
+
 test('folder index pages feed the shared candidate pool incrementally', () => {
   assert.match(source, /async function notifyScanPage\(job, page\)/);
   assert.match(source, /await listener\(page\)/);
@@ -436,12 +442,11 @@ test('double-click cancels a pending single-click action before it changes playb
 
 
 
-test('v1.0.0 same-folder entry remains an explicit page-wide switch across every visible cell', () => {
+test('v1.0.0 same-folder entry switches only unlocked visible cells and preserves locked windows', () => {
   assert.match(source, /const cells = session\.cells\.filter\(item => item && item\.index < session\.layoutCount\)/);
-  assert.match(source, /for \(const target of cells\) clearCellForSameFolder\(session, target\)/);
+  assert.match(source, /const targetCells = cells\.filter\(item => !item\.locked\)/);
+  assert.match(source, /for \(const target of targetCells\) clearCellForSameFolder\(session, target\)/);
 });
-
-
 test('smart aspect layout fills a container edge-to-edge without overlaps across grid sizes and aspect mixes', () => {
   const start = source.indexOf('  const ASPECT_GRID_TRACKS = 240;');
   const end = source.indexOf('  function applyLayoutPositions(session) {', start);
@@ -1055,7 +1060,7 @@ test('v1.0.0 locked cells are preserved by manual next and batch replacement', (
 });
 
 
-test('v1.0.0 same-folder candidate pool de-duplicates videos and respects locked slots', () => {
+test('v1.0.0 same-folder candidate pool de-duplicates videos and never replaces locked slots', () => {
   const start = source.indexOf('  function sameFolderCells(session, state = session.sameFolderMode) {');
   const middle = source.indexOf('  async function appendSameFolderCandidates(session, state, scanId) {', start);
   const swapStart = source.indexOf('  function swapSameFolderCell(session, cell) {');
@@ -1085,9 +1090,10 @@ test('v1.0.0 same-folder candidate pool de-duplicates videos and respects locked
   vm.createContext(context);
   vm.runInContext(code, context);
 
+  const lockedVideo = { pickcode: 'keep-locked', parentId: '999' };
   const lockedCell = {
     index: 0, slotId: 'slot-1', locked: true,
-    item: null, name: { textContent: '', title: '' }, quality: { textContent: '' }
+    item: lockedVideo, name: { textContent: '', title: '' }, quality: { textContent: '' }
   };
   const openCell = {
     index: 1, slotId: 'slot-2', locked: false,
@@ -1111,26 +1117,23 @@ test('v1.0.0 same-folder candidate pool de-duplicates videos and respects locked
     roundMessage: ''
   };
 
-  assert.equal(context.__fillSameFolderCells(session, state), 2);
-  assert.deepEqual(replacements.map(item => item.pickcode), ['same-1', 'same-2']);
-  assert.equal(new Set(replacements.map(item => item.pickcode)).size, 2);
+  assert.equal(context.__fillSameFolderCells(session, state), 1);
+  assert.deepEqual(replacements.map(item => item.pickcode), ['same-1']);
+  assert.equal(replacements[0].slotId, 'slot-2');
+  assert.equal(lockedCell.item, lockedVideo);
+  assert.equal(lockedCell.locked, true);
   assert.equal(state.playedPickcodes.has('same-1'), true);
-  assert.equal(state.playedPickcodes.has('same-2'), true);
-  assert.equal(state.availableItems.length, 1);
-  assert.equal(state.roundPoolSize, 3);
-
-  const beforeLocked = lockedCell.item;
-  assert.equal(context.__swapSameFolderCell(session, lockedCell), false);
-  assert.equal(lockedCell.item, beforeLocked);
+  assert.equal(state.availableItems.length, 3);
   assert.equal(state.pendingSlotIds.size, 0);
 
+  assert.equal(context.__swapSameFolderCell(session, lockedCell), false);
+  assert.equal(lockedCell.item, lockedVideo);
   assert.equal(context.__swapAllSameFolderUnlocked(session), undefined);
-  assert.equal(replacements.length, 3);
-  assert.equal(replacements[2].slotId, 'slot-2');
-  assert.equal(replacements[2].pickcode, 'same-3');
-  assert.equal(lockedCell.item, beforeLocked);
+  assert.equal(replacements.length, 2);
+  assert.equal(replacements[1].slotId, 'slot-2');
+  assert.equal(replacements[1].pickcode, 'same-2');
+  assert.equal(lockedCell.item, lockedVideo);
 });
-
 
 test('v1.0.0 smart layout reflow is debounced and coalesced through animation frames', () => {
   const start = source.indexOf('  function scheduleLayoutReflow(session, delay = 90) {');

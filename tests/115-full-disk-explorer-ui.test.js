@@ -17,7 +17,7 @@ test('the player and directory manager have separate DOM hosts', () => {
     'local-115-multiview-full-disk-v1-6'
   ]);
   assert.equal(new Set(hostIds).size, 2);
-  assert.match(source, /const VERSION = '1\.8\.4';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
+  assert.match(source, /const VERSION = '1\.9\.0';\s*const HOST_ID = 'local-115-index-verifier-full-disk-v1-6';/);
   assert.match(source, /const TOOLBAR_REVEAL_ZONE_PX = 60;\s*const HOST_ID = 'local-115-multiview-full-disk-v1-6';/);
 });
 
@@ -59,10 +59,11 @@ test('quick exploration uses one classification for displayed rows and playable 
   assert.equal(inspect({ id: '4', name: '课程.mp4', pickcode: 'video004', playable: true }).label, '不符合本次筛选');
 });
 
-test('full-disk playback avoids index-only same-folder mode without breaking folder navigation', () => {
+test('full-disk playback can enter on-demand same-folder mode without indexing the whole drive', () => {
   assert.match(source, /const fullDiskMode = Boolean\(session\.fullDiskSource\)/);
-  assert.match(source, /cell\.sameFolderButton\.disabled = enabled \? false : \(!hasFolder \|\| fullDiskMode\)/);
-  assert.match(source, /全盘随机探索模式暂不支持同目录索引切换/);
+  assert.match(source, /cell\.sameFolderButton\.disabled = enabled \? false : !hasFolder/);
+  assert.match(source, /按需建立该目录索引/);
+  assert.doesNotMatch(source, /全盘随机探索模式暂不支持同目录索引切换/);
   assert.match(source, /在新标签页打开视频所在文件夹/);
 });
 

@@ -36,9 +36,9 @@
     {
       "id": "115-multiview-full-disk",
       "displayName": "115 多画面播放器 · 随机探索",
-      "description": "全盘探索支持从 115 的关键词搜索结果随机抽取，显示抽取进度，长时间无匹配时可继续抽取或调整筛选。",
+      "description": "全盘探索支持从 115 的关键词搜索结果随机抽取；新增从全盘样本按需切换到视频所在目录的整页同目录随机播放，不要求提前扫描整个网盘，锁定窗口保持不变。",
       "source": "userscripts/115-multiview-full-disk.user.js",
-      "channel": "公开测试版 · v1.8.4",
+      "channel": "本地开发候选 · v1.9.0（未发布）",
       "enabled": true
     },
     {
