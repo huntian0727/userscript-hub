@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.11
+// @version      2.0.12
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -1327,7 +1327,7 @@
       await done;
       return sortProfilesByOrder(items);
     }
-    async function saveProfile(accountId, profile = {}) {
+    async function saveProfile(accountId, profile = {}, { createOnly = false } = {}) {
       const owner = normalizeAccountId(accountId);
       const profileId = String(profile.profileId || '').trim();
       const name = String(profile.name || '').trim();
@@ -1339,6 +1339,10 @@
       const store = tx.objectStore('profiles');
       const existing = await requestPromise(store.get([owner, profileId]));
       const existingProfiles = await requestPromise(store.index('byAccount').getAll(only(owner)));
+      if (createOnly && (existing || existingProfiles.some(item => item.name === name))) {
+        await done;
+        throw new Error('已有同名方案，请输入一个新名称');
+      }
       sortProfilesByOrder(existingProfiles);
       let sortOrder = 1;
       for (const item of existingProfiles) {
@@ -1360,6 +1364,20 @@
       await done;
       return saved;
     }
+
+    async function updateProfileFilters(accountId, profileId, filters) {
+      const owner = normalizeAccountId(accountId);
+      const normalized = normalizeFilters(filters);
+      const db = await openDatabase();
+      const tx = db.transaction('profiles', 'readwrite');
+      const done = transactionPromise(tx);
+      const store = tx.objectStore('profiles');
+      const existing = await requestPromise(store.get([owner, profileId]));
+      if (existing) store.put({ ...existing, filters: normalized });
+      await done;
+      if (!existing) throw new Error('方案已不存在，请重新选择');
+    }
+
     async function deleteProfile(accountId, profileId) {
       const owner = normalizeAccountId(accountId);
       const id = String(profileId || '').trim();
@@ -1973,6 +1991,7 @@
       clearRecentDirectories,
       listProfiles,
       saveProfile,
+      updateProfileFilters,
       deleteProfile,
       reorderProfiles,
       exportAccountData,
@@ -2428,7 +2447,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.11';
+  const VERSION = '2.0.12';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5133,7 +5152,7 @@
 
   function createDataManagementSection(session) {
     const section = element('details', 'data-management');
-    const summary = element('summary', 'data-management-summary', '数据管理（JSON备份与恢复）');
+    const summary = element('summary', 'data-management-summary', '备份与恢复');
     const actions = element('div', 'data-management-actions');
     const exportButton = element('button', 'toolbar-button backup-export', '导出JSON');
     exportButton.type = 'button';
@@ -5181,7 +5200,7 @@
       return input;
     };
     session.filterInputs = {
-      keyword: addField('包含关键词', 'filter-keyword', 'search', '视频名或文件夹名；多个词都需匹配'),
+      keyword: addField('包含关键词', 'filter-keyword', 'search', '不限'),
       excludeKeyword: addField('排除关键词', 'filter-exclude-keyword', 'search', '命中任意词即排除；多个词用空格分隔'),
       folderPath: addField('文件夹路径', 'filter-folder', 'text', '例如：科幻/星际（包含其子文件夹）'),
       minSizeMB: addField('最小大小（MB）', 'filter-min-size', 'number', '不限'),
@@ -5201,10 +5220,15 @@
     session.filterInputs.favoritesOnly = element('input', 'filter-favorites-only');
     session.filterInputs.favoritesOnly.type = 'checkbox';
     favoriteLabel.append(session.filterInputs.favoritesOnly, element('span', '', '仅显示收藏'));
+    for (const input of Object.values(session.filterInputs)) input.readOnly = true;
+    session.filterInputs.favoritesOnly.disabled = true;
 
     session.filterMessage = element('small', 'filter-message');
     const dataManagement = createDataManagementSection(session);
-    panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);
+    const filterSection = element('section', 'drawer-settings-section');
+    filterSection.append(element('h3', 'settings-section-title', '当前筛选条件'),
+      fields, favoriteLabel, session.filterMessage);
+    panel.append(filterSection, dataManagement);
     writeFilterControls(session, session.filters);
     return panel;
 
@@ -7640,8 +7664,9 @@
     fullDiskMetricValues.videoLabel.textContent = source ? fullDiskCountLabel(source) : '115 视频范围';
     fullDiskMetricValues.samples.textContent = formatFullDiskCount(remaining);
     fullDiskProgressBar.classList.toggle('is-active', Boolean(source?.refilling));
-    fullDiskStatus.textContent = source      ? fullDiskStateLabel(source) + (remaining ? ' · 待播 ' + formatFullDiskCount(remaining) + ' 个' : '')
-      : '开始后从 115 的视频列表抽取，第一格就绪即播放。';
+    fullDiskMetrics.hidden = !source;
+    fullDiskProgressTrack.hidden = !source?.refilling;
+    fullDiskStatus.textContent = source ? fullDiskStateLabel(source) : '第一条视频就绪后即开始播放。';
     fullDiskWarning.textContent = source?.error || '';
     fullDiskWarning.hidden = !fullDiskWarning.textContent;
   }
@@ -7900,9 +7925,8 @@
     exploreScope = scope === 'folders' ? 'folders' : 'full-disk';
     const wholeDisk = exploreScope === 'full-disk';
     fullDiskModeInput.checked = wholeDisk;
-    fullDiskControls.hidden = false;
-    folderSelectionPanel.classList.toggle('is-disabled', wholeDisk);
-    folderPickerOpenButton.disabled = wholeDisk;
+    folderModeInput.checked = !wholeDisk;
+    folderSelectionPanel.hidden = wholeDisk;
     if (wholeDisk) folderPickerPanel.hidden = true;
     if (!active && fullDiskAccountId && !fullDiskOverlay.hidden) {
       const filters = readFullDiskFilters();
@@ -7924,9 +7948,12 @@
     const revision = ++exploreDialogRevision;
     fullDiskAccountId = null;
     fullDiskOverlay.hidden = false;
-    exploreScopePicker.hidden = Boolean(active);
-    fullDiskFields.hidden = Boolean(active);
-    profileControls.hidden = Boolean(active);
+    exploreSettings.hidden = Boolean(active);
+    exploreSettings.scrollTop = 0;
+    dialogProfiles = [];
+    renderDialogProfiles();
+    closeProfileNameForm();
+    profileMessage.textContent = '';
     selectExploreScope(scope);
     exploreStatus.textContent = '正在读取探索设置…';
     fullDiskStartButton.disabled = true;
@@ -7974,8 +8001,8 @@
       await refreshDialogProfiles();
     } catch (error) {
       if (revision !== exploreDialogRevision) return;
-      exploreStatus.textContent = String(error?.message || error);
-      fullDiskWarning.textContent = exploreStatus.textContent;
+      exploreStatus.textContent = '';
+      fullDiskWarning.textContent = String(error?.message || error);
       fullDiskWarning.hidden = false;
     }
   }
@@ -8690,14 +8717,18 @@
     .favorite-message.is-error{color:#ff9c9c}
     .panel-empty{margin:0;padding:8px;color:#aab5c7;font-size:12px}
     .filter-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+    .drawer-settings-section{display:grid;gap:12px}
+    .drawer-settings-section .filter-field:nth-child(-n+2){grid-column:1/-1}
+    .settings-section-title{margin:0;color:#edf5ff;font-size:14px;line-height:1.4;font-weight:750}
     .filter-field{display:flex;flex-direction:column;gap:5px;min-width:0;color:#aab5c7;font-size:11px}
-    .filter-field input,.filter-schemes input,.filter-schemes select{width:100%;min-width:0;padding:8px 9px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
+    .filter-field input,.filter-schemes input,.filter-schemes select{box-sizing:border-box;width:100%;min-width:0;padding:8px 9px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
     .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}
     .filter-check input{accent-color:#4f8df5}
     .filter-schemes{display:flex;gap:7px;flex-wrap:wrap}
     .filter-profile-select,.filter-profile-name{flex:1 1 150px;max-width:none}
     .filter-actions{display:flex;gap:6px;flex-wrap:wrap}
-    .filter-message{min-height:14px;color:#9aabc0;font-size:11px}
+    .filter-message{color:#9aabc0;font-size:11px}
+    .filter-message:empty{display:none}
     .filter-message.is-error{color:#ff9c9c}
     .data-management{margin-top:10px;padding-top:10px;border-top:1px solid #2a394c}
     .data-management-summary{cursor:pointer;color:#dce6f5;font-size:12px;font-weight:700;padding:5px 0}
@@ -8727,7 +8758,6 @@
       .tools-drawer{width:min(380px,96vw)}
       .player-exit-button{top:50px;right:8px;min-height:32px;padding:6px 9px;font-size:11px}
     }
-    .explore-scope-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
     .explore-scope-card{display:grid;gap:5px;text-align:left;padding:12px;border:1px solid #42566b;border-radius:9px;background:#1a2635;color:#edf5ff}
     .explore-scope-card[aria-pressed="true"]{border-color:#70c7ac;background:#183632}
     .explore-scope-card span{font-size:12px;line-height:1.5;color:#b8c8da}
@@ -8753,33 +8783,40 @@
     @media(max-width:560px){.collection-filters{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.collection-filters input{grid-column:1/-1}.collection-row{align-items:flex-start}}
     .full-disk-overlay{pointer-events:auto;position:absolute;inset:0;z-index:180;display:flex;align-items:center;justify-content:center;padding:18px;background:#05080de8}
     .full-disk-overlay[hidden]{display:none!important}
-    .full-disk-dialog{width:min(760px,96vw);max-height:92vh;overflow:auto;display:flex;flex-direction:column;gap:15px;padding:22px;border:1px solid #36546a;border-radius:16px;background:linear-gradient(145deg,#111b27,#101721);box-shadow:0 24px 90px #000c;color:#edf5ff}
-    .full-disk-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .full-disk-dialog{box-sizing:border-box;width:min(820px,100%);max-height:min(92vh,100%);overflow:hidden;display:flex;flex-direction:column;border:1px solid #36546a;border-radius:14px;background:#101923;box-shadow:0 24px 90px #000c;color:#edf5ff}
+    .full-disk-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 22px;border-bottom:1px solid #2c3e50;flex:none}
     .full-disk-title{font-size:18px;font-weight:900;letter-spacing:.2px}.full-disk-version{margin-left:auto;font-size:11px;color:#8fa7bc;white-space:nowrap}
     .full-disk-close{border:1px solid #40566a;border-radius:8px;padding:7px 11px;background:#202d3a;color:#e7f0fa}
-    .full-disk-hint{font-size:12px;line-height:1.75;color:#a8b9cc}
+    .explore-settings{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:24px;padding:20px 22px;min-height:0;overflow:auto;overscroll-behavior:contain;align-items:start}
+    .explore-settings[hidden]{display:none}
+    .explore-settings-main,.explore-filter-section{display:grid;gap:14px;min-width:0}
+    .explore-settings-main{gap:20px}
+    .explore-filter-section{padding-top:16px;border-top:1px solid #2c3e50}
     .full-disk-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
     .full-disk-field{display:flex;flex-direction:column;gap:6px;min-width:0;color:#b8c8da;font-size:12px}
-    .full-disk-field input{width:100%;min-width:0;border:1px solid #35475a;border-radius:8px;padding:9px 10px;background:#0a121c;color:#edf5ff;font:inherit;font-size:13px;outline:none}
+    .full-disk-field input{box-sizing:border-box;width:100%;min-width:0;border:1px solid #35475a;border-radius:8px;padding:9px 10px;background:#0a121c;color:#edf5ff;font:inherit;font-size:13px;outline:none}
     .full-disk-field input:focus{border-color:#5ba7c8;box-shadow:0 0 0 2px #2b819b33}
     .full-disk-checkbox{display:flex;align-items:center;gap:8px;grid-column:1/-1;padding:3px 0;color:#d8e6f4;font-size:12px}
     .full-disk-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .explore-footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 22px;border-top:1px solid #2c3e50;background:#0d1620;flex:none}
+    .explore-footer>.full-disk-actions{justify-content:flex-end}
     .full-disk-action{border:1px solid #42566b;border-radius:8px;padding:9px 13px;background:#243344;color:#eaf3fc;font-size:12px;font-weight:800}
-    .full-disk-primary{border-color:#3d9b79;background:linear-gradient(135deg,#17694e,#1c6a78);color:#f0fff8}
+    .full-disk-primary{border-color:#459e81;background:#215f4f;color:#f0fff8}
     .full-disk-danger{border-color:#8b4b54;background:#4b2831;color:#ffe6e9}
     .full-disk-action:disabled{opacity:.4;cursor:not-allowed}
-    .full-disk-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-    .full-disk-metric{min-width:0;padding:11px;border:1px solid #2c3e50;border-radius:9px;background:#0b131d}
-    .full-disk-metric strong{display:block;overflow:hidden;text-overflow:ellipsis;font-size:19px;font-variant-numeric:tabular-nums;color:#f2f7ff}
+    .full-disk-metrics{display:flex;gap:8px 16px;flex-wrap:wrap}
+    .full-disk-metric{display:flex;flex-direction:row-reverse;align-items:baseline;gap:5px}
+    .full-disk-metric strong{font-size:12px;font-variant-numeric:tabular-nums;color:#f2f7ff}
     .full-disk-metric span{font-size:11px;color:#90a4b9}
     .full-disk-track{height:7px;overflow:hidden;border-radius:20px;background:#263746}
     .full-disk-progress{height:100%;width:0;border-radius:20px;background:linear-gradient(90deg,#36b98a,#58aee0)}
     .full-disk-progress.is-active{width:34%;animation:full-disk-progress-move 1.35s ease-in-out infinite alternate}
     @keyframes full-disk-progress-move{from{transform:translateX(-12%)}to{transform:translateX(205%)}}
-    .full-disk-status{min-height:30px;white-space:pre-line;overflow-wrap:anywhere;font-size:13px;line-height:1.7;color:#d6e4f2}
-    .full-disk-warning{padding:10px 12px;border:1px solid #795e38;border-radius:8px;background:#352918;color:#ffdda3;font-size:12px;line-height:1.65;white-space:pre-line}
-    .full-disk-warning[hidden]{display:none!important}
-    .folder-selection-panel,.folder-picker-panel,.explore-profile-controls{display:grid;gap:10px;padding:12px;border:1px solid #2c4055;border-radius:10px;background:#0b131d}
+    .full-disk-status{white-space:pre-line;overflow-wrap:anywhere;font-size:12px;line-height:1.55;color:#c2d1e1}
+    .full-disk-status:empty{display:none}
+    .full-disk-warning{padding:8px 10px;max-height:6em;overflow:auto;border:1px solid #795e38;border-radius:7px;background:#352918;color:#ffdda3;font-size:12px;line-height:1.5;white-space:pre-line;overflow-wrap:anywhere}
+    .full-disk-warning[hidden],.full-disk-metrics[hidden],.full-disk-track[hidden],.folder-selection-panel[hidden],.folder-picker-panel[hidden]{display:none}
+    .folder-selection-panel,.folder-picker-panel,.explore-profile-controls{display:grid;gap:10px;padding:12px;border:1px solid #2c3e50;border-radius:9px;background:#0b131d;min-width:0}
     .folder-selection-row,.folder-picker-row{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:7px 0;border-bottom:1px solid #263746}
     .folder-selection-row span{min-width:0;overflow-wrap:anywhere;font-size:12px;color:#c9d8e8}
     .folder-picker-header,.explore-profile-header{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800}
@@ -8788,14 +8825,34 @@
     .folder-picker-recursive{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:11px;color:#b7c8d9}
     .folder-picker-empty{padding:14px;color:#8fa7bc;font-size:12px}
     .explore-profile-controls select,.explore-profile-controls input{min-width:0;padding:8px;border:1px solid #35475a;border-radius:7px;background:#101925;color:#edf5ff;font:inherit;font-size:12px}
-    .folder-selection-panel.is-disabled{opacity:.45}
-    .folder-selection-panel.is-disabled button{cursor:not-allowed}
-    .explore-scope-picker{display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid #354b60;border-radius:10px;background:#111e2b}
-    .explore-full-disk-toggle{font-size:13px;font-weight:700;color:#e4eef8}
-    .explore-full-disk-toggle input{width:17px;height:17px;accent-color:#52b89a}
-    .explore-full-disk-controls,.explore-quick-controls{display:grid;gap:12px}
-    .explore-quick-controls .full-disk-status:empty{display:none}
-    @media(max-width:560px){.full-disk-dialog{padding:15px}.full-disk-fields{grid-template-columns:1fr}.full-disk-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}`;
+    .explore-scope-picker{display:grid;gap:10px;min-width:0;padding:0;margin:0;border:0}
+    .explore-scope-picker legend{padding:0;margin-bottom:10px}
+    .explore-scope-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .explore-scope-option{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid #354b60;border-radius:8px;background:#131f2b;cursor:pointer}
+    .explore-scope-option:has(input:checked){border-color:#529c86;background:#172d2b}
+    .explore-scope-option input{flex:none;margin:2px 0 0;accent-color:#52b89a}
+    .explore-scope-copy{display:grid;gap:4px;font-size:12px}
+    .explore-scope-copy small{color:#b4c4d5;font-size:11px;line-height:1.45}
+    .folder-selection-panel>.full-disk-action{justify-self:start}
+    .folder-picker-path{overflow-wrap:anywhere;min-width:0}
+    .folder-picker-header button{flex:none}
+    .explore-profile-actions{display:flex;flex-wrap:wrap;gap:6px}
+    .explore-profile-actions>.full-disk-danger{margin-left:auto}
+    .explore-profile-new{display:grid;gap:8px;border-top:1px solid #2c3e50;padding-top:8px}
+    .explore-profile-new[hidden]{display:none}
+    .explore-profile-new>.full-disk-actions{justify-content:flex-end}
+    .explore-full-disk-controls{display:grid;gap:5px;min-width:0}
+    .full-disk-dialog button:focus-visible,.full-disk-dialog select:focus-visible,
+    .explore-scope-option:has(input:focus-visible){outline:2px solid #8fc9ed;outline-offset:2px}
+    @media(max-width:650px){
+      .full-disk-overlay{padding:10px}
+      .full-disk-head,.explore-settings,.explore-footer{padding-inline:14px}
+      .explore-settings{grid-template-columns:minmax(0,1fr);gap:16px;padding-block:14px}
+      .explore-footer{grid-template-columns:minmax(0,1fr);gap:8px}
+      .explore-footer>.full-disk-actions>.full-disk-primary{flex:1}
+    }
+    @media(max-width:380px){.explore-scope-options{grid-template-columns:minmax(0,1fr)}}
+    @media(prefers-reduced-motion:reduce){.full-disk-progress.is-active,.tools-drawer{animation:none}}`;
   const entryActions = element('div', 'entry-actions');
   const launcher = element('button', 'launcher', '随机探索');
   launcher.type = 'button';
@@ -8817,19 +8874,25 @@
   fullDiskCloseButton.setAttribute('aria-label', '收起随机探索窗口');
   fullDiskHeader.append(fullDiskTitle, fullDiskVersion, fullDiskCloseButton);
 
-  const exploreScopePicker = element('label', 'full-disk-checkbox explore-full-disk-toggle');
-  const fullDiskModeInput = element('input');
-  fullDiskModeInput.type = 'checkbox';
-  fullDiskModeInput.setAttribute('aria-label', '全盘随机');
-  fullDiskModeInput.onchange = () => selectExploreScope(fullDiskModeInput.checked ? 'full-disk' : 'folders');
-  exploreScopePicker.append(
-    fullDiskModeInput,
-    element('span', '', '全盘随机（勾选后覆盖整个网盘，无需选择文件夹）')
-  );
-  const exploreHint = element('div', 'full-disk-hint',
-    '默认从当前文件夹开始；可添加多个文件夹。勾选“全盘随机”后将忽略文件夹选择。两种模式共用筛选、保存方案和多画面播放。');
-  const fullDiskHint = element('div', 'full-disk-hint',
-    '首次启动直接从115读取视频。第一个视频就绪后立即进入播放器，其他候选在后台继续补充。');
+  const exploreScopePicker = element('fieldset', 'explore-scope-picker');
+  exploreScopePicker.append(element('legend', 'settings-section-title', '探索范围'));
+  const scopeOptions = element('div', 'explore-scope-options');
+  function addExploreScopeOption(scope, title, description) {
+    const label = element('label', 'explore-scope-option');
+    const input = element('input');
+    input.type = 'radio';
+    input.name = '115-explore-scope';
+    input.value = scope;
+    input.onchange = () => { if (input.checked) selectExploreScope(scope); };
+    const copy = element('span', 'explore-scope-copy');
+    copy.append(element('strong', '', title), element('small', '', description));
+    label.append(input, copy);
+    scopeOptions.append(label);
+    return input;
+  }
+  const folderModeInput = addExploreScopeOption('folders', '指定文件夹', '选择一个或多个目录');
+  const fullDiskModeInput = addExploreScopeOption('full-disk', '整个网盘', '从全盘随机抽取视频');
+  exploreScopePicker.append(scopeOptions);
   const fullDiskFields = element('div', 'full-disk-fields');
   function createFullDiskField(labelText, input) {
     const label = element('label', 'full-disk-field');
@@ -9008,29 +9071,45 @@
 
 
   const profileControls = element('section', 'explore-profile-controls');
-  const profileHeader = element('div', 'explore-profile-header', '筛选方案');
+  const profileHeader = element('h3', 'settings-section-title', '筛选方案');
   const profileSelect = element('select', 'explore-profile-select');
   profileSelect.setAttribute('aria-label', '选择已保存的探索方案');
+  const profileSaveButton = element('button', 'full-disk-action', '保存');
+  const profileSaveAsButton = element('button', 'full-disk-action', '另存');
+  const profileDeleteButton = element('button', 'full-disk-action full-disk-danger', '删除');
+  [profileSaveButton, profileSaveAsButton, profileDeleteButton].forEach(button => { button.type = 'button'; });
+  const profileActions = element('div', 'explore-profile-actions');
+  profileActions.append(profileSaveButton, profileSaveAsButton, profileDeleteButton);
+
+  const profileNameForm = element('form', 'explore-profile-new');
+  profileNameForm.id = 'explore-profile-new';
+  profileNameForm.hidden = true;
+  profileSaveAsButton.setAttribute('aria-expanded', 'false');
+  profileSaveAsButton.setAttribute('aria-controls', profileNameForm.id);
   const profileNameInput = element('input', 'explore-profile-name');
   profileNameInput.type = 'text';
   profileNameInput.maxLength = 40;
-  profileNameInput.placeholder = '输入方案名称后保存';
-  const profileLoadButton = element('button', 'full-disk-action', '应用');
-  profileLoadButton.type = 'button';
-  const profileSaveButton = element('button', 'full-disk-action full-disk-primary', '保存方案');
-  profileSaveButton.type = 'button';
-  const profileDeleteButton = element('button', 'full-disk-action', '删除');
-  profileDeleteButton.type = 'button';
-  const profileUpButton = element('button', 'full-disk-action', '上移');
-  profileUpButton.type = 'button';
-  const profileDownButton = element('button', 'full-disk-action', '下移');
-  profileDownButton.type = 'button';
+  profileNameInput.placeholder = '输入名称';
+  const profileCancelButton = element('button', 'full-disk-action', '取消');
+  profileCancelButton.type = 'button';
+  const profileCreateButton = element('button', 'full-disk-action full-disk-primary', '保存新方案');
+  profileCreateButton.type = 'submit';
+  const profileNameActions = element('div', 'full-disk-actions');
+  profileNameActions.append(profileCancelButton, profileCreateButton);
+  profileNameForm.append(createFullDiskField('新方案名称', profileNameInput), profileNameActions);
   const profileMessage = element('div', 'full-disk-status');
-  const profileActions = element('div', 'full-disk-actions');
-  profileActions.append(profileSelect, profileLoadButton, profileNameInput, profileSaveButton,
-    profileDeleteButton, profileUpButton, profileDownButton);
-  profileControls.append(profileHeader, profileActions, profileMessage);
+  profileMessage.setAttribute('role', 'status');
+  profileControls.append(profileHeader, profileSelect, profileActions, profileNameForm, profileMessage);
   let dialogProfiles = [];
+  let profileBusy = false;
+
+  function updateProfileButtons() {
+    const unavailable = profileBusy || !fullDiskAccountId;
+    const selected = dialogProfiles.some(item => item.profileId === profileSelect.value);
+    profileSelect.disabled = unavailable;
+    profileSaveButton.disabled = profileDeleteButton.disabled = unavailable || !selected;
+    profileSaveAsButton.disabled = profileCreateButton.disabled = unavailable;
+  }
 
   function renderDialogProfiles(selectedId = '') {
     profileSelect.replaceChildren();
@@ -9043,87 +9122,128 @@
       profileSelect.append(profileOption);
     }
     profileSelect.value = selectedId && dialogProfiles.some(item => item.profileId === selectedId) ? selectedId : '';
-    const index = dialogProfiles.findIndex(item => item.profileId === profileSelect.value);
-    profileDeleteButton.disabled = index < 0;
-    profileUpButton.disabled = index <= 0;
-    profileDownButton.disabled = index < 0 || index >= dialogProfiles.length - 1;
+    updateProfileButtons();
   }
 
-  async function refreshDialogProfiles(selectedId = '') {
-    if (!fullDiskAccountId) return;
-    dialogProfiles = await preferenceStore.listProfiles(fullDiskAccountId);
-    renderDialogProfiles(selectedId);
+  async function refreshDialogProfiles() {
+    const accountId = fullDiskAccountId;
+    const revision = exploreDialogRevision;
+    if (!accountId) return;
+    const profiles = await preferenceStore.listProfiles(accountId);
+    if (revision !== exploreDialogRevision || accountId !== fullDiskAccountId) return;
+    dialogProfiles = profiles;
+    renderDialogProfiles();
   }
 
-  profileLoadButton.onclick = async () => {
+  function closeProfileNameForm() {
+    profileNameForm.hidden = true;
+    profileSaveAsButton.setAttribute('aria-expanded', 'false');
+    profileNameInput.value = '';
+  }
+
+  async function runProfileAction(label, action) {
+    const accountId = fullDiskAccountId;
+    const revision = exploreDialogRevision;
+    if (!accountId || profileBusy) return;
+    const isCurrent = () => revision === exploreDialogRevision && accountId === fullDiskAccountId;
+    profileBusy = true;
+    updateProfileButtons();
+    try {
+      const { selectedId, message, closeNameForm } = await action(accountId);
+      const profiles = await preferenceStore.listProfiles(accountId);
+      if (!isCurrent()) return;
+      dialogProfiles = profiles;
+      renderDialogProfiles(selectedId);
+      if (closeNameForm) closeProfileNameForm();
+      profileMessage.textContent = message;
+    } catch (error) {
+      if (isCurrent()) profileMessage.textContent = label + '失败：' + String(error?.message || error);
+    } finally {
+      profileBusy = false;
+      updateProfileButtons();
+    }
+  }
+
+  profileSelect.onchange = () => {
+    if (profileBusy || !fullDiskAccountId) return;
+    closeProfileNameForm();
+    const profile = dialogProfiles.find(item => item.profileId === profileSelect.value);
+    if (!profile) {
+      profileMessage.textContent = '';
+      updateProfileButtons();
+      return;
+    }
+    writeFullDiskFilters(profile.filters);
+    selectExploreScope(profile.filters.sourceMode);
+    const filters = readFullDiskFilters();
+    const reorderedIds = [profile.profileId, ...dialogProfiles.filter(item => item !== profile).map(item => item.profileId)];
+    profileMessage.textContent = '已载入「' + profile.name + '」';
+    void runProfileAction('记录已选方案', async accountId => {
+      await preferenceStore.savePlayerSettings(accountId, { filters });
+      await preferenceStore.reorderProfiles(accountId, reorderedIds);
+      return { selectedId: profile.profileId, message: '已载入「' + profile.name + '」' };
+    });
+  };
+  profileSaveButton.onclick = () => {
     const profile = dialogProfiles.find(item => item.profileId === profileSelect.value);
     if (!profile) return;
-    try {
-      writeFullDiskFilters(profile.filters);
-      selectExploreScope(profile.filters.sourceMode === 'folders' ? 'folders' : 'full-disk');
-      await preferenceStore.savePlayerSettings(fullDiskAccountId, { filters: readFullDiskFilters() });
-      const reorderedIds = [profile.profileId, ...dialogProfiles.filter(item => item.profileId !== profile.profileId).map(item => item.profileId)];
-      await preferenceStore.reorderProfiles(fullDiskAccountId, reorderedIds);
-      await refreshDialogProfiles(profile.profileId);
-      cancelPreparedFullDisk();
-      renderFullDiskSource();
-      profileMessage.textContent = '已应用方案「' + profile.name + '」，并置顶';    } catch (error) {
-      profileMessage.textContent = '应用方案失败：' + String(error?.message || error);
+    const filters = readFullDiskFilters();
+    const validation = validateFilters(filters);
+    if (validation) {
+      profileMessage.textContent = validation;
+      return;
     }
+    void runProfileAction('保存方案', async accountId => {
+      await preferenceStore.updateProfileFilters(accountId, profile.profileId, filters);
+      return { selectedId: profile.profileId, message: '已更新「' + profile.name + '」', closeNameForm: true };
+    });
   };
-  profileSaveButton.onclick = async () => {
+  profileSaveAsButton.onclick = () => {
+    profileNameForm.hidden = false;
+    profileSaveAsButton.setAttribute('aria-expanded', 'true');
+    profileMessage.textContent = '';
+    profileNameInput.focus();
+  };
+  profileCancelButton.onclick = () => {
+    closeProfileNameForm();
+    profileMessage.textContent = '';
+    profileSaveAsButton.focus();
+  };
+  profileNameForm.onsubmit = event => {
+    event.preventDefault();
     const name = profileNameInput.value.trim();
     if (!name) {
       profileMessage.textContent = '请先输入方案名称';
       profileNameInput.focus();
       return;
     }
-    try {
-      const profileId = 'explore-' + Date.now().toString(36);
-      const saved = await preferenceStore.saveProfile(fullDiskAccountId, {
-        profileId, name, filters: readFullDiskFilters()
-      });
-      dialogProfiles = await preferenceStore.listProfiles(fullDiskAccountId);
-      renderDialogProfiles(saved.profileId);
-      profileNameInput.value = '';
-      profileMessage.textContent = '已保存方案「' + saved.name + '」';
-    } catch (error) {
-      profileMessage.textContent = '保存方案失败：' + String(error?.message || error);
+    const filters = readFullDiskFilters();
+    const validation = validateFilters(filters);
+    if (validation) {
+      profileMessage.textContent = validation;
+      return;
     }
+    void runProfileAction('另存方案', async accountId => {
+      const saved = await preferenceStore.saveProfile(accountId, {
+        profileId: 'explore-' + crypto.randomUUID(), name, filters
+      }, { createOnly: true });
+      return { selectedId: saved.profileId, message: '已保存「' + saved.name + '」', closeNameForm: true };
+    });
   };
-  profileDeleteButton.onclick = async () => {
-    const profileId = profileSelect.value;
-    if (!profileId) return;
-    try {
-      await preferenceStore.deleteProfile(fullDiskAccountId, profileId);
-      await refreshDialogProfiles();
-      profileMessage.textContent = '已删除筛选方案';
-    } catch (error) {
-      profileMessage.textContent = '删除方案失败：' + String(error?.message || error);
-    }
+  profileDeleteButton.onclick = () => {
+    const profile = dialogProfiles.find(item => item.profileId === profileSelect.value);
+    if (!profile) return;
+    void runProfileAction('删除方案', async accountId => {
+      await preferenceStore.deleteProfile(accountId, profile.profileId);
+      return { selectedId: '', message: '已删除「' + profile.name + '」', closeNameForm: true };
+    });
   };
-  async function moveDialogProfile(direction) {
-    const index = dialogProfiles.findIndex(item => item.profileId === profileSelect.value);
-    const target = index + direction;
-    if (index < 0 || target < 0 || target >= dialogProfiles.length) return;
-    const reordered = dialogProfiles.slice();
-    [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
-    try {
-      await preferenceStore.reorderProfiles(fullDiskAccountId, reordered.map(item => item.profileId));
-      await refreshDialogProfiles(reordered[target].profileId);
-      profileMessage.textContent = '已调整方案顺序';
-    } catch (error) {
-      profileMessage.textContent = '调整顺序失败：' + String(error?.message || error);
-    }
-  }
-  profileUpButton.onclick = () => { void moveDialogProfile(-1); };
-  profileDownButton.onclick = () => { void moveDialogProfile(1); };
 
   const fullDiskActions = element('div', 'full-disk-actions');
   const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary', '开始随机探索');
   fullDiskStartButton.type = 'button';
   fullDiskStartButton.onclick = () => { void startFullDiskExplore(); };
-  const fullDiskAdjustFiltersButton = element('button', 'full-disk-action', '调整筛选');
+  const fullDiskAdjustFiltersButton = element('button', 'full-disk-action', '查看筛选');
   fullDiskAdjustFiltersButton.hidden = true;
   fullDiskAdjustFiltersButton.type = 'button';
   fullDiskAdjustFiltersButton.onclick = () => {
@@ -9165,10 +9285,17 @@
   });
 
   const fullDiskControls = element('div', 'explore-full-disk-controls');
-  fullDiskControls.append(fullDiskHint, exploreStatus, fullDiskActions, fullDiskMetrics,
-    fullDiskProgressTrack, fullDiskStatus, fullDiskWarning);
-  fullDiskDialog.append(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,
-    fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls);
+  fullDiskControls.append(exploreStatus, fullDiskStatus, fullDiskMetrics, fullDiskProgressTrack, fullDiskWarning);
+  const exploreSettings = element('div', 'explore-settings');
+  const exploreMain = element('div', 'explore-settings-main');
+  const exploreFilters = element('section', 'explore-filter-section');
+  exploreScopePicker.append(folderSelectionPanel, folderPickerPanel);
+  exploreFilters.append(element('h3', 'settings-section-title', '筛选条件'), fullDiskFields);
+  exploreMain.append(exploreScopePicker, exploreFilters);
+  exploreSettings.append(exploreMain, profileControls);
+  const exploreFooter = element('footer', 'explore-footer');
+  exploreFooter.append(fullDiskControls, fullDiskActions);
+  fullDiskDialog.append(fullDiskHeader, exploreSettings, exploreFooter);
 
   fullDiskOverlay.append(fullDiskDialog);  fullDiskCloseButton.onclick = closeExploreDialog;
   fullDiskOverlay.addEventListener('keydown', event => {

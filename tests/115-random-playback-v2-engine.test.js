@@ -47,7 +47,7 @@ test('folder picker loads and selects a directory through the real request wrapp
 
 test('v2 standalone userscript parses and mounts the unified exploration dialog', () => {
   assert.doesNotThrow(() => new vm.Script(source, { filename: '115-multiview-random-v2.user.js' }));
-  assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,\s*fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls\);/);
+  assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreSettings, exploreFooter\);/);
 });
 
 test('player filter panel does not reference removed scheme action containers', () => {
@@ -56,7 +56,7 @@ test('player filter panel does not reference removed scheme action containers', 
   assert.ok(start >= 0 && end > start, 'player filter panel function is present');
   const panel = source.slice(start, end);
   assert.equal(panel.includes('actions'), false, 'filter panel must not reference an out-of-scope actions variable');
-  assert.ok(panel.includes('panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);'));
+  assert.ok(panel.includes('panel.append(filterSection, dataManagement);'));
 });
 
 test('player startup and backup import do not call the removed profile-select renderer', () => {
@@ -99,70 +99,28 @@ test('createFilterPanel initializes after scheme controls moved to the explorati
   )(element, () => element('details', 'data-management'), () => {});
   const session = { fullDiskSource: {}, filters: {}, profiles: [] };
   const panel = createFilterPanel(session);
-  assert.equal(panel.children.length, 4);
+  assert.equal(panel.children.length, 2);
+  assert.equal(panel.children[1].className, 'data-management');
+  assert.equal(session.filterInputs.keyword.readOnly, true);
   assert.equal(session.filterInputs.folderPath.parentElement.hidden, true);
   assert.equal(Object.hasOwn(session.filterInputs, 'profileSelect'), false);
 });
 
-test('exploration scheme dropdown renders options and updates selection controls', () => {
-  const start = source.indexOf("  function renderDialogProfiles(selectedId = '')");
-  const end = source.indexOf('  async function refreshDialogProfiles', start);
-  assert.ok(start >= 0 && end > start, 'scheme dropdown renderer is present');
-  const renderer = source.slice(start, end);
-  assert.equal(renderer.includes('option('), false, 'renderer must not call an undefined option() helper');
-  const profileSelect = {
-    children: [], value: '',
-    replaceChildren() { this.children = []; },
-    append(option) { this.children.push(option); }
-  };
-  const profileDeleteButton = { disabled: false };
-  const profileUpButton = { disabled: false };
-  const profileDownButton = { disabled: false };
-  const element = (tag, className, text) => ({ tag, className, textContent: text, value: '', disabled: false });
-  const renderDialogProfiles = new Function('profileSelect', 'dialogProfiles', 'profileDeleteButton',
-    'profileUpButton', 'profileDownButton', 'element', renderer + '\nreturn renderDialogProfiles;')(    profileSelect,
-    [{ profileId: 'p1', name: '方案一' }, { profileId: 'p2', name: '方案二' }, { profileId: 'p3', name: '方案三' }],
-    profileDeleteButton, profileUpButton, profileDownButton, element
-  );
-  renderDialogProfiles('p2');
-  assert.deepEqual(profileSelect.children.map(item => item.value), ['', 'p1', 'p2', 'p3']);
-  assert.deepEqual(profileSelect.children.map(item => item.textContent), ['选择已保存方案', '方案一', '方案二', '方案三']);
-  assert.equal(profileSelect.value, 'p2');
-  assert.equal(profileDeleteButton.disabled, false);
-  assert.equal(profileUpButton.disabled, false);
-  assert.equal(profileDownButton.disabled, false);
-  renderDialogProfiles('p1');
-  assert.equal(profileUpButton.disabled, true, 'first item cannot move up');
-  assert.equal(profileDownButton.disabled, false);
-  renderDialogProfiles('p3');
-  assert.equal(profileUpButton.disabled, false);
-  assert.equal(profileDownButton.disabled, true, 'last item cannot move down');
-  renderDialogProfiles('missing');
-  assert.equal(profileSelect.value, '', 'unknown selection falls back to placeholder');
-  assert.equal(profileDeleteButton.disabled, true);
-  assert.equal(profileUpButton.disabled, true);
-  assert.equal(profileDownButton.disabled, true);
-});
-test('scheme controls wire save, apply, delete, and reorder actions to the preference store', () => {
-  const start = source.indexOf('  profileLoadButton.onclick = async () => {');
-  const end = source.indexOf('  const fullDiskActions = element(', start);
-  assert.ok(start >= 0 && end > start, 'scheme action handlers are present');
-  const handlers = source.slice(start, end);
-  const save = handlers.slice(handlers.indexOf('  profileSaveButton.onclick = async () => {'), handlers.indexOf('  profileDeleteButton.onclick = async () => {'));
-  const apply = handlers.slice(0, handlers.indexOf('  profileSaveButton.onclick = async () => {'));
-  const remove = handlers.slice(handlers.indexOf('  profileDeleteButton.onclick = async () => {'), handlers.indexOf('  async function moveDialogProfile'));
-  const reorder = handlers.slice(handlers.indexOf('  async function moveDialogProfile'), handlers.length);
-  assert.ok(save.indexOf('preferenceStore.saveProfile(') >= 0);
-  assert.ok(save.indexOf('preferenceStore.listProfiles(') > save.indexOf('preferenceStore.saveProfile('));
-  assert.ok(save.indexOf('renderDialogProfiles(saved.profileId)') > save.indexOf('preferenceStore.listProfiles('));
-  assert.ok(save.includes('保存方案失败：'));
-  assert.ok(apply.includes('writeFullDiskFilters(profile.filters)'));
-  assert.ok(apply.includes('preferenceStore.savePlayerSettings('));
-  assert.ok(apply.includes('preferenceStore.reorderProfiles('));
-  assert.ok(remove.includes('preferenceStore.deleteProfile('));
-  assert.ok(remove.includes('await refreshDialogProfiles()'));
-  assert.ok(reorder.includes('preferenceStore.reorderProfiles('));
-  assert.ok(reorder.includes('await refreshDialogProfiles(reordered[target].profileId)'));
+test('choosing a scheme applies its filters before persistence completes', () => {
+  const start = source.indexOf('  profileSelect.onchange = () => {');
+  const end = source.indexOf('  profileSaveButton.onclick', start);
+  assert.ok(start >= 0 && end > start, 'scheme selection handler is present');
+  const profileSelect = { value: 'demo' };
+  const filters = { keyword: '旅行', sourceMode: 'full-disk' };
+  const changes = [];
+  const bind = new Function('profileSelect', 'profileBusy', 'fullDiskAccountId', 'closeProfileNameForm',
+    'dialogProfiles', 'profileMessage', 'writeFullDiskFilters', 'selectExploreScope', 'readFullDiskFilters',
+    'runProfileAction', source.slice(start, end));
+  bind(profileSelect, false, 'account', () => {}, [{ profileId: 'demo', name: '旅行', filters }], {},
+    value => changes.push(value), mode => changes.push(mode), () => filters,
+    () => changes.push('persistence starts'));
+  profileSelect.onchange();
+  assert.deepEqual(changes, [filters, 'full-disk', 'persistence starts']);
 });
 
 test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {
@@ -428,10 +386,10 @@ test('v2 player connects the random engine to prefetch, first-ready startup, and
   assert.match(source, /source\.resolveFirstItem\(item\)/);
   assert.match(source, /session\.availableItems\.length < FULL_DISK_RESERVE \+ pendingSwaps/);
   assert.match(source, /folderBrowser\.setRecursive\(folder\.id, recursive\.checked\)/);
-  assert.match(source, /preferenceStore\.saveProfile\(fullDiskAccountId/);
+  assert.match(source, /preferenceStore\.saveProfile\(accountId/);
   assert.match(source, /fullDiskModeInput\.checked = wholeDisk/);
-  assert.match(source, /folderSelectionPanel\.classList\.toggle\('is-disabled', wholeDisk\)/);
-  assert.match(source, /全盘随机（勾选后覆盖整个网盘，无需选择文件夹）/);
+  assert.match(source, /folderSelectionPanel\.hidden = wholeDisk/);
+  assert.match(source, /addExploreScopeOption\('full-disk', '整个网盘'/);
   assert.ok(source.includes('currentCid && /^[0-9]+$/.test(currentCid)'));  assert.doesNotMatch(source, /fullDiskFolderInput/);
 });
 test('v2 startup waits for a real first candidate and continues bounded batches until playable data or terminal state', () => {
