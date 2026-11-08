@@ -13,10 +13,10 @@
 - 发布目标：v2.0.0；独立更新通道，不覆盖历史版本。
 
 ## 最近一次核对的代码状态
-- 业务代码与发布构建提交：`fb5d7f9c2337c7053fd308dae690f7af6584335a`（短 SHA：`fb5d7f9`）；已提交并推送至 GitHub `main`。随后增加一笔仅更新恢复/发布记录的 docs-only 提交；以当前 `git log -1` 为最新 HEAD。
-- 提交：`feat(115): release independent random explorer v2.0.0`；12 个文件，18,985 insertions / 5 deletions。
-- 当前工作区：干净；无 staged/unstaged/untracked/conflict。
-- 变更包括：独立 v2.0.0 用户脚本及 meta、不可变 2.0.0 历史快照、registry 独立入口、随机引擎/适配器/并行发布测试、AGENTS/恢复手册/检查点/开发日志/实施方案。
+- 当前业务修复与发布提交：`9c63345a9d4f4f582740a5ae9cd3b7d088cade4a`（短 SHA：`9c63345`）；已推送至 GitHub `main`，Pages Actions #82 成功。
+- 上一版 2.0.0 发布提交：`fb5d7f9c2337c7053fd308dae690f7af6584335a`；本次 2.0.1 修复提交：`fix(115): repair v2 scheme save dropdown`。
+- 当前工作区：修复已提交并推送；HEAD 与 origin/main 一致。
+- 本次 2.0.1 修复：方案下拉刷新函数误调用未定义的 `option()`；改为在当前作用域内通过 `element('option', ...)` 创建原生选项。保存后刷新列表不再触发该 ReferenceError。新增不可变快照 `history/115-multiview-random-v2/2.0.1.user.js`。
 - M6 将旧 `N115IndexStore` 缩减为只读 `N115LegacyFavoriteLookup`：仅供旧收藏条目补全信息；删除旧索引创建/扫描/写入/删除 API，随机播放不依赖旧索引。保留旧 IndexedDB 数据，不执行清库。
 - 同目录播放状态变量已改为读取/加载语义；移除旧索引措辞和扫描依赖。删除视频后只清理播放器收藏/排除偏好，不再更新旧索引数据库。
 - M5 2.0 交付范围为本地 JSON 导出/导入与结构校验；用户可手动上传到 115 根目录 `拉面多宫格播放器/配置备份`。自动上传、云端回读及当前/上一份自动轮换延期 2.1；未验证公开授权 API 前禁止调用未公开接口。
@@ -30,9 +30,9 @@
 ## 最近一次验证证据
 - 脚本语法：`node --check userscripts/115-multiview-random-v2.user.js` 通过。
 - 专项测试：`node --test tests/115-random-playback-v2-engine.test.js tests/115-full-disk-explorer-adapter.test.js tests/parallel-releases.test.js`，40/40 passed。
-- 完整检查：`npm.cmd run check`，216/216 tests passed；安装中心构建成功生成 6 个脚本（包含独立 2.0.0）。
-- 本次完整检查发生在 M6 只读收藏兼容层、registry 启用状态和 2.0 历史快照生成之后；检查点文件更新不改变业务源码。
-- 验证边界：自动化测试/构建不等于真实 115 账号冒烟；真实账号验收明确由用户完成。
+- 完整检查：`npm test`，217/217 tests passed；`npm run build` 与 `npm run check` 均通过；构建成功生成 6 个脚本（包含独立 2.0.1）。
+- 本次新增专项回归测试：方案下拉渲染不得引用未定义的 `option()`，且必须创建原生 option 元素。
+- GitHub Actions 部署工作流 #82（commit `9c63345`）已成功。验证边界：自动化测试/构建不等于真实 115 账号冒烟；当前 ChatGPT 浏览器控制连接未建立，未进行登录态浏览器实测；真实账号验收仍由用户负责。
 
 ## 2.0 里程碑
 权威计划见 `docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`。
@@ -44,7 +44,13 @@
 - M6 旧索引写入/扫描/UI/播放依赖移除：已完成；仅保留旧收藏只读兼容查询，专项和完整自动化检查通过。
 - M7 自动化检查、独立构建、差异审查、提交推送和 Pages 部署：已完成；线上 manifest/meta/安装脚本与 SHA256 核验通过。真实 115 测试由用户自行安装后执行。
 
-## 已确认产品规则
+## 已确认产品规则## 当前测试恢复点（2026-11-08）
+- 当前安装版本：2.0.1；方案保存失败 `option is not defined` 已修复并发布。
+- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`。
+- 下一步优先级：待浏览器连接可用后执行 M1 页面启动与控制台检查，再执行 M2 保存/应用/编辑/删除/排序/刷新恢复；随后依次 M3-M6。真实 115 账号数据不得清理或破坏。
+- 浏览器控制前置条件：需要从已安装 ChatGPT 浏览器扩展的原始浏览器会话打开本对话并建立连接；当前调用返回 originating browser context unavailable。不要将代码级测试描述为真实 UI 测试。
+
+
 - 多来源按 115 文件 ID 去重，不做内容哈希。
 - 文件夹模式支持一个或多个文件夹，默认递归子文件夹；全盘模式忽略文件夹选择。
 - 关键词按视频文件名 OR 匹配；排除词本地过滤；支持最小/最大文件大小。
