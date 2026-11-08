@@ -14,12 +14,13 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 本轮业务修复提交：`8529d48`（`fix(115): reconcile duplicate favorite folders on backup merge`），已推送到 GitHub `main`。
-- 已发布基线版本为 2.0.1（方案保存修复提交 `9c63345a9d4f4f582740a5ae9cd3b7d088cade4a`；Pages Actions #82 成功）；2.0.1 历史快照保持不变。
+- 业务修复提交：`8529d48`（`fix(115): reconcile duplicate favorite folders on backup merge`），已推送到 GitHub `main`。
+- 版本归档提交：`4ee8934`（`release(115): archive random playback v2.0.2`），包含 2.0.2 不可变历史快照和本检查点。
+- **当前发布版本：2.0.2**；GitHub Pages Actions #86 构建与部署均成功，部署版本 SHA 为 `4ee8934be389e7c055a8f28fc0aa0b59d1e40831`。
 - 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，将本地旧收藏夹的视频关系映射合并，避免产生重复同名收藏夹和丢失关系。
-- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel。
+- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel；2.0.1 历史快照保持不变。
 - 新增 `tests/115-v2-backup-import.test.js`，直接执行账户导入逻辑并验证同名收藏夹合并及关系迁移。
-- 本地构建已生成独立 `history/115-multiview-random-v2/2.0.2.user.js` 快照，现与检查点一起归档提交。
+- 2.0.2 独立快照：`history/115-multiview-random-v2/2.0.2.user.js`。
 - M6 保留旧收藏只读兼容查询，不写入/扫描旧索引；不清理旧 IndexedDB。
 - M5 交付范围为本地 JSON 导出/导入与结构校验；自动云端上传、轮换及回读延期 2.1。
 - 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
@@ -32,9 +33,11 @@
 - `npm run build` 成功生成 6 个脚本，v2.0.2 产物 457,804 bytes。
 - `npm run check` 通过，包含测试套件与历史快照检查。
 - 本轮专项回归覆盖：同名收藏夹不重复、原有视频关系迁移、无关本地收藏夹及关系保留。
-- GitHub Pages 部署结果仍需核对 Actions 与线上 manifest；代码级测试/构建不等于真实 115 账号验收。
-- 真实账号验收按用户要求由用户自行完成。## 2.0 里程碑
-权威计划见 \`docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md\`。
+- GitHub Actions #86：build 成功、Pages deploy 成功；部署环境地址为 `https://huntian0727.github.io/userscript-hub/`。
+- GitHub Actions #85 曾因 2.0.2 历史快照未提交而失败；提交快照后 #86 完整通过。
+- 真实 115 账号验收仍由用户自行完成；自动化测试和 Pages 部署不等于真实账号验收。
+## 2.0 里程碑
+权威计划见 `docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`。
 - M1 随机 API 适配器与纯随机引擎：已完成。
 - M2 统一来源配置与文件夹选择器：自动化验证已完成；真实 115 体验由用户验收。
 - M3 核心播放、失败跳过、补充队列、锁定窗口、新轮次：主要逻辑和行为测试已完成。
@@ -46,8 +49,8 @@
 
 ## 已确认产品规则
 
-- 当前线上版本：2.0.1；本轮 2.0.2 修复完成后再核对线上版本与安装入口。
-- 安装入口保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`。
+- 当前线上版本：2.0.2。
+- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
 - 更新地址保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`。
 - 真实 115 验收仍由用户自行执行；未反馈前不得宣称真实账号验证已完成。
 
