@@ -14,7 +14,7 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 最新正式发布版本：2.0.4（修复全盘随机探索播放器筛选面板初始化错误；本轮部署完成后核对 Pages 状态）。
+- 最新正式发布版本：2.0.4（GitHub Pages Actions #88 构建与部署均成功；线上源码版本已核验）。
 - 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，并迁移原有视频关系。
 - 2.0.3 第一轮修复了播放器筛选面板中已删除的 `actions` 容器引用；真实环境反馈继续发现同一重构区域残留的旧方案选择器引用。
 - 2.0.4 根因：`createFilterPanel(session)` 已不再创建 `session.filterInputs.profileSelect`，但仍调用旧的 `refreshProfileOptions(session)`；该函数对 undefined 执行 `replaceChildren()`，导致播放器初始化失败。JSON 备份导入流程也残留同一调用。
@@ -27,7 +27,7 @@
 ## 最近一次验证证据（2026-11-08）
 - `node --check userscripts/115-multiview-random-v2.user.js` 通过。
 - `npm test`：222/222 tests passed，0 failures。
-- `npm run build` 成功生成 6 个脚本；v2.0.4 产物 454,032 bytes。
+- `npm run build` 成功生成 6 个脚本；v2.0.4 产物 454,067 bytes。
 - `npm run check` 通过，包含全量测试与历史快照检查。
 - 专项测试实际构建筛选面板，并验证备份导入不再调用已删除的方案选择器。
 - 代码修复与构建通过不等于真实 115 账号验收；用户自行完成真实环境验收。
