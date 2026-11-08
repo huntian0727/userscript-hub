@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.9
+// @version      2.0.10
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2427,7 +2427,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.9';
+  const VERSION = '2.0.10';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2858,7 +2858,9 @@
           headers: { Referer: 'https://115.com/' },
           onload: response => {
             if (response.status < 200 || response.status >= 300) {
-              finish(new Error(`获取播放列表失败（HTTP ${response.status}）`));
+              const error = new Error(`获取播放列表失败（HTTP ${response.status}）`);
+              error.httpStatus = response.status;
+              finish(error);
             } else {
               try { finish(null, { text: response.responseText, url: trustedUrl(response.finalUrl || url) }); }
               catch (error) { finish(error); }
@@ -3357,7 +3359,10 @@
       session.newRoundButton.textContent = session.roundRefreshing ? '🔄 正在抽取…' : '🔄 新一轮';
       session.newRoundButton.setAttribute('aria-label', session.roundRefreshing ? '正在抽取' : '开启新一轮');
     }
-    if (session.resumeButton) session.resumeButton.hidden = !session.authBlocked;
+    if (session.resumeButton) {
+      session.resumeButton.hidden = !session.authBlocked;
+      session.resumeButton.textContent = session.playlistRejected ? '重试取流' : '验证后继续取流';
+    }
     session.cells.forEach(cell => { if (cell) updateCellControls(session, cell); });
   }  function armCellPlaybackWatchdog(session, cell) {
     if (cell.timer || session.closed || cell.failed || cell.hasPlayed ||
@@ -3381,10 +3386,11 @@
     return /(?:未检测到Tampermonkey请求能力|HLS\.js未加载|浏览器不支持|自动播放|NotAllowedError)/i.test(String(message || ''));
   }
 
-  function failCell(session, cell, message) {
+  function failCell(session, cell, message, httpStatus) {
     if (session.closed || cell.failed) return;
     const failedItem = cell.item;
-    const authBlocked = isAuthBlockedFailure(message);
+    const playlistRejected = httpStatus === 405;
+    const authBlocked = playlistRejected || isAuthBlockedFailure(message);
     const manualFailure = isManualPlaybackFailure(message);
     const alreadyUsedGmFallback = String(cell.quality.textContent || '').includes('油猴加载');
 
@@ -3394,17 +3400,21 @@
       cell.loadStarted = false;
       disposeCell(cell);
       session.authBlocked = true;
-      session.roundMessage = '115验证或登录受阻，已暂停新的自动取流；正在播放的窗口保持不变';
+      session.playlistRejected = playlistRejected;
+      const waitingMessage = playlistRejected ? '115 拒绝取流（HTTP 405），已暂停' : '等待完成115验证后继续取流';
+      session.roundMessage = playlistRejected
+        ? '115 拒绝取流（HTTP 405），已暂停新的请求。请先确认 115 网页能播放，再点击“重试取流”'
+        : '115验证或登录受阻，已暂停新的自动取流；正在播放的窗口保持不变';
       session.cells.forEach(other => {
         if (!other || other === cell || !other.abort) return;
         other.abort.abort();
         other.abort = null;
         other.loadStarted = false;
-        setStatus(other, '等待完成115验证后继续取流');
+        setStatus(other, waitingMessage);
       });
-      setStatus(cell, message + '。完成验证或重新登录后，点击“验证后继续取流”');
+      setStatus(cell, playlistRejected ? waitingMessage : message + '。完成验证或重新登录后，点击“验证后继续取流”');
       revealCellHeading(cell, 'programmatic');
-      cell.quality.textContent = '等待验证';
+      cell.quality.textContent = playlistRejected ? '取流已暂停' : '等待验证';
       updateRoundControls(session);
       console.warn('[115多画面 ' + VERSION + '] ' + cell.slotId + '：' + message);
       return;
@@ -3427,7 +3437,7 @@
       cell.failed = true;
       cell.loadStarted = false;
       disposeCell(cell);
-      setStatus(cell, message + '。等待完成115验证后继续取流');
+      setStatus(cell, session.playlistRejected ? '取流仍未恢复：' + message : message + '。等待完成115验证后继续取流');
       revealCellHeading(cell, 'programmatic');
       cell.quality.textContent = '等待验证';
       updateRoundControls(session);
@@ -3525,20 +3535,40 @@
     console.warn('[115多画面 ' + VERSION + '] ' + cell.slotId + '：' + message);
   }
 
-  function resumeAfterAuth(session) {
-    if (session.closed || !session.authBlocked) return;
-    session.authBlocked = false;
-    session.roundMessage = '已恢复取流，正在重新加载验证受阻的窗口';
-    const targets = session.cells.filter(cell => cell && cell.item && cell.index < session.layoutCount &&
-      !cell.layoutPaused && (cell.authBlocked || (!cell.loadStarted && !cell.failed && !cell.hasPlayed)));
-    targets.forEach(cell => {
-      cell.authBlocked = false;
+  async function resumeAfterAuth(session) {
+    if (session.closed || !session.authBlocked || session.resumeButton.disabled) return;
+    const canReload = cell => cell && cell.item && cell.index < session.layoutCount &&
+      !cell.layoutPaused && (cell.authBlocked || (!cell.loadStarted && !cell.failed && !cell.hasPlayed));
+    const targets = session.cells.filter(canReload);
+    const load = (cell, probe = false) => {
       cell.failed = false;
       cell.retryCount = 0;
       cell.loadStarted = true;
-      setStatus(cell, '验证完成，正在重新获取播放地址…');
-      void loadCell(session, cell, cell.item);
-    });
+      setStatus(cell, '正在重新获取播放地址…');
+      return loadCell(session, cell, cell.item, probe);
+    };
+    const wasPlaylistRejected = session.playlistRejected;
+    if (wasPlaylistRejected && targets.length) {
+      const probe = targets.shift();
+      session.resumeButton.disabled = true;
+      probe.authBlocked = true;
+      try {
+        if (!await load(probe, true) || session.closed) return;
+        probe.authBlocked = false;
+      } finally {
+        session.resumeButton.disabled = false;
+      }
+    }
+    session.authBlocked = false;
+    session.playlistRejected = false;
+    session.roundMessage = '已恢复取流，正在重新加载受阻的窗口';
+    for (const cell of targets) {
+      if (session.closed || session.authBlocked) break;
+      if (!canReload(cell)) continue;
+      cell.authBlocked = false;
+      if (wasPlaylistRejected) await load(cell);
+      else void load(cell);
+    }
     processPendingAutoAdvances(session);
     updateRoundControls(session);
     if (session.fullDiskSource) refillSessionFullDisk(session);
@@ -3704,9 +3734,9 @@
     hls.loadSource(source.url);
   }
 
-  async function loadCell(session, cell, item) {
-    if (session.closed || session.authBlocked || cell.failed || !item) {
-      if (session.authBlocked && item) setStatus(cell, '等待完成115验证后继续取流');
+  async function loadCell(session, cell, item, resumeProbe = false) {
+    if (session.closed || (!resumeProbe && session.authBlocked) || cell.failed || !item) {
+      if (session.authBlocked && item) setStatus(cell, session.playlistRejected ? '取流已暂停，请点击“重试取流”' : '等待完成115验证后继续取流');
       return;
     }
     const generation = cell.generation;
@@ -3717,7 +3747,7 @@
     try {
       timingMark(cell, 't2');
       const result = await requestText('https://115.com/api/video/m3u8/' + encodeURIComponent(item.pickcode) + '.m3u8', controller.signal);
-      if (session.closed || session.authBlocked || generation !== cell.generation || cell.item !== item) return;
+      if (session.closed || (!resumeProbe && session.authBlocked) || generation !== cell.generation || cell.item !== item) return;
       timingMark(cell, 't3');
       const source = chooseSource(result.text, result.url);
       armCellPlaybackWatchdog(session, cell);
@@ -3729,9 +3759,11 @@
         void tryPlay(session, cell);
       } else {
         failCell(session, cell, 'HLS.js未加载或浏览器不支持，请检查脚本依赖，并使用新版Chrome或Edge');
+        return false;
       }
+      return true;
     } catch (error) {
-      if (error.name !== 'AbortError' && generation === cell.generation) failCell(session, cell, error.message);
+      if (error.name !== 'AbortError' && generation === cell.generation) failCell(session, cell, error.message, error.httpStatus);
     } finally {
       session.abort.signal.removeEventListener('abort', abortOnClose);
       if (cell.abort === controller) cell.abort = null;
@@ -8303,7 +8335,7 @@
       session.resumeButton = element('button', 'auth-resume', '验证后继续取流');
       session.resumeButton.type = 'button';
       session.resumeButton.hidden = true;
-      session.resumeButton.onclick = () => resumeAfterAuth(session);
+      session.resumeButton.onclick = () => { void resumeAfterAuth(session); };
 
       session.infoText = element('span', 'info', '共 ' + indexed.total + ' 个视频 · ' + session.layoutCount + '格');
       session.infoText.id = 'infoText';
