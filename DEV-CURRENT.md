@@ -14,28 +14,22 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 业务修复提交：`8529d48`（`fix(115): reconcile duplicate favorite folders on backup merge`），已推送到 GitHub `main`。
-- 版本归档提交：`4ee8934`（`release(115): archive random playback v2.0.2`），包含 2.0.2 不可变历史快照和本检查点。
-- **当前发布版本：2.0.2**；GitHub Pages Actions #86 构建与部署均成功，部署版本 SHA 为 `4ee8934be389e7c055a8f28fc0aa0b59d1e40831`。
-- 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，将本地旧收藏夹的视频关系映射合并，避免产生重复同名收藏夹和丢失关系。
-- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel；2.0.1 历史快照保持不变。
-- 新增 `tests/115-v2-backup-import.test.js`，直接执行账户导入逻辑并验证同名收藏夹合并及关系迁移。
-- 2.0.2 独立快照：`history/115-multiview-random-v2/2.0.2.user.js`。
-- M6 保留旧收藏只读兼容查询，不写入/扫描旧索引；不清理旧 IndexedDB。
-- M5 交付范围为本地 JSON 导出/导入与结构校验；自动云端上传、轮换及回读延期 2.1。
-- 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
-- 旧版 v0.12.4 与 v1.9.1 入口和历史快照保留；2.0 使用独立 namespace 和更新 URL。
+- 最新正式发布版本：2.0.2（Pages Actions #86 成功）；本轮修复准备升级为 2.0.3。
+- 已发布修复：2.0.2 JSON 合并导入时同名但不同 ID 收藏夹合并，迁移旧收藏关系；2.0.1 历史快照保持不变。
+- 本轮 2.0.3 根因：`createFilterPanel(session)` 中保留了已拆除的筛选方案控件残留，最后 `panel.append(..., actions, ...)` 引用未定义的局部变量 `actions`。点击开始探索后，随机扫描和首个候选抽取正常，进入 `openPlayer()` 创建筛选面板时抛出 ReferenceError，导致播放器启动失败。
+- 2.0.3 修复：移除筛选面板内未挂载的旧方案控件残留及未定义的 `actions` 引用；保留实际使用的筛选字段、收藏过滤、筛选提示和 JSON 数据管理。方案保存/应用/排序继续由随机探索弹窗的方案管理区负责。
+- 新增回归测试：播放器筛选面板不得引用已移除的 actions 容器，确保该初始化阻断点不会复发。
+- 2.0.3 已更新 userscript @version、播放器 UI 版本号、meta 文件和 registry；独立历史快照已由构建生成。
+- 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试。
+- 旧版 v0.12.4、v1.9.1、2.0.1、2.0.2 历史快照保持不变。
 
 ## 最近一次验证证据（2026-11-08）
 - `node --check userscripts/115-multiview-random-v2.user.js` 通过。
-- `node --check tests/115-v2-backup-import.test.js` 通过。
-- `npm test`：219/219 tests passed，0 failures。
-- `npm run build` 成功生成 6 个脚本，v2.0.2 产物 457,804 bytes。
+- `npm test`：220/220 tests passed，0 failures。
+- `npm run build` 成功生成 6 个脚本；v2.0.3 产物 456,448 bytes。
 - `npm run check` 通过，包含测试套件与历史快照检查。
-- 本轮专项回归覆盖：同名收藏夹不重复、原有视频关系迁移、无关本地收藏夹及关系保留。
-- GitHub Actions #86：build 成功、Pages deploy 成功；部署环境地址为 `https://huntian0727.github.io/userscript-hub/`。
-- GitHub Actions #85 曾因 2.0.2 历史快照未提交而失败；提交快照后 #86 完整通过。
-- 真实 115 账号验收仍由用户自行完成；自动化测试和 Pages 部署不等于真实账号验收。
+- 专项测试验证筛选面板不再包含未定义的 `actions` 引用。
+- 代码修复与构建通过不等于真实 115 账号验收；用户自行完成真实环境验收。
 ## 2.0 里程碑
 权威计划见 `docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`。
 - M1 随机 API 适配器与纯随机引擎：已完成。
@@ -49,8 +43,7 @@
 
 ## 已确认产品规则
 
-- 当前线上版本：2.0.2。
-- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
+- 当前线上版本：2.0.2；待发布修复版本：2.0.3。- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
 - 更新地址保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`。
 - 真实 115 验收仍由用户自行执行；未反馈前不得宣称真实账号验证已完成。
 

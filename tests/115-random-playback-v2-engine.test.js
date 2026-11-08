@@ -18,6 +18,14 @@ test('v2 standalone userscript parses and mounts the unified exploration dialog'
   assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,\s*fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls\);/);
 });
 
+test('player filter panel does not reference removed scheme action containers', () => {
+  const start = source.indexOf('  function createFilterPanel(session) {');
+  const end = source.indexOf('  function openRecentDirectory(', start);
+  assert.ok(start >= 0 && end > start, 'player filter panel function is present');
+  const panel = source.slice(start, end);
+  assert.equal(panel.includes('actions'), false, 'filter panel must not reference an out-of-scope actions variable');
+  assert.ok(panel.includes('panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);'));});
+
 test('exploration scheme dropdown renders options and updates selection controls', () => {
   const start = source.indexOf("  function renderDialogProfiles(selectedId = '')");
   const end = source.indexOf('  async function refreshDialogProfiles', start);

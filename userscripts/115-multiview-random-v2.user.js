@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.2
+// @version      2.0.3
 // @match        https://115.com/*
-// @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
 // @connect      115.com
@@ -2407,7 +2406,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.2';
+  const VERSION = '2.0.3';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5096,32 +5095,9 @@
     session.filterInputs.favoritesOnly.type = 'checkbox';
     favoriteLabel.append(session.filterInputs.favoritesOnly, element('span', '', '仅显示收藏'));
 
-    const schemeRow = element('div', 'filter-schemes');
-    session.filterInputs.profileSelect = element('select', 'filter-profile-select');
-    session.filterInputs.profileSelect.setAttribute('aria-label', '已保存的筛选方案');
-    session.filterInputs.profileName = element('input', 'filter-profile-name');
-    session.filterInputs.profileName.type = 'text';
-    session.filterInputs.profileName.maxLength = 40;
-    session.filterInputs.profileSelect.onchange = () => {
-      const profile = session.profiles.find(item => item.profileId === session.filterInputs.profileSelect.value);
-      if (!profile) return;
-      session.filterInputs.profileName.value = profile.name;
-      writeFilterControls(session, profile.filters);
-      void (async () => {
-        try {
-          await preferenceStore.saveProfile(session.accountId, profile);
-          session.profiles = await preferenceStore.listProfiles(session.accountId);
-          refreshProfileOptions(session, profile.profileId);
-          await applyCurrentFilters(session, profile.filters, '已载入方案「' + profile.name + '」');
-        } catch (error) {
-          setFilterMessage(session, '载入方案失败：' + String(error?.message || error), true);
-        }
-      })();
-    };
-
     session.filterMessage = element('small', 'filter-message');
     const dataManagement = createDataManagementSection(session);
-    panel.append(fields, favoriteLabel, schemeRow, actions, session.filterMessage, dataManagement);
+    panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);
     refreshProfileOptions(session);
     writeFilterControls(session, session.filters);
     return panel;
