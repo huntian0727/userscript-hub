@@ -14,11 +14,12 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 最近已推送基线：`988f9cdda3122e2d6bbba34fd6615d02974f100b`；本轮发现并修复后尚有未提交改动。
-- 已发布版本仍为 2.0.1（方案保存修复提交 `9c63345a9d4f4f582740a5ae9cd3b7d088cade4a`；Pages Actions #82 成功）。
-- 本轮新增 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，将本地旧收藏夹的视频关系映射合并，避免产生重复同名收藏夹和丢失关系。
-- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel；2.0.1 历史快照保持不变。
+- 本轮业务修复提交：`8529d48`（`fix(115): reconcile duplicate favorite folders on backup merge`），已推送到 GitHub `main`。
+- 已发布基线版本为 2.0.1（方案保存修复提交 `9c63345a9d4f4f582740a5ae9cd3b7d088cade4a`；Pages Actions #82 成功）；2.0.1 历史快照保持不变。
+- 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，将本地旧收藏夹的视频关系映射合并，避免产生重复同名收藏夹和丢失关系。
+- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel。
 - 新增 `tests/115-v2-backup-import.test.js`，直接执行账户导入逻辑并验证同名收藏夹合并及关系迁移。
+- 本地构建已生成独立 `history/115-multiview-random-v2/2.0.2.user.js` 快照，现与检查点一起归档提交。
 - M6 保留旧收藏只读兼容查询，不写入/扫描旧索引；不清理旧 IndexedDB。
 - M5 交付范围为本地 JSON 导出/导入与结构校验；自动云端上传、轮换及回读延期 2.1。
 - 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
@@ -28,10 +29,11 @@
 - `node --check userscripts/115-multiview-random-v2.user.js` 通过。
 - `node --check tests/115-v2-backup-import.test.js` 通过。
 - `npm test`：219/219 tests passed，0 failures。
+- `npm run build` 成功生成 6 个脚本，v2.0.2 产物 457,804 bytes。
+- `npm run check` 通过，包含测试套件与历史快照检查。
 - 本轮专项回归覆盖：同名收藏夹不重复、原有视频关系迁移、无关本地收藏夹及关系保留。
-- `npm run check` 与正式构建/部署待本轮提交后完成；当前已知 2.0.1 快照不可覆盖，2.0.2 使用新快照发布。
-- 证据边界：自动化测试与构建不等于真实 115 账号验收；真实账号验收按用户要求由用户自行完成。
-## 2.0 里程碑
+- GitHub Pages 部署结果仍需核对 Actions 与线上 manifest；代码级测试/构建不等于真实 115 账号验收。
+- 真实账号验收按用户要求由用户自行完成。## 2.0 里程碑
 权威计划见 \`docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md\`。
 - M1 随机 API 适配器与纯随机引擎：已完成。
 - M2 统一来源配置与文件夹选择器：自动化验证已完成；真实 115 体验由用户验收。
