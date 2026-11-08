@@ -18,6 +18,16 @@ test('v2 standalone userscript parses and mounts the unified exploration dialog'
   assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,\s*fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls\);/);
 });
 
+test('exploration scheme dropdown renders options without an out-of-scope option helper', () => {
+  const start = source.indexOf("  function renderDialogProfiles(selectedId = '')");
+  const end = source.indexOf('  async function refreshDialogProfiles', start);
+  assert.ok(start >= 0 && end > start, 'scheme dropdown renderer is present');
+  const renderer = source.slice(start, end);
+  assert.equal(renderer.includes('option('), false, 'renderer must not call an undefined option() helper');
+  assert.equal(renderer.includes("element('option'"), true, 'renderer creates native option elements in its own scope');
+  assert.equal(renderer.includes('profileOption.value = profile.profileId'), true);
+});
+
 test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {
   const start = source.indexOf('    function sortProfilesByOrder(items)');
   const end = source.indexOf('async function listProfiles', start);

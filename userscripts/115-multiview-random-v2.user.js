@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.0
+// @version      2.0.1
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -8898,8 +8898,14 @@
 
   function renderDialogProfiles(selectedId = '') {
     profileSelect.replaceChildren();
-    profileSelect.append(option('选择已保存方案', ''));
-    for (const profile of dialogProfiles) profileSelect.append(option(profile.name, profile.profileId));
+    const placeholderOption = element('option', '', '选择已保存方案');
+    placeholderOption.value = '';
+    profileSelect.append(placeholderOption);
+    for (const profile of dialogProfiles) {
+      const profileOption = element('option', '', profile.name);
+      profileOption.value = profile.profileId;
+      profileSelect.append(profileOption);
+    }
     profileSelect.value = selectedId && dialogProfiles.some(item => item.profileId === selectedId) ? selectedId : '';
     const index = dialogProfiles.findIndex(item => item.profileId === profileSelect.value);
     profileDeleteButton.disabled = index < 0;
