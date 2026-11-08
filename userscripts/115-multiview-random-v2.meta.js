@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.1
+// @version      2.0.2
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com

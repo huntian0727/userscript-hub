@@ -13,24 +13,24 @@
 - 发布目标：v2.0.0；独立更新通道，不覆盖历史版本。
 
 ## 最近一次核对的代码状态
-- 当前分支：\`develop/random-playback-v2.0\`；工作树基于独立 v2 项目。
-- 当前已推送提交：\`d52f553c7573432c346b205e80458e703c4f9dec\`（修复方案管理测试文件结构）；此前 \`18e1d1b\` 增加方案下拉与操作绑定回归测试。
-- 业务修复发布提交：\`9c63345a9d4f4f582740a5ae9cd3b7d088cade4a\`（2.0.1）；GitHub Pages Actions #82 成功。后续提交仅为测试与检查点，不改变业务脚本。
-- 当前工作区：最近一次 shell 检查无未提交文件；HEAD 已推送至 GitHub。
-- 2.0.1 业务修复：方案下拉刷新函数误调用未定义的 \`option()\`；改为在当前作用域通过 \`element('option', ...)\` 创建原生选项。修复已发布，历史快照保留。
+- 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
+- 最近已推送基线：`988f9cdda3122e2d6bbba34fd6615d02974f100b`；本轮发现并修复后尚有未提交改动。
+- 已发布版本仍为 2.0.1（方案保存修复提交 `9c63345a9d4f4f582740a5ae9cd3b7d088cade4a`；Pages Actions #82 成功）。
+- 本轮新增 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，将本地旧收藏夹的视频关系映射合并，避免产生重复同名收藏夹和丢失关系。
+- 2.0.2 已同步更新 userscript @version、UI 版本号、meta 文件和 registry channel；2.0.1 历史快照保持不变。
+- 新增 `tests/115-v2-backup-import.test.js`，直接执行账户导入逻辑并验证同名收藏夹合并及关系迁移。
 - M6 保留旧收藏只读兼容查询，不写入/扫描旧索引；不清理旧 IndexedDB。
 - M5 交付范围为本地 JSON 导出/导入与结构校验；自动云端上传、轮换及回读延期 2.1。
 - 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
 - 旧版 v0.12.4 与 v1.9.1 入口和历史快照保留；2.0 使用独立 namespace 和更新 URL。
 
 ## 最近一次验证证据（2026-11-08）
-- \`node --check userscripts/115-multiview-random-v2.user.js\` 通过。
-- \`npm test\` 与 \`npm run check\` 均通过：218/218 tests passed，0 failures。
-- 构建成功生成 6 个脚本，包含独立 2.0.1。
-- 本轮检查未改动业务源码；方案 UI 下拉执行级测试、保存/应用/删除/排序事件绑定测试已纳入测试套件。
-- GitHub Actions #84（测试检查点提交 \`d52f553\`）成功；业务发布仍为 2.0.1 / Actions #82。
+- `node --check userscripts/115-multiview-random-v2.user.js` 通过。
+- `node --check tests/115-v2-backup-import.test.js` 通过。
+- `npm test`：219/219 tests passed，0 failures。
+- 本轮专项回归覆盖：同名收藏夹不重复、原有视频关系迁移、无关本地收藏夹及关系保留。
+- `npm run check` 与正式构建/部署待本轮提交后完成；当前已知 2.0.1 快照不可覆盖，2.0.2 使用新快照发布。
 - 证据边界：自动化测试与构建不等于真实 115 账号验收；真实账号验收按用户要求由用户自行完成。
-
 ## 2.0 里程碑
 权威计划见 \`docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md\`。
 - M1 随机 API 适配器与纯随机引擎：已完成。
@@ -44,11 +44,10 @@
 
 ## 已确认产品规则
 
-- 当前安装版本：2.0.1；方案保存失败 `option is not defined` 已修复并发布。
-- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`。
-- 下一步优先级：待浏览器连接可用后执行 M1 页面启动与控制台检查，再执行 M2 保存/应用/编辑/删除/排序/刷新恢复；随后依次 M3-M6。真实 115 账号数据不得清理或破坏。
-- 浏览器控制前置条件：需要从已安装 ChatGPT 浏览器扩展的原始浏览器会话打开本对话并建立连接；当前调用返回 originating browser context unavailable。不要将代码级测试描述为真实 UI 测试。
-
+- 当前线上版本：2.0.1；本轮 2.0.2 修复完成后再核对线上版本与安装入口。
+- 安装入口保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`。
+- 更新地址保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`。
+- 真实 115 验收仍由用户自行执行；未反馈前不得宣称真实账号验证已完成。
 
 - 多来源按 115 文件 ID 去重，不做内容哈希。
 - 文件夹模式支持一个或多个文件夹，默认递归子文件夹；全盘模式忽略文件夹选择。

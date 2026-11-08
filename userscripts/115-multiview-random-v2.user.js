@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.1
+// @version      2.0.2
 // @match        https://115.com/*
 // @exclude      https://115.com/web/lixian/master/*
 // @connect      webapi.115.com
@@ -1832,6 +1832,7 @@
       const recentReadDone = transactionPromise(recentReadTx);
       const existingRecent = await requestPromise(recentReadTx.objectStore('recentDirectories').index('byAccount').getAll(only(owner)));
       await recentReadDone;
+      const favoriteFolderIdRemap = new Map();
       if (strategy === 'merge') {
         for (const item of existingPreferences) {
           if (!preferenceMap.has(item.pickcode)) preferenceMap.set(item.pickcode, item);
@@ -1857,14 +1858,22 @@
           if (!incoming || Number(item.lastUsedAt || 0) > Number(incoming.lastUsedAt || 0)) recentMap.set(key, item);
         }
         for (const item of existingFavoriteFolders) {
-          if (!favoriteFolderMap.has(item.folderId)) favoriteFolderMap.set(item.folderId, item);
+          if (favoriteFolderMap.has(item.folderId)) continue;
+          const nameKey = String(item.name || '').trim().toLocaleLowerCase();
+          const sameName = Array.from(favoriteFolderMap.values()).find(folder =>
+            folder.folderId !== DEFAULT_FAVORITE_FOLDER_ID &&
+            String(folder.name || '').trim().toLocaleLowerCase() === nameKey);
+          if (sameName) favoriteFolderIdRemap.set(item.folderId, sameName.folderId);
+          else favoriteFolderMap.set(item.folderId, item);
         }
         for (const item of existingFavoriteFolderItems) {
-          const key = item.folderId + ':' + item.pickcode;
-          if (!favoriteFolderItemMap.has(key)) favoriteFolderItemMap.set(key, item);
+          const folderId = favoriteFolderIdRemap.get(item.folderId) || item.folderId;
+          const key = folderId + ':' + item.pickcode;
+          if (!favoriteFolderItemMap.has(key)) {
+            favoriteFolderItemMap.set(key, Object.assign({}, item, { folderId }));
+          }
         }
       }
-
       for (const preference of preferenceMap.values()) {
         if (!preference.favorite) continue;
         const key = DEFAULT_FAVORITE_FOLDER_ID + ':' + preference.pickcode;
@@ -2398,7 +2407,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
