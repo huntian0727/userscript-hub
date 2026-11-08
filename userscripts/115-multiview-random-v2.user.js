@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.7
+// @version      2.0.8
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2427,7 +2427,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.7';
+  const VERSION = '2.0.8';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -6695,6 +6695,7 @@
   // 独立递归切分树布局：只在混合宽高比场景启用，保持视频原始比例且不裁切。
   const ASPECT_TREE_ITERATIONS = 160;
   const ASPECT_TREE_RESTARTS = 2;
+  const ASPECT_TREE_EVENNESS_WEIGHT = 0.18;
   const ASPECT_TREE_MAX_COVERAGE_REGRESSION = 0.01;
   function createAspectTreeRandom(seed) {    let state = (Number(seed) >>> 0) || 1;
     return function random() {
@@ -6988,8 +6989,10 @@
     let best = null;
     const consider = candidate => {
       if (!candidate || candidate.rectangles.length !== cells.length) return;
+      if (!best || candidate.score > best.score + 0.0001) best = candidate;
     };
-    const considerPartition = (partition, orientation) => {      if (!partition) return;
+    const considerPartition = (partition, orientation) => {
+      if (!partition) return;
       consider(orientation === 'rows'
         ? buildJustifiedRowsCandidate(cells, partition, space)
         : buildBalancedColumnsCandidate(cells, partition, space));
@@ -7034,7 +7037,9 @@
       }
     }
     return best;
-  }  function applyOptimalAspectGridLayout(session, cells) {
+  }
+
+  function applyOptimalAspectGridLayout(session, cells) {
     const layout = chooseOptimalAspectGridLayout(session, cells);
     if (!layout) return false;
     const trackCount = ASPECT_GRID_TRACKS;
