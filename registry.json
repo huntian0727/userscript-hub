@@ -42,6 +42,14 @@
       "enabled": true
     },
     {
+      "id": "115-multiview-random-v2",
+      "displayName": "115 多画面播放器 · 随机探索 v2.0",
+      "description": "文件夹/全盘统一随机探索，按115文件ID去重；支持关键词/大小筛选、方案保存排序、锁定/换片/失败跳过；提供本地JSON备份，可手动上传至115根目录。",
+      "source": "userscripts/115-multiview-random-v2.user.js",
+      "channel": "正式发布 · v2.0.0（独立更新通道；真实115验收由用户完成）",
+      "enabled": true
+    },
+    {
       "id": "115-video-universe",
       "displayName": "拉面视频宇宙 · 3D立体星图（v0.3.1）",
       "description": "HOME真实账号试用候选：已发现星球/视频样本搜索、视频卫星分批换批、当前目录面包屑导航；115官方播放与可选HLS预览。真实账号验收待HOME登录态。",

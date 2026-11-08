@@ -7,14 +7,26 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(
-  path.join(__dirname, '..', 'userscripts', '115-multiview-full-disk.user.js'),
+  path.join(__dirname, '..', 'userscripts', '115-multiview-random-v2.user.js'),
   'utf8'
 ).replace(/\r\n/g, '\n');
-
 const start = source.indexOf('(function expose115DataAdapter(');
-const end = source.indexOf('\n(function attach115IndexManager', start);
+const end = source.indexOf('\n(function attach115PlayerPreferenceStore', start);
 assert.ok(start >= 0 && end > start, '115 data adapter module boundaries are present');
-const context = { URL, setTimeout, clearTimeout };
+assert.equal(source.includes('(function attach115IndexManager('), false, 'v2 does not ship the legacy index manager');
+assert.equal(source.includes('(function attach115IndexStore('), false, 'v2 does not ship the legacy index writer/scanner');
+assert.equal(source.includes('N115IndexStore'), false, 'v2 does not create or mutate the legacy index database');
+assert.match(source, /expose115LegacyFavoriteLookup/, 'v2 keeps a separate legacy favorite lookup for backward compatibility');
+assert.match(source, /legacyFavoriteLookup\.findVideosByPickcodes/, 'legacy lookup is only used to enrich saved favorites');
+assert.equal(source.includes('saveScan'), false, 'v2 cannot create legacy scan jobs');
+assert.equal(source.includes('commitDirectory'), false, 'v2 cannot write scanned directory records');
+assert.equal(source.includes('deleteScan'), false, 'v2 cannot delete legacy scan records');
+assert.equal(source.includes('async function collectVideos('), false, 'v2 playback never falls back to local index collection');
+assert.equal(source.includes('async function scanTree('), false, 'v2 does not ship the legacy recursive scan path');
+assert.equal(source.includes('async function listDirectory('), false, 'v2 does not ship the legacy directory index reader');
+assert.equal(source.includes('globalThis.N115IndexManagerUI'), false, 'v2 does not depend on the old index UI');
+assert.match(source, /element\('button', 'launcher', '随机探索'\)/, 'v2 exposes one unified random-exploration entry');
+const context = { URL, URLSearchParams, setTimeout, clearTimeout };
 vm.runInNewContext(source.slice(start, end), context, { filename: 'N115DataAdapter.js' });
 const dataAdapterApi = context.N115DataAdapter;
 const {
@@ -34,6 +46,76 @@ function rawVideo(id) {
     pc: 'pick' + String(id).padStart(2, '0')
   };
 }
+test('random video reads target a folder tree directly and honor recursive and size parameters', async () => {
+  const requests = [];
+  const adapter = dataAdapterApi.create115DataAdapter({
+    request: async url => {
+      const parsed = new URL(url);
+      requests.push(parsed);
+      const offset = Number(parsed.searchParams.get('offset'));
+      const row = Object.assign(rawVideo(77), { cid: '12345' });
+      return { text: JSON.stringify({
+        state: true, data: offset === 0 ? [row] : [], offset, count: 1, page_size: 1,
+        path: [{ cid: '12345', pid: '0', name: 'A' }]
+      }) };
+    }
+  });
+  const result = await adapter.readRandomVideo('12345', 0, {
+    recursive: true, minSizeMB: '200', maxSizeMB: '900'
+  });
+  assert.equal(result.count, 1);
+  assert.equal(result.item.id, '77');
+  assert.equal(requests[0].pathname, '/files');
+  assert.equal(requests[0].searchParams.get('cid'), '12345');
+  assert.equal(requests[0].searchParams.get('cur'), '0');
+  assert.equal(requests[0].searchParams.get('type'), '4');
+  assert.equal(requests[0].searchParams.get('min_size'), String(200 * 1024 * 1024));
+  assert.equal(requests[0].searchParams.get('max_size'), String(900 * 1024 * 1024));
+});
+
+test('folder-scoped keyword search and paged folder picker do not build a directory index', async () => {
+  const requests = [];
+  const adapter = dataAdapterApi.create115DataAdapter({
+    request: async url => {
+      const parsed = new URL(url);
+      requests.push(parsed);
+      const offset = Number(parsed.searchParams.get('offset'));
+      const isFolderPage = parsed.searchParams.get('nf') === '1';
+      const data = isFolderPage
+        ? [{ cid: '23456', pid: '12345', n: 'child-folder' }]
+        : [Object.assign(rawVideo(88), { cid: '12345' })];
+      return { text: JSON.stringify({
+        state: true, data: offset === 0 ? data : [], offset, count: data.length ? 1 : 0,
+        page_size: 100, path: [{ cid: '12345', pid: '0', name: 'A' }]
+      }) };
+    }
+  });
+  const searched = await adapter.readSearchedVideo('爱情', 0, { cid: '12345' });
+  assert.equal(searched.item.id, '88');
+  assert.equal(requests[0].pathname, '/files/search');
+  assert.equal(requests[0].searchParams.get('cid'), '12345');
+
+  const page = await adapter.readDirectoryPage('12345', 0, { pageSize: 20 });
+  assert.equal(page.folders.length, 1);
+  assert.equal(page.folders[0].id, '23456');
+  assert.equal(page.folders[0].path, '/A/child-folder');
+  assert.equal(requests[1].searchParams.get('cur'), '1');
+  assert.equal(requests[1].searchParams.get('nf'), '1');
+  assert.equal(page.hasMore, false);
+});
+
+test('folder picker rejects empty or overfull pages before the reported end', async () => {
+  for (const response of [
+    { data: [], count: 2, offset: 0 },
+    { data: [rawVideo(1), rawVideo(2)], count: 1, offset: 0 }
+  ]) {
+    const adapter = dataAdapterApi.create115DataAdapter({
+      request: async () => ({ text: JSON.stringify({ state: true, path: [], ...response }) })
+    });
+    await assert.rejects(() => adapter.readDirectoryPage('12345', 0, { pageSize: 1 }), /分页数据不完整/);
+  }
+});
+
 
 function createAdapter(options = {}) {
   const calls = [];

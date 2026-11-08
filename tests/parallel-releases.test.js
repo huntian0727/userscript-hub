@@ -51,13 +51,30 @@ test('unified exploration upgrades the existing test channel', () => {
   assert.notEqual(readMetadata(source).namespace, readMetadata(read(stable.source)).namespace, 'parallel install must have a distinct Tampermonkey namespace');
 });
 
+test('random playback v2.0 is a separately published channel and preserves the v1.9.1 snapshot', () => {
+  const v2 = registry.scripts.find(item => item.id === '115-multiview-random-v2');
+  assert.ok(v2);
+  assert.equal(v2.enabled, true);
+  const source = read(v2.source);
+  const served = withUpdateUrls(source, v2.id, baseUrl);
+  assert.equal(readMetadata(source).version, '2.0.0');
+  assert.equal(readMetadata(source).name, '115多画面播放器（随机探索 v2.0）');
+  assert.equal(readMetadata(source).namespace, 'local.115.multiview.random.v2');
+  assert.equal(served.updateUrl, baseUrl + '/userscripts/115-multiview-random-v2.meta.js');
+  assert.equal(served.downloadUrl, baseUrl + '/userscripts/115-multiview-random-v2.user.js');
+  const meta = read('userscripts/115-multiview-random-v2.meta.js');
+  assert.equal(readMetadata(meta).version, '2.0.0');
+  assert.ok(meta.includes('// @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js'));
+  assert.ok(meta.includes('// @downloadURL  https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js'));
+  assert.equal(normalizeEol(read('userscripts/115-multiview-full-disk.user.js')),
+    normalizeEol(read('history/115-multiview-full-disk/1.9.1.user.js')));
+});
 test('parallel v1.7.0 snapshot uses only the independent update channel', () => {
   const snapshot = read('history/115-multiview-full-disk/1.7.0.user.js');
   assert.ok(snapshot.includes('/userscripts/115-multiview-full-disk.meta.js'));
   assert.ok(snapshot.includes('/userscripts/115-multiview-full-disk.user.js'));
   assert.ok(!snapshot.includes('/userscripts/115-multiview-indexed.meta.js'));
 });
-
 test('v1.6.0 through v1.6.2 previous releases remain immutable and available', () => {
   for (const [version, delivery] of [['1.6.0', 'FDX-160-01'], ['1.6.1', 'FDX-161-01'], ['1.6.2', 'FDX-162-01']]) {
     const snapshot = read('history/115-multiview-full-disk/' + version + '.user.js');
