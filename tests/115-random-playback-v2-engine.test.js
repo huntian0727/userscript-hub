@@ -13,6 +13,38 @@ const context = {};
 vm.runInNewContext(source.slice(start, end), context, { filename: 'N115RandomPlayback.js' });
 const api = context.N115RandomPlayback;
 
+test('folder picker loads and selects a directory through the real request wrapper without an abort signal', async () => {
+  const adapterStart = source.indexOf('(function expose115DataAdapter(');
+  const adapterEnd = source.indexOf('(function attach115PlayerPreferenceStore(', adapterStart);
+  const requestStart = source.indexOf('  function requestText(');
+  const requestEnd = source.indexOf('  function createGMLoader(', requestStart);
+  assert.ok(adapterStart >= 0 && adapterEnd > adapterStart && requestStart >= 0 && requestEnd > requestStart);
+  const network = { URL, URLSearchParams, trustedUrl: value => value, DOMException, GM_xmlhttpRequest(options) {
+    const url = new URL(options.url);
+    assert.equal(url.pathname, '/files');
+    assert.equal(url.searchParams.get('cid'), '0');
+    queueMicrotask(() => options.onload({
+      status: 200, responseText: JSON.stringify({
+        state: true, count: 1, offset: 0, path: [], data: [{ cid: '10', pid: '0', n: '示例目录' }]
+      })
+    }));
+  } };
+  vm.runInNewContext(source.slice(adapterStart, adapterEnd) + source.slice(requestStart, requestEnd), network);
+  const adapter = network.N115DataAdapter.create115DataAdapter({
+    request: (url, { signal }) => network.requestText(url, signal, 30000)
+  });
+  const browser = api.createFolderBrowser({ adapter });
+
+  await browser.loadNext();
+  const { folders, error } = browser.getState();
+  assert.equal(error, '');
+  assert.equal(folders.length, 1);
+  assert.equal(folders[0].name, '示例目录');
+  const { selected } = browser.toggleSelected(folders[0]);
+  assert.equal(selected[0].cid, '10');
+  assert.equal(selected[0].recursive, true);
+});
+
 test('v2 standalone userscript parses and mounts the unified exploration dialog', () => {
   assert.doesNotThrow(() => new vm.Script(source, { filename: '115-multiview-random-v2.user.js' }));
   assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,\s*fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls\);/);

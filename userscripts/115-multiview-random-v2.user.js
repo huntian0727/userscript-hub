@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.8
+// @version      2.0.9
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2427,7 +2427,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.8';
+  const VERSION = '2.0.9';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2843,15 +2843,15 @@
       const finish = (error, response) => {
         if (settled) return;
         settled = true;
-        signal.removeEventListener('abort', cancel);
+        signal?.removeEventListener('abort', cancel);
         if (error) reject(error); else resolve(response);
       };
       const cancel = () => {
         finish(new DOMException('已关闭播放器', 'AbortError'));
         handle?.abort();
       };
-      if (signal.aborted) return cancel();
-      signal.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) return cancel();
+      signal?.addEventListener('abort', cancel, { once: true });
       try {
         handle = GM_xmlhttpRequest({
           method: 'GET', url: trustedUrl(url), timeout, responseType: 'text',
@@ -8826,7 +8826,7 @@
       row.append(enter, add, recursiveLabel);
       folderPickerList.append(row);
     }
-    if (!state.folders.length && !state.loading) {
+    if (!state.folders.length && !state.loading && !state.error) {
       folderPickerList.append(element('div', 'folder-picker-empty', '此目录下没有子文件夹'));
     }
     folderPickerStatus.textContent = state.loading ? '正在读取文件夹…' : state.error;
