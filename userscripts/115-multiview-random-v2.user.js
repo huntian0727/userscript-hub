@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.10
+// @version      2.0.11
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -409,7 +409,7 @@
       if (payload.data.length !== Number(safeOffset < count)) {
         throw new N115DataError('115 随机位置返回的记录数不一致，请重试');
       }
-      return { count, item: normalizeListedVideo(payload, folderId) };
+      return { count, item: normalizeListedVideo(payload, folderId, options.recursive === false) };
     }
 
     async function readGlobalVideo(offset, options = {}) {
@@ -468,12 +468,13 @@
         nextOffset, hasMore: nextOffset < count };
     }
 
-    function normalizeListedVideo(payload, currentCid = '0') {
+    function normalizeListedVideo(payload, currentCid = '0', directListing = false) {
       const row = payload.data[0];
       if (row?.fid == null) return null;
       const segments = normalizePathSegments(payload.path);
       const parentId = row.cid == null ? String(currentCid) : String(row.cid);
       const item = normalizeRecord(row, currentCid, segments.at(-1)?.id === parentId ? segments : []);
+      if (item && !directListing && (row.cid == null || row.cid === '')) item.pathParentUnknown = true;
       return item?.isVideo ? item : null;
     }
 
@@ -2427,7 +2428,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.10';
+  const VERSION = '2.0.11';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -3083,6 +3084,83 @@
     const seconds = totalSeconds % 60;
     const pad = part => String(part).padStart(2, '0');
     return hours ? hours + ':' + pad(minutes) + ':' + pad(seconds) : minutes + ':' + pad(seconds);
+  }
+
+  function formatVideoFileSize(value) {
+    if (value == null || value === '') return '未知';
+    let size = Number(value);
+    if (!Number.isFinite(size) || size < 0) return '未知';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit++;
+    }
+    return (unit ? size.toFixed(size < 10 ? 2 : 1) : String(size)) + ' ' + units[unit];
+  }
+
+  function videoDisplayPath(item, segments = item?.pathSegments) {
+    const parentId = String(item?.parentId ?? '');
+    if (!item?.name || item.pathParentUnknown || !/^\d+$/.test(parentId)) return '';
+    if (parentId === '0') return '/' + item.name;
+    if (!segments?.length || String(segments.at(-1).id) !== parentId) return '';
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      if (!segment.name || (segment.parentId != null &&
+          String(segment.parentId) !== String(i ? segments[i - 1].id : '0'))) return '';
+    }
+    return '/' + segments.map(segment => segment.name).concat(item.name).join('/');
+  }
+
+  function setCellFilePath(cell, path, pendingText = '完整路径暂不可用') {
+    cell.filePath.textContent = path || pendingText;
+    cell.filePath.title = path;
+  }
+
+  function updateCellFileSummary(cell) {
+    const duration = cell.video.readyState > 0 ? cell.video.duration : NaN;
+    cell.fileSummary.textContent = '大小 ' + formatVideoFileSize(cell.item?.sizeBytes) +
+      ' · 时长 ' + (Number.isFinite(duration) && duration > 0 ? formatPlaybackTime(duration) : '待加载');
+  }
+
+  function resetCellFileDetails(cell) {
+    cell.pathLookupItem = null;
+    cell.fileDetails.hidden = !cell.item;
+    if (!cell.item) {
+      setCellFilePath(cell, '');
+      cell.fileSummary.textContent = '';
+      return;
+    }
+    updateCellFileSummary(cell);
+    const canLookup = !cell.item.pathParentUnknown && /^[1-9]\d*$/.test(String(cell.item.parentId ?? ''));
+    setCellFilePath(cell, videoDisplayPath(cell.item), canLookup ? '完整路径待查询' : undefined);
+  }
+
+  async function loadCellFilePath(session, cell) {
+    const item = cell.item;
+    if (!item || session.closed || item.pathParentUnknown || cell.filePath.title || cell.pathLookupItem === item) return;
+    const parentId = String(item.parentId ?? '');
+    if (!/^[1-9]\d*$/.test(parentId)) return;
+    cell.pathLookupItem = item;
+    setCellFilePath(cell, '', '正在查询完整路径…');
+    let lookup = session.folderPaths.get(parentId);
+    if (!lookup) {
+      if (session.folderPaths.size >= 128) session.folderPaths.delete(session.folderPaths.keys().next().value);
+      lookup = fullDiskAdapter.readVideoFolder(parentId, { signal: session.abort.signal });
+      session.folderPaths.set(parentId, lookup);
+    }
+    try {
+      const segments = await lookup;
+      if (!session.closed && cell.item === item && cell.pathLookupItem === item) {
+        setCellFilePath(cell, videoDisplayPath(item, segments));
+      }
+    } catch (_) {
+      if (session.folderPaths.get(parentId) === lookup) session.folderPaths.delete(parentId);
+      if (!session.closed && cell.item === item && cell.pathLookupItem === item) {
+        setCellFilePath(cell, '', '完整路径查询失败');
+        cell.pathLookupItem = null;
+      }
+    }
   }
 
   function updateCellProgress(cell) {
@@ -3829,6 +3907,7 @@
     cell.aspectRatio = DEFAULT_ASPECT_RATIO;
     cell.name.textContent = '空窗口';
     cell.name.title = '';
+    resetCellFileDetails(cell);
     cell.quality.textContent = '';
     cell.video.removeAttribute('src');
     cell.video.load();
@@ -3855,6 +3934,7 @@
     cell.quality.textContent = '';
     cell.name.textContent = item.name;
     cell.name.title = item.name || '';
+    resetCellFileDetails(cell);
     revealCellHeading(cell, 'programmatic');
     const visible = isCellVisible(session, cell);
     cell.layoutPaused = !visible;
@@ -3862,6 +3942,7 @@
     if (visible) {
       cell.loadStarted = true;
       void loadCell(session, cell, item);
+      if (cell.box.matches(':hover, :focus-within')) void loadCellFilePath(session, cell);
     }
     updateCellControls(session, cell);
     applyLayoutPositions(session);
@@ -3891,6 +3972,7 @@
     cell.aspectRatio = DEFAULT_ASPECT_RATIO;
     cell.name.textContent = '等待目录视频…';
     cell.name.title = '';
+    resetCellFileDetails(cell);
     cell.quality.textContent = '';
     setStatus(cell, '正在准备同目录视频候选…');
     updateCellControls(session, cell);
@@ -4350,6 +4432,7 @@
     cell.aspectRatio = DEFAULT_ASPECT_RATIO;
     cell.name.textContent = '收藏夹候选不足';
     cell.name.title = '';
+    resetCellFileDetails(cell);
     cell.quality.textContent = '';
     cell.video.removeAttribute('src');
     cell.video.load();
@@ -6006,6 +6089,10 @@
     name.title = item?.name || '';
     const quality = element('span', 'quality');
     quality.hidden = true;
+    const fileDetails = element('div', 'cell-file-details');
+    const fileSummary = element('span', 'cell-file-summary');
+    const filePath = element('span', 'cell-file-path');
+    fileDetails.append(fileSummary, filePath);
     const indicators = element('div', 'cell-indicators');
     indicators.hidden = true;
     const mainIndicator = element('span', 'cell-indicator cell-indicator-main', '主屏');
@@ -6014,7 +6101,7 @@
     const soundIndicator = element('span', 'cell-indicator cell-indicator-sound', '声音');
     [mainIndicator, lockIndicator, favoriteIndicator, soundIndicator].forEach(indicator => { indicator.hidden = true; });
     indicators.append(mainIndicator, lockIndicator, favoriteIndicator, soundIndicator);
-    heading.append(indexBadge, name, quality, indicators);
+    heading.append(indexBadge, name, quality, indicators, fileDetails);
 
     const tools = element('div', 'cell-tools hud');
     tools.setAttribute('aria-label', '视频窗口操作');
@@ -6060,6 +6147,7 @@
       session.fullDiskSource ? '正在从115抽取视频…' : '本轮候选已用完，请开启新一轮');
     const cell = {
       index, slotId, layoutSlot: index, item, box, heading, video, status, quality, name,
+      fileDetails, fileSummary, filePath, pathLookupItem: null,
       mainIndicator, lockIndicator, favoriteIndicator, soundIndicator,
       mainActions, mainButton, mainMenu, mainMenuAButton, mainMenuBButton, mainScreenBadge,
       mainMenuOpen: false, progressBar, progressFill, deleteButton: null,
@@ -6188,15 +6276,18 @@
     box.append(video, mainActions, mainScreenBadge, status, tools);
     session.grid.append(box);
     session.cells[index] = cell;
+    resetCellFileDetails(cell);
+    box.addEventListener('pointerenter', () => { void loadCellFilePath(session, cell); });
+    box.addEventListener('focusin', () => { void loadCellFilePath(session, cell); });
 
     box.addEventListener('click', event => {
       if (event.target instanceof Element &&
-          (event.target.closest('.main-screen-actions') || event.target.closest('.controls') || event.target.closest('.bar'))) return;
+          (event.target.closest('.main-screen-actions, .controls, .bar, .cell-file-details'))) return;
       handleCellClick(session, cell, event);
     });
     box.addEventListener('dblclick', event => {
       if (event.target instanceof Element &&
-          (event.target.closest('.main-screen-actions') || event.target.closest('.controls') || event.target.closest('.bar'))) return;
+          (event.target.closest('.main-screen-actions, .controls, .bar, .cell-file-details'))) return;
       handleCellDoubleClick(session, cell);
     });
     video.addEventListener('focus', () => {      session.selectedSlotId = slotId;
@@ -6207,11 +6298,15 @@
       updateCellControls(session, cell);
     });
     video.addEventListener('timeupdate', () => updateCellProgress(cell));
-    video.addEventListener('durationchange', () => updateCellProgress(cell));
+    video.addEventListener('durationchange', () => {
+      updateCellProgress(cell);
+      if (cell.item) updateCellFileSummary(cell);
+    });
     video.addEventListener('seeked', () => updateCellProgress(cell));
     video.addEventListener('emptied', () => updateCellProgress(cell));
     video.addEventListener('loadedmetadata', () => {
       updateCellProgress(cell);
+      if (cell.item) updateCellFileSummary(cell);
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         cell.aspectRatio = video.videoWidth / video.videoHeight;
         scheduleLayoutReflow(session, 120);
@@ -8004,7 +8099,7 @@
         sameFolderMode: null, sameFolderRestore: null,
         roundNumber: 1, roundPoolSize: items.length, roundMessage: '', roundRefreshing: false,
         failedCount: 0, failedPickcodes: new Set(), authBlocked: false, resumeButton: null,
-        abort: new AbortController(), closed: false, globalPaused: false,
+        abort: new AbortController(), folderPaths: new Map(), closed: false, globalPaused: false,
         layoutCount: indexed.settings.layoutCount, layoutMode: indexed.settings.layoutMode || 'grid',
         standardLayoutCount: indexed.settings.layoutMode === 'grid' ? indexed.settings.layoutCount : 4,
         dualSmallCount: indexed.settings.dualSmallCount || DEFAULT_DUAL_SMALL_COUNT,
@@ -8500,12 +8595,17 @@
     .hud .name{display:block;padding:6px 10px;font-size:12px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000}
     .hud .idx{display:inline-block;background:#4da3ff;color:#fff;font-size:10px;border-radius:3px;padding:1px 5px;margin-right:6px;vertical-align:1px}
     .fname{display:inline}
+    .cell-file-details{margin-top:4px;color:#e3ebf4;line-height:1.4;white-space:normal}
+    .cell-file-details[hidden]{display:none}
+    .cell-file-summary,.cell-file-path{display:block}
+    .cell-file-path{overflow-wrap:anywhere;max-height:4.2em;overflow:auto}
+    .cell:hover .cell-file-path,.cell:focus-within .cell-file-path{pointer-events:auto}
     .quality,.cell-indicators{display:none!important}
     .cell-indicator[hidden]{display:none}
     video{position:relative;z-index:1;display:block;width:100%;height:100%;object-fit:contain;background:#000}
     .hud{position:absolute;inset:0;opacity:0;transition:opacity .15s;background:linear-gradient(to bottom,rgba(0,0,0,.55),transparent 35%,transparent 60%,rgba(0,0,0,.6));display:flex;flex-direction:column;justify-content:space-between;z-index:5;pointer-events:none}
     .hud .controls,.hud .bar{pointer-events:auto}
-    .cell:hover .hud{opacity:1}
+    .cell:hover .hud,.cell:focus-within .hud{opacity:1}
     .hud .controls{display:flex;align-items:center;justify-content:center;gap:14px;padding:10px}
     .hbtn{border:none;background:rgba(20,20,20,.75);color:#fff;cursor:pointer;border-radius:6px;padding:7px 14px;font-size:13px;backdrop-filter:blur(4px);transition:.12s;border:1px solid rgba(255,255,255,.15)}
     .hbtn:hover{background:#4da3ff;border-color:#4da3ff}
