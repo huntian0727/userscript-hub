@@ -101,3 +101,59 @@ test('full-disk candidate extraction runs four bounded workers and checks accoun
   assert.equal(accountChecks, 2, 'one initial check plus one check after 12 candidates');
   assert.equal(sourceState.error, '');
 });
+
+test('only unfilled demand schedules two delayed retries after empty batches', async () => {
+  const start = source.indexOf('  function scheduleFullDiskEmptyBatchRetry(');
+  const end = source.indexOf('  async function drawFullDiskBatch(', start);
+  assert.ok(start >= 0 && end > start);
+  const timers = new Map();
+  let batches = 0;
+  let waiting = true;
+  const refill = new Function('setTimeout', 'clearTimeout', 'FULL_DISK_STALL_MS',
+    'FULL_DISK_EMPTY_BATCH_RETRIES', 'FULL_DISK_EMPTY_BATCH_DELAY_MS',
+    'fullDiskSession', 'fullDiskNeedsItems', 'drawFullDiskBatch', 'refreshFullDiskView', 'preparedFullDisk',
+    source.slice(start, end) + '\nreturn refillFullDisk;')(
+    (callback, delay) => {
+      const id = Symbol();
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    id => timers.delete(id),
+    numericConstant('FULL_DISK_STALL_MS'),
+    numericConstant('FULL_DISK_EMPTY_BATCH_RETRIES'),
+    numericConstant('FULL_DISK_EMPTY_BATCH_DELAY_MS'),
+    () => ({}),
+    (_source, _inFlight, reserve) => reserve !== 0 || waiting,
+    async state => {
+      batches++;
+      state.limited = !state.blocked;
+      state.error = state.blocked ? 'HTTP 429' : '';
+    },
+    () => {},
+    null
+  );
+  const state = { controller: new AbortController(), items: [], emptyBatchRetries: 0, retryTimer: null };
+  await refill(state);
+  for (const delay of [1500, 3000]) {
+    assert.equal(timers.size, 1);
+    const [id, timer] = timers.entries().next().value;
+    assert.equal(timer.delay, delay);
+    timers.delete(id);
+    timer.callback();
+    await state.refilling;
+  }
+  assert.equal(batches, 3);
+  assert.equal(timers.size, 0, 'a third empty batch stays paused');
+  assert.equal(state.limited, true);
+  await refill(state);
+  assert.equal(batches, 3, 'background events cannot restart a paused batch');
+  waiting = false;
+  await refill(state, true);
+  assert.equal(batches, 4);
+  assert.equal(timers.size, 0, 'spare candidates do not trigger a delayed retry');
+  waiting = true;
+  state.blocked = true;
+  await refill(state, true);
+  assert.equal(batches, 5);
+  assert.equal(timers.size, 0, 'platform refusal never schedules a retry');
+});

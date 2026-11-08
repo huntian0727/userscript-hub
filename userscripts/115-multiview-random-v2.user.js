@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.13
+// @version      2.0.14
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2468,7 +2468,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.13';
+  const VERSION = '2.0.14';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2491,6 +2491,8 @@
   const FULL_DISK_RESERVE = 6;
   const FULL_DISK_EXPLORE_RESERVE = 2;
   const FULL_DISK_BATCH_ATTEMPTS = 24;
+  const FULL_DISK_EMPTY_BATCH_RETRIES = 2;
+  const FULL_DISK_EMPTY_BATCH_DELAY_MS = 1500;
   const FULL_DISK_DRAW_CONCURRENCY = 4;
   const FULL_DISK_ACCOUNT_CHECK_INTERVAL = 12;
   // Opt in from the browser console: localStorage.setItem('115-v2-timing', '1').
@@ -7643,14 +7645,17 @@
     });
     let resolveFirstItem;
     const firstItemPromise = new Promise(resolve => { resolveFirstItem = resolve; });
-    return {
+    const source = {
       taskId: 'direct-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
       accountId, filters, ready, controller, randomEngine,
       items: [], pendingSwaps: new Map(), folderPaths: new Map(),
       count: null, accepted: 0, checked: 0,
       refilling: null, starting: false, exhausted: false, limited: false, error: '', accountChanged: false,
+      retryTimer: null, emptyBatchRetries: 0,
       firstItemPromise, resolveFirstItem
     };
+    controller.signal.addEventListener('abort', () => clearTimeout(source.retryTimer), { once: true });
+    return source;
   }
   function fullDiskSession(source) {
     return active?.fullDiskSource === source && !active.closed ? active : null;
@@ -7663,6 +7668,7 @@
   function fullDiskStateLabel(source) {
     if (source.accountChanged) return '账号已切换，请重新打开探索';
     if (source.error) return '抽取暂缓，可继续抽取';
+    if (source.retryTimer) return '稍后自动继续补空宫格';
     if (source.refilling) {
       if (source.count === null) return '正在读取视频范围';
       return '正在抽取 · 已检查 ' + formatFullDiskCount(source.checked) + ' 个';
@@ -7755,7 +7761,7 @@
           source.pendingSwaps.delete(cell);
           replaceCell(session, cell, item);
         } else {
-          setStatus(cell, source.error || (source.refilling ? fullDiskStateLabel(source) + '…'
+          setStatus(cell, source.error || (source.refilling || source.retryTimer ? fullDiskStateLabel(source) + '…'
             : source.exhausted ? '本轮暂无其他符合条件的视频，可调整筛选'
               : '本批暂无更多候选，可继续抽取或调整筛选'));
         }
@@ -7779,6 +7785,7 @@
     if (queue.some(candidate => itemKey(candidate) === key)) return false;
     queue.push(item);
     source.accepted++;
+    source.emptyBatchRetries = 0;
     if (source.resolveFirstItem) {
       source.resolveFirstItem(item);
       source.resolveFirstItem = null;
@@ -7786,7 +7793,7 @@
     return true;
   }
 
-  function fullDiskNeedsItems(source, inFlight = 0) {
+  function fullDiskNeedsItems(source, inFlight = 0, reserve = FULL_DISK_EXPLORE_RESERVE) {
     if (!source || source.controller.signal.aborted || source.accountChanged || source.exhausted) return false;
     const session = fullDiskSession(source);
     if (!session) return source.starting && source.items.length + inFlight < 1;
@@ -7797,13 +7804,32 @@
       cell && cell.index < session.layoutCount && !cell.locked && !cell.deleting &&
       (!cell.item || source.pendingSwaps.get(cell) === cell.generation)
     ).length;
-    return session.availableItems.length + inFlight < FULL_DISK_EXPLORE_RESERVE + needed;
+    return session.availableItems.length + inFlight < reserve + needed;
+  }
+
+  function scheduleFullDiskEmptyBatchRetry(source) {
+    if (!source.limited || source.error || source.emptyBatchRetries >= FULL_DISK_EMPTY_BATCH_RETRIES ||
+        !fullDiskSession(source) || !fullDiskNeedsItems(source, 0, 0)) return;
+    const delay = FULL_DISK_EMPTY_BATCH_DELAY_MS * ++source.emptyBatchRetries;
+    source.retryTimer = setTimeout(() => {
+      source.retryTimer = null;
+      if (fullDiskSession(source) && fullDiskNeedsItems(source, 0, 0)) {
+        source.limited = false;
+        void refillFullDisk(source);
+      }
+      refreshFullDiskView(source);
+    }, delay);
   }
 
   function refillFullDisk(source, resume = false) {
     if (source.refilling || source.controller.signal.aborted || source.accountChanged || source.exhausted ||
-        (!resume && (source.limited || source.error)) ||
+        (!resume && (source.limited || source.error || source.retryTimer)) ||
         !fullDiskNeedsItems(source)) return source.refilling;
+    if (resume) {
+      clearTimeout(source.retryTimer);
+      source.retryTimer = null;
+      source.emptyBatchRetries = 0;
+    }
     source.error = '';
     source.limited = false;
     const batch = new AbortController();
@@ -7831,6 +7857,7 @@
         source.resolveFirstItem = null;
       }
       if (!source.controller.signal.aborted) {
+        scheduleFullDiskEmptyBatchRetry(source);
         refreshFullDiskView(source);
         if (fullDiskSession(source) || preparedFullDisk === source) void refillFullDisk(source);
       }

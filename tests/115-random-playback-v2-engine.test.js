@@ -485,7 +485,7 @@ test('v2 full-disk queue accepts only the active source and resolves the first p
 
 test('v2 background refill counts only live unlocked pending swaps and pauses for competing playback modes', () => {
   const needsStart = source.indexOf('  function fullDiskNeedsItems(');
-  const needsEnd = source.indexOf('\n  function refillFullDisk', needsStart);
+  const needsEnd = source.indexOf('\n  function scheduleFullDiskEmptyBatchRetry', needsStart);
   assert.ok(needsStart >= 0 && needsEnd > needsStart, 'background refill demand helper is present');
   const activeSource = {
     controller: { signal: { aborted: false } },
