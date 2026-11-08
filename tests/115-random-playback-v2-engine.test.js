@@ -18,17 +18,68 @@ test('v2 standalone userscript parses and mounts the unified exploration dialog'
   assert.match(source, /fullDiskDialog\.append\(fullDiskHeader, exploreScopePicker, exploreHint, profileControls,\s*fullDiskFields, folderSelectionPanel, folderPickerPanel, fullDiskControls\);/);
 });
 
-test('exploration scheme dropdown renders options without an out-of-scope option helper', () => {
+test('exploration scheme dropdown renders options and updates selection controls', () => {
   const start = source.indexOf("  function renderDialogProfiles(selectedId = '')");
   const end = source.indexOf('  async function refreshDialogProfiles', start);
   assert.ok(start >= 0 && end > start, 'scheme dropdown renderer is present');
   const renderer = source.slice(start, end);
   assert.equal(renderer.includes('option('), false, 'renderer must not call an undefined option() helper');
-  assert.equal(renderer.includes("element('option'"), true, 'renderer creates native option elements in its own scope');
-  assert.equal(renderer.includes('profileOption.value = profile.profileId'), true);
+  const profileSelect = {
+    children: [], value: '',
+    replaceChildren() { this.children = []; },
+    append(option) { this.children.push(option); }
+  };
+  const profileDeleteButton = { disabled: false };
+  const profileUpButton = { disabled: false };
+  const profileDownButton = { disabled: false };
+  const element = (tag, className, text) => ({ tag, className, textContent: text, value: '', disabled: false });
+  const renderDialogProfiles = new Function('profileSelect', 'dialogProfiles', 'profileDeleteButton',
+    'profileUpButton', 'profileDownButton', 'element', renderer + '\nreturn renderDialogProfiles;')(    profileSelect,
+    [{ profileId: 'p1', name: '方案一' }, { profileId: 'p2', name: '方案二' }, { profileId: 'p3', name: '方案三' }],
+    profileDeleteButton, profileUpButton, profileDownButton, element
+  );
+  renderDialogProfiles('p2');
+  assert.deepEqual(profileSelect.children.map(item => item.value), ['', 'p1', 'p2', 'p3']);
+  assert.deepEqual(profileSelect.children.map(item => item.textContent), ['选择已保存方案', '方案一', '方案二', '方案三']);
+  assert.equal(profileSelect.value, 'p2');
+  assert.equal(profileDeleteButton.disabled, false);
+  assert.equal(profileUpButton.disabled, false);
+  assert.equal(profileDownButton.disabled, false);
+  renderDialogProfiles('p1');
+  assert.equal(profileUpButton.disabled, true, 'first item cannot move up');
+  assert.equal(profileDownButton.disabled, false);
+  renderDialogProfiles('p3');
+  assert.equal(profileUpButton.disabled, false);
+  assert.equal(profileDownButton.disabled, true, 'last item cannot move down');
+  renderDialogProfiles('missing');
+  assert.equal(profileSelect.value, '', 'unknown selection falls back to placeholder');
+  assert.equal(profileDeleteButton.disabled, true);
+  assert.equal(profileUpButton.disabled, true);
+  assert.equal(profileDownButton.disabled, true);
+});
+test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {test('scheme controls wire save, apply, delete, and reorder actions to the preference store', () => {
+  const start = source.indexOf('  profileLoadButton.onclick = async () => {');
+  const end = source.indexOf('  const fullDiskActions = element(', start);
+  assert.ok(start >= 0 && end > start, 'scheme action handlers are present');
+  const handlers = source.slice(start, end);
+  const save = handlers.slice(handlers.indexOf('  profileSaveButton.onclick = async () => {'), handlers.indexOf('  profileDeleteButton.onclick = async () => {'));
+  const apply = handlers.slice(0, handlers.indexOf('  profileSaveButton.onclick = async () => {'));
+  const remove = handlers.slice(handlers.indexOf('  profileDeleteButton.onclick = async () => {'), handlers.indexOf('  async function moveDialogProfile'));
+  const reorder = handlers.slice(handlers.indexOf('  async function moveDialogProfile'), handlers.length);
+  assert.ok(save.indexOf('preferenceStore.saveProfile(') >= 0);
+  assert.ok(save.indexOf('preferenceStore.listProfiles(') > save.indexOf('preferenceStore.saveProfile('));
+  assert.ok(save.indexOf('renderDialogProfiles(saved.profileId)') > save.indexOf('preferenceStore.listProfiles('));
+  assert.ok(save.includes('保存方案失败：'));
+  assert.ok(apply.includes('writeFullDiskFilters(profile.filters)'));
+  assert.ok(apply.includes('preferenceStore.savePlayerSettings('));
+  assert.ok(apply.includes('preferenceStore.reorderProfiles('));
+  assert.ok(remove.includes('preferenceStore.deleteProfile('));
+  assert.ok(remove.includes('await refreshDialogProfiles()'));
+  assert.ok(reorder.includes('preferenceStore.reorderProfiles('));
+  assert.ok(reorder.includes('await refreshDialogProfiles(reordered[target].profileId)'));
 });
 
-test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {
+
   const start = source.indexOf('    function sortProfilesByOrder(items)');
   const end = source.indexOf('async function listProfiles', start);
   assert.ok(start >= 0 && end > start, 'profile ordering helper is present');

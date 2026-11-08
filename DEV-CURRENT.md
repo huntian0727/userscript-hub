@@ -30,9 +30,9 @@
 ## 最近一次验证证据
 - 脚本语法：`node --check userscripts/115-multiview-random-v2.user.js` 通过。
 - 专项测试：`node --test tests/115-random-playback-v2-engine.test.js tests/115-full-disk-explorer-adapter.test.js tests/parallel-releases.test.js`，40/40 passed。
-- 完整检查：`npm test`，217/217 tests passed；`npm run build` 与 `npm run check` 均通过；构建成功生成 6 个脚本（包含独立 2.0.1）。
-- 本次新增专项回归测试：方案下拉渲染不得引用未定义的 `option()`，且必须创建原生 option 元素。
-- GitHub Actions 部署工作流 #82（commit `9c63345`）已成功。验证边界：自动化测试/构建不等于真实 115 账号冒烟；当前 ChatGPT 浏览器控制连接未建立，未进行登录态浏览器实测；真实账号验收仍由用户负责。
+- 完整检查（本轮）：`npm run check`，218/218 tests passed；构建成功生成 6 个脚本（包含独立 2.0.1）。
+- 本次新增专项回归测试：真实执行方案下拉渲染函数，验证选项文本/ID、默认选择、首尾排序按钮禁用状态、无效选择回退；另验证保存/应用/删除/排序按钮与存储层方法的事件绑定。
+- GitHub Actions 部署工作流 #82（commit `9c63345`）已成功。当前新增的测试文件尚未改变业务源码或发布产物。验证边界：自动化测试/构建不等于真实 115 账号冒烟；浏览器控制调用仍返回 originating browser context unavailable，未进行登录态浏览器实测。
 
 ## 2.0 里程碑
 权威计划见 `docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`。
@@ -44,7 +44,8 @@
 - M6 旧索引写入/扫描/UI/播放依赖移除：已完成；仅保留旧收藏只读兼容查询，专项和完整自动化检查通过。
 - M7 自动化检查、独立构建、差异审查、提交推送和 Pages 部署：已完成；线上 manifest/meta/安装脚本与 SHA256 核验通过。真实 115 测试由用户自行安装后执行。
 
-## 已确认产品规则## 当前测试恢复点（2026-11-08）
+## 已确认产品规则## 当前测试恢复点（2026-11-08）- 2026-11-08 后续测试：`npm run check` 通过，218/218；方案下拉渲染函数执行级测试和方案操作事件绑定测试已补充。该测试变更仅在测试文件，待随恢复检查点提交，不触发版本发布。
+
 - 当前安装版本：2.0.1；方案保存失败 `option is not defined` 已修复并发布。
 - 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`。
 - 下一步优先级：待浏览器连接可用后执行 M1 页面启动与控制台检查，再执行 M2 保存/应用/编辑/删除/排序/刷新恢复；随后依次 M3-M6。真实 115 账号数据不得清理或破坏。
