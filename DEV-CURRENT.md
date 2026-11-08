@@ -13,11 +13,15 @@
 - 发布目标：v2.0.0；独立更新通道，不覆盖历史版本。
 
 ## 最近一次核对的代码状态
-- HEAD：`edadef0a538c717fd39a377a54ecbdb0863b4a20`（短 SHA：`edadef0`）；本轮尚未提交。
-- 当前工作区：dirty，共 12 个路径；3 个 tracked modified、9 个 untracked；0 staged、0 conflict。
-- tracked modified：`registry.json`、`tests/115-full-disk-explorer-adapter.test.js`、`tests/parallel-releases.test.js`。
-- untracked：`AGENTS.md`、`DEV-CURRENT.md`、`DEV-RECOVERY.md`、`docs/DEV-LOG.md`、`docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`、`history/115-multiview-random-v2/2.0.0.user.js`、`tests/115-random-playback-v2-engine.test.js`、`userscripts/115-multiview-random-v2.meta.js`、`userscripts/115-multiview-random-v2.user.js`。
+- 业务代码与发布构建提交：`fb5d7f9c2337c7053fd308dae690f7af6584335a`（短 SHA：`fb5d7f9`）；已提交并推送至 GitHub `main`。随后增加一笔仅更新恢复/发布记录的 docs-only 提交；以当前 `git log -1` 为最新 HEAD。
+- 提交：`feat(115): release independent random explorer v2.0.0`；12 个文件，18,985 insertions / 5 deletions。
+- 当前工作区：干净；无 staged/unstaged/untracked/conflict。
+- 变更包括：独立 v2.0.0 用户脚本及 meta、不可变 2.0.0 历史快照、registry 独立入口、随机引擎/适配器/并行发布测试、AGENTS/恢复手册/检查点/开发日志/实施方案。
 - M6 将旧 `N115IndexStore` 缩减为只读 `N115LegacyFavoriteLookup`：仅供旧收藏条目补全信息；删除旧索引创建/扫描/写入/删除 API，随机播放不依赖旧索引。保留旧 IndexedDB 数据，不执行清库。
+- 同目录播放状态变量已改为读取/加载语义；移除旧索引措辞和扫描依赖。删除视频后只清理播放器收藏/排除偏好，不再更新旧索引数据库。
+- M5 2.0 交付范围为本地 JSON 导出/导入与结构校验；用户可手动上传到 115 根目录 `拉面多宫格播放器/配置备份`。自动上传、云端回读及当前/上一份自动轮换延期 2.1；未验证公开授权 API 前禁止调用未公开接口。
+- 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
+- 旧版 v0.12.4 与 v1.9.1 入口和历史快照保留；2.0 是单独 namespace、单独安装/更新 URL。- M6 将旧 `N115IndexStore` 缩减为只读 `N115LegacyFavoriteLookup`：仅供旧收藏条目补全信息；删除旧索引创建/扫描/写入/删除 API，随机播放不依赖旧索引。保留旧 IndexedDB 数据，不执行清库。
 - 同目录播放状态变量已改为读取/加载语义；移除旧索引措辞和扫描依赖。删除视频后只清理播放器收藏/排除偏好，不再更新旧索引数据库。
 - M5 2.0 交付范围为本地 JSON 导出/导入与结构校验；用户可手动上传到 115 根目录 `拉面多宫格播放器/配置备份`。自动上传、云端回读及当前/上一份自动轮换延期 2.1；未验证公开授权 API 前禁止调用未公开接口。
 - 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试，且不阻塞 2.0 发布。
@@ -38,7 +42,7 @@
 - M4 保存方案与排序：已完成；方案保存/置顶/手动排序/删除及 JSON 备份排序字段已实现。
 - M5 本地 JSON 导出/导入与结构校验：已实现；自动 115 云端上传/轮换/回读校验延期 2.1。
 - M6 旧索引写入/扫描/UI/播放依赖移除：已完成；仅保留旧收藏只读兼容查询，专项和完整自动化检查通过。
-- M7 自动化检查和独立构建：已完成；待最终差异审查、提交/推送/合并至 main、Pages 部署和线上安装文件核验。真实 115 测试由用户发布后执行，不阻塞发布。
+- M7 自动化检查、独立构建、差异审查、提交推送和 Pages 部署：已完成；线上 manifest/meta/安装脚本与 SHA256 核验通过。真实 115 测试由用户自行安装后执行。
 
 ## 已确认产品规则
 - 多来源按 115 文件 ID 去重，不做内容哈希。
@@ -55,13 +59,25 @@
 - 2.1 延后：自动云端备份、自动轮换/回读、收藏夹随机来源、压力/长稳/极端异常全矩阵、内部函数穷尽测试、非关键重构、统计诊断、额外动画布局和 UI 微调。
 - 真实 115 环境验收由用户在安装后完成；助手只做自动化测试、构建、版本与发布核验。
 
-## 下一步（最短交付路径）
-1. 完成最终差异审查，确认没有无关文件、凭据或历史快照变更。
-2. 核对 2.0 安装/更新 URL、回滚地址、2.0 历史快照与旧版并行状态。
-3. 提交当前 2.0 变更，推送并合并至 GitHub main。
-4. 等待 Pages 部署完成，核验线上 manifest、安装脚本和 meta 文件。
-5. 记录发布 SHA/部署结果/用户验收清单；不代替用户执行真实 115 测试。
+## 发布结果（2026-11-08）
+- GitHub：`https://github.com/huntian0727/userscript-hub/commit/fb5d7f9c2337c7053fd308dae690f7af6584335a`
+- main 已从 `edadef0` 快进到 `fb5d7f9`；GitHub Actions #81（Build and deploy Userscript Hub）结论 success。
+- Pages：`https://huntian0727.github.io/userscript-hub/`；线上 `api/manifest.json`、v2.0 meta、安装脚本均返回 HTTP 200。
+- manifest 版本 2.0.0；线上安装脚本大小 447,939 bytes；下载脚本 SHA256 与 manifest 当前版本和 2.0.0 历史快照一致。
+- v2.0 安装地址：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
+- v2.0 更新地址：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`
+- v2.0 回滚快照：`https://huntian0727.github.io/userscript-hub/history/115-multiview-random-v2/2.0.0.user.js`
+- 旧版保留：v1.9.1 `https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js`；v0.12.4 `https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js`。
+- 用户验收清单：首次安装/菜单入口、文件夹多选和递归、全盘模式、关键词/排除/大小过滤、随机去重与新轮次、单格/全部换片、锁定、失败跳过、方案保存/排序、JSON 导入导出。由用户在真实 115 环境自行执行；助手不代测。
 
+## 当前 Session 线索
+- Active Session：`wc_sess_xlxEnN--OamBT9E3`（session_ref：`~s91`）。
+- 恢复时仍需对当前 Project 执行 `list_sessions` 并明确选择返回的 Active Session，再读取 handoff；重新核对当前 Git 状态和活动 Job。
+
+## 下一步
+- 等待用户在真实 115 环境安装并验收 2.0；根据实际反馈修复阻塞性缺陷。
+- 其他非关键优化、自动 115 云端备份/回读/轮换、收藏夹作为随机来源和压力/长稳测试统一进入 2.1。
+- 用户未反馈真实验收前，不宣称真实账号验证已完成。
 ## 当前 Session 线索
 - 最近一次明确恢复的 Active Session：`wc_sess_xlxEnN--OamBT9E3`（session_ref：`~s91`）。
 - Session ID 只是检索线索；恢复时仍需对当前 Project 执行 `list_sessions` 并明确选择返回的 Active Session，再读取 handoff。

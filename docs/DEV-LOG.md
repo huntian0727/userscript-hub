@@ -83,6 +83,18 @@
 - 当前修改后尚需重新执行语法、专项、完整测试和构建；最近历史完整检查为 216/216 passed，但早于本轮只读兼容层重构。
 - 用户已授权完成验证后提交、推送、合并到 main 并发布；不得将自动化测试表述为真实 115 账号验证。
 
+## 2026-11-08 — 115 多宫格播放器 v2.0.0 正式发布
+
+- 发布提交：`fb5d7f9c2337c7053fd308dae690f7af6584335a`，提交信息 `feat(115): release independent random explorer v2.0.0`。
+- 已将提交从 `develop/random-playback-v2.0` 快进推送到 GitHub `main`；原 main 为 `edadef0a538c717fd39a377a54ecbdb0863b4a20`，无分叉/覆盖。
+- 本地最终完整检查：`npm.cmd run check`，216/216 passed；安装中心构建成功生成 6 个脚本。
+- GitHub Actions #81：`Build and deploy Userscript Hub`，head SHA 为发布提交，状态 completed，结论 success。
+- Pages 线上核验：`api/manifest.json`、v2.0 meta、v2.0 安装脚本均 HTTP 200；manifest 标记版本 2.0.0，安装文件 447,939 bytes；下载脚本 SHA256 与 manifest 当前版本和 2.0.0 历史快照一致。
+- 独立入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`；更新地址为同目录 `115-multiview-random-v2.meta.js`；回滚快照为 `history/115-multiview-random-v2/2.0.0.user.js`。
+- 旧版 v1.9.1 和 v0.12.4 仍保留原入口/历史；未覆盖旧版本。
+- 真实 115 环境测试由用户自行执行，助手未登录、未扫码、未进行真实账号冒烟测试；不得把自动化测试/Pages HTTP 核验表述成真实 115 验收。
+- 后续阻塞性缺陷进入 2.0.x 修复；非关键优化、自动云端备份/回读/轮换、收藏夹随机来源和压力/长稳测试进入 2.1。
+
 ## 2026-11-08 — M6 验证完成与 v2.0 发布快照生成
 
 - M6 最终形态：移除 2.0 的旧索引存储/扫描写入接口；仅保留只读旧收藏信息兼容查询。随机探索、同目录读取和播放器启动不依赖旧索引；不清空或删除旧 IndexedDB 数据。
