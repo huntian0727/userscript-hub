@@ -57,7 +57,7 @@ test('exploration scheme dropdown renders options and updates selection controls
   assert.equal(profileUpButton.disabled, true);
   assert.equal(profileDownButton.disabled, true);
 });
-test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {test('scheme controls wire save, apply, delete, and reorder actions to the preference store', () => {
+test('scheme controls wire save, apply, delete, and reorder actions to the preference store', () => {
   const start = source.indexOf('  profileLoadButton.onclick = async () => {');
   const end = source.indexOf('  const fullDiskActions = element(', start);
   assert.ok(start >= 0 && end > start, 'scheme action handlers are present');
@@ -79,7 +79,7 @@ test('saved schemes preserve manual order and use sortOrder instead of last-used
   assert.ok(reorder.includes('await refreshDialogProfiles(reordered[target].profileId)'));
 });
 
-
+test('saved schemes preserve manual order and use sortOrder instead of last-used timestamps', () => {
   const start = source.indexOf('    function sortProfilesByOrder(items)');
   const end = source.indexOf('async function listProfiles', start);
   assert.ok(start >= 0 && end > start, 'profile ordering helper is present');
