@@ -14,21 +14,22 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 最新正式发布版本：2.0.3（修复播放器初始化时 `actions is not defined`；GitHub Pages Actions #87 成功）。
-- 已发布修复：2.0.2 JSON 合并导入时同名但不同 ID 收藏夹合并，迁移旧收藏关系；2.0.1 历史快照保持不变。
-- 本轮 2.0.3 根因：`createFilterPanel(session)` 中保留了已拆除的筛选方案控件残留，最后 `panel.append(..., actions, ...)` 引用未定义的局部变量 `actions`。点击开始探索后，随机扫描和首个候选抽取正常，进入 `openPlayer()` 创建筛选面板时抛出 ReferenceError，导致播放器启动失败。
-- 2.0.3 修复：移除筛选面板内未挂载的旧方案控件残留及未定义的 `actions` 引用；保留实际使用的筛选字段、收藏过滤、筛选提示和 JSON 数据管理。方案保存/应用/排序继续由随机探索弹窗的方案管理区负责。
-- 新增回归测试：播放器筛选面板不得引用已移除的 actions 容器，确保该初始化阻断点不会复发。
-- 2.0.3 已更新 userscript @version、播放器 UI 版本号、meta 文件和 registry；独立历史快照已由构建生成。
+- 最新正式发布版本：2.0.4（修复全盘随机探索播放器筛选面板初始化错误；本轮部署完成后核对 Pages 状态）。
+- 2.0.2 修复：JSON 合并导入遇到同名但不同 ID 的收藏夹时，保留备份中的收藏夹 ID，并迁移原有视频关系。
+- 2.0.3 第一轮修复了播放器筛选面板中已删除的 `actions` 容器引用；真实环境反馈继续发现同一重构区域残留的旧方案选择器引用。
+- 2.0.4 根因：`createFilterPanel(session)` 已不再创建 `session.filterInputs.profileSelect`，但仍调用旧的 `refreshProfileOptions(session)`；该函数对 undefined 执行 `replaceChildren()`，导致播放器初始化失败。JSON 备份导入流程也残留同一调用。
+- 2.0.4 修复：彻底移除旧的 `refreshProfileOptions`、`saveFilterProfile`、`deleteSelectedProfile` 及其调用。方案保存、应用、删除和排序仍由随机探索弹窗中的方案管理区负责；备份导入仍会更新方案存储。
+- 新增回归测试：实际执行 `createFilterPanel()` 的初始化测试，并检查启动和备份导入不再引用旧方案选择器。
+- 2.0.4 已更新 userscript @version、播放器 UI 版本号、meta 文件和 registry；独立历史快照由构建生成。
 - 用户明确：真实 115 环境测试由用户安装后自行完成；助手不登录/扫码/执行真实账号测试。
-- 旧版 v0.12.4、v1.9.1、2.0.1、2.0.2 历史快照保持不变。
+- 旧版 v0.12.4、v1.9.1、2.0.1、2.0.2、2.0.3 历史快照保持不变。
 
 ## 最近一次验证证据（2026-11-08）
 - `node --check userscripts/115-multiview-random-v2.user.js` 通过。
-- `npm test`：220/220 tests passed，0 failures。
-- `npm run build` 成功生成 6 个脚本；v2.0.3 产物 456,448 bytes。
-- `npm run check` 通过，包含测试套件与历史快照检查。
-- 专项测试验证筛选面板不再包含未定义的 `actions` 引用。
+- `npm test`：222/222 tests passed，0 failures。
+- `npm run build` 成功生成 6 个脚本；v2.0.4 产物 454,032 bytes。
+- `npm run check` 通过，包含全量测试与历史快照检查。
+- 专项测试实际构建筛选面板，并验证备份导入不再调用已删除的方案选择器。
 - 代码修复与构建通过不等于真实 115 账号验收；用户自行完成真实环境验收。
 ## 2.0 里程碑
 权威计划见 `docs/RANDOM-PLAYBACK-V2-IMPLEMENTATION.md`。
@@ -43,7 +44,7 @@
 
 ## 已确认产品规则
 
-- 当前线上版本：2.0.3。
+- 当前线上版本：2.0.4。
 - 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
 - 更新地址：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`
 - 真实 115 验收仍由用户自行执行；未反馈前不得宣称真实账号验证已完成。

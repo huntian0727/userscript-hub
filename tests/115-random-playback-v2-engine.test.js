@@ -24,7 +24,53 @@ test('player filter panel does not reference removed scheme action containers', 
   assert.ok(start >= 0 && end > start, 'player filter panel function is present');
   const panel = source.slice(start, end);
   assert.equal(panel.includes('actions'), false, 'filter panel must not reference an out-of-scope actions variable');
-  assert.ok(panel.includes('panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);'));});
+  assert.ok(panel.includes('panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);'));
+});
+
+test('player startup and backup import do not call the removed profile-select renderer', () => {
+  const panelStart = source.indexOf('  function createFilterPanel(session) {');
+  const panelEnd = source.indexOf('  function openRecentDirectory(', panelStart);
+  const panel = source.slice(panelStart, panelEnd);
+  const importStart = source.indexOf('  async function importBackup(session) {');
+  const importEnd = source.indexOf('  function createDataManagementSection(session) {', importStart);
+  const importFlow = source.slice(importStart, importEnd);
+  assert.ok(panelStart >= 0 && panelEnd > panelStart, 'player filter panel is present');
+  assert.ok(importStart >= 0 && importEnd > importStart, 'backup import flow is present');
+  assert.equal(panel.includes('refreshProfileOptions'), false);
+  assert.equal(importFlow.includes('refreshProfileOptions'), false);
+  assert.equal(source.includes('function refreshProfileOptions('), false, 'obsolete renderer must be removed');
+  assert.equal(source.includes('filterInputs.profileSelect'), false, 'player filter UI no longer owns dialog profile controls');
+  assert.equal(source.includes('filterInputs.profileName'), false, 'player filter UI no longer owns dialog profile controls');
+});
+
+test('createFilterPanel initializes after scheme controls moved to the exploration dialog', () => {
+  const start = source.indexOf('  function createFilterPanel(session) {');
+  const end = source.indexOf('  function openRecentDirectory(', start);
+  assert.ok(start >= 0 && end > start, 'player filter panel function is present');
+  const functionSource = source.slice(start, end);
+  const element = (tag, className, text) => {
+    const node = {
+      tag, className, textContent: text || '', hidden: false, children: [],
+      setAttribute() {},
+      append(...children) {
+        for (const child of children) {
+          child.parentElement = node;
+          node.children.push(child);
+        }
+      }
+    };
+    return node;
+  };
+  const createFilterPanel = new Function(
+    'element', 'createDataManagementSection', 'writeFilterControls',
+    functionSource + '\nreturn createFilterPanel;'
+  )(element, () => element('details', 'data-management'), () => {});
+  const session = { fullDiskSource: {}, filters: {}, profiles: [] };
+  const panel = createFilterPanel(session);
+  assert.equal(panel.children.length, 4);
+  assert.equal(session.filterInputs.folderPath.parentElement.hidden, true);
+  assert.equal(Object.hasOwn(session.filterInputs, 'profileSelect'), false);
+});
 
 test('exploration scheme dropdown renders options and updates selection controls', () => {
   const start = source.indexOf("  function renderDialogProfiles(selectedId = '')");

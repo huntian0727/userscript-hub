@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.3
+// @version      2.0.4
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2406,7 +2406,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.3';
+  const VERSION = '2.0.4';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -4410,64 +4410,6 @@
     await startNewRound(session, message);
     return true;
   }
-  function refreshProfileOptions(session, selectedId = '') {
-    const select = session.filterInputs.profileSelect;
-    select.replaceChildren();
-    const placeholder = element('option', '', '选择已保存方案');
-    placeholder.value = '';
-    select.append(placeholder);
-    for (const profile of session.profiles) {
-      const option = element('option', '', profile.name);
-      option.value = profile.profileId;
-      select.append(option);
-    }
-    select.value = selectedId;
-  }
-
-  async function saveFilterProfile(session) {
-    const name = session.filterInputs.profileName.value.trim();
-    if (!name) {
-      setFilterMessage(session, '请先填写筛选方案名称', true);
-      return;
-    }
-    const selectedId = session.filterInputs.profileSelect.value;
-    const profileId = selectedId || ('profile-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8));
-    const filters = readFilterControls(session);
-    const validation = validateFilters(filters);
-    if (validation) {
-      setFilterMessage(session, validation, true);
-      return;
-    }
-    try {
-      const saved = await preferenceStore.saveProfile(session.accountId, {
-        profileId,
-        name,
-        filters
-      });
-      session.profiles = await preferenceStore.listProfiles(session.accountId);
-      refreshProfileOptions(session, saved.profileId);
-      setFilterMessage(session, '已保存方案「' + saved.name + '」');
-    } catch (error) {
-      setFilterMessage(session, '保存方案失败：' + String(error?.message || error), true);
-    }
-  }
-
-  async function deleteSelectedProfile(session) {
-    const profileId = session.filterInputs.profileSelect.value;
-    if (!profileId) {
-      setFilterMessage(session, '请先选择要删除的方案', true);
-      return;
-    }
-    try {
-      await preferenceStore.deleteProfile(session.accountId, profileId);
-      session.profiles = await preferenceStore.listProfiles(session.accountId);
-      refreshProfileOptions(session);
-      session.filterInputs.profileName.value = '';
-      setFilterMessage(session, '已删除筛选方案');
-    } catch (error) {
-      setFilterMessage(session, '删除方案失败：' + String(error?.message || error), true);
-    }
-  }
 
   function showFavoriteFeedback(session, message, isError = false) {
     if (!session || !session.favoriteToast) return;
@@ -5008,7 +4950,6 @@
       session.availableItems = session.availableItems.filter(item =>
         !usedPickcodes.has(itemKey(item)) && !session.preferenceState.excludedPickcodes.has(itemKey(item)));
       session.roundPoolSize = session.availableItems.length;
-      refreshProfileOptions(session);
       updateRoundControls(session);
       if (session.favoritePanel && !session.favoritePanel.hidden) await refreshFavoritesPanel(session);
       if (session.excludedPanel && !session.excludedPanel.hidden) await refreshExclusionsPanel(session);
@@ -5098,7 +5039,6 @@
     session.filterMessage = element('small', 'filter-message');
     const dataManagement = createDataManagementSection(session);
     panel.append(fields, favoriteLabel, session.filterMessage, dataManagement);
-    refreshProfileOptions(session);
     writeFilterControls(session, session.filters);
     return panel;
 
