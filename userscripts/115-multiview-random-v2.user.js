@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.12
+// @version      2.0.13
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2208,6 +2208,10 @@
     return true;
   }
 
+  function isRandomReadBlocked(error) {
+    return [401, 403, 405, 429].includes(error?.httpStatus) || Number(error?.code) === 911;
+  }
+
   function createRandomPlaybackEngine(options = {}) {
     const adapter = options.adapter;
     if (!adapter || typeof adapter.readRandomVideo !== 'function') {
@@ -2283,6 +2287,7 @@
             if (!result.capped) descriptor.searchTerm = searchTerm;
           } catch (error) {
             throwIfAborted();
+            if (isRandomReadBlocked(error)) throw error;
           }
         }
         if (!descriptor.searchTerm) result = await adapter.readRandomVideo(descriptor.cid, 0, requestOptions);
@@ -2291,7 +2296,7 @@
         descriptor.range = createSparseRange(descriptor.count);
         descriptor.ready = true;
       } catch (error) {
-        if (signal && signal.aborted) throw error;
+        if (signal?.aborted || isRandomReadBlocked(error)) throw error;
         descriptor.error = String(error && error.message || error);
         state.errors.push({ cid: descriptor.cid, message: descriptor.error });
         descriptor.count = 0;
@@ -2304,10 +2309,17 @@
     async function prepare() {
       if (state.initialized) return state.pending;
       state.initialized = true;
-      state.pending = Promise.all(descriptors.map(initializeDescriptor)).then(() => {
-        state.pending = null;
+      const remaining = descriptors.filter(item => !item.ready);
+      state.pending = Promise.allSettled(remaining.map(initializeDescriptor)).then(results => {
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) {
+          state.initialized = false;
+          throw failed.reason;
+        }
         state.exhausted = !descriptors.some(item => item.range && item.range.remaining > 0);
         notify();
+      }).finally(() => {
+        state.pending = null;
       });
       return state.pending;
     }
@@ -2333,7 +2345,8 @@
         notify();
         return { item: null, done: true };
       }
-      const offset = takeSparseOffset(descriptor.range, random);
+      const range = descriptor.range;
+      const offset = takeSparseOffset(range, random);
       if (offset === null) return { item: null, done: false, skipped: true };
       const requestOptions = {
         signal,
@@ -2342,9 +2355,17 @@
         minSizeMB: filters.minSizeMB,
         maxSizeMB: filters.maxSizeMB
       };
-      const result = descriptor.searchTerm
-        ? await adapter.readSearchedVideo(descriptor.searchTerm, offset, requestOptions)
-        : await adapter.readRandomVideo(descriptor.cid, offset, requestOptions);
+      let result;
+      try {
+        result = descriptor.searchTerm
+          ? await adapter.readSearchedVideo(descriptor.searchTerm, offset, requestOptions)
+          : await adapter.readRandomVideo(descriptor.cid, offset, requestOptions);
+      } catch (error) {
+        if (isRandomReadBlocked(error) && descriptor.range === range) {
+          range.positions.set(range.remaining++, offset);
+        }
+        throw error;
+      }
       throwIfAborted();
       if (descriptor.searchTerm && result.capped) {
         throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
@@ -2447,7 +2468,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.12';
+  const VERSION = '2.0.13';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2465,9 +2486,10 @@
   const legacyFavoriteLookup = N115LegacyFavoriteLookup.create115LegacyFavoriteLookup();
   const preferenceStore = N115PlayerPreferenceStore.create115PlayerPreferenceStore();
   const fullDiskAdapter = N115DataAdapter.create115DataAdapter({
-    request: (url, { signal }) => requestText(url, signal, 30000)
+    request: (url, { signal }) => requestText(url, signal, 30000, '读取115文件')
   });
   const FULL_DISK_RESERVE = 6;
+  const FULL_DISK_EXPLORE_RESERVE = 2;
   const FULL_DISK_BATCH_ATTEMPTS = 24;
   const FULL_DISK_DRAW_CONCURRENCY = 4;
   const FULL_DISK_ACCOUNT_CHECK_INTERVAL = 12;
@@ -2856,7 +2878,7 @@
     throw new Error('播放列表为空，视频可能尚未完成转码');
   }
 
-  function requestText(url, signal, timeout = 20000) {
+  function requestText(url, signal, timeout = 20000, label = '获取播放列表') {
     return new Promise((resolve, reject) => {
       let handle;
       let settled = false;
@@ -2878,7 +2900,7 @@
           headers: { Referer: 'https://115.com/' },
           onload: response => {
             if (response.status < 200 || response.status >= 300) {
-              const error = new Error(`获取播放列表失败（HTTP ${response.status}）`);
+              const error = new Error(`${label}失败（HTTP ${response.status}）`);
               error.httpStatus = response.status;
               finish(error);
             } else {
@@ -7646,7 +7668,7 @@
       return '正在抽取 · 已检查 ' + formatFullDiskCount(source.checked) + ' 个';
     }
     if (source.exhausted) return source.accepted ? '本轮已抽完' : '本轮没有符合条件的视频';
-    if (source.limited) return '本批已结束，可继续抽取';
+    if (source.limited) return '本批暂无匹配，已暂停，可手动继续抽取';
     return source.count === null ? '等待抽取' : '随机直抽';
   }
 
@@ -7654,7 +7676,7 @@
     const session = source && fullDiskSession(source);
     const remaining = session ? session.availableItems.length : (source?.items.length || 0);
     fullDiskAdjustFiltersButton.hidden = !session;
-    fullDiskStartButton.textContent = session ? '继续抽取'
+    fullDiskStartButton.textContent = session || (source && !source.exhausted && (source.limited || source.error)) ? '继续抽取'
       : ((source?.filters?.sourceMode || exploreScope) === 'folders' ? '开始文件夹探索' : '开始全盘探索');
     fullDiskStartButton.disabled = session
       ? Boolean(source.refilling || source.exhausted || source.accountChanged || session.authBlocked ||
@@ -7666,7 +7688,7 @@
     fullDiskProgressBar.classList.toggle('is-active', Boolean(source?.refilling));
     fullDiskMetrics.hidden = !source;
     fullDiskProgressTrack.hidden = !source?.refilling;
-    fullDiskStatus.textContent = source ? fullDiskStateLabel(source) : '第一条视频就绪后即开始播放。';
+    fullDiskStatus.textContent = source ? fullDiskStateLabel(source) : '开始探索后读取视频范围，第一条就绪后即播放。';
     fullDiskWarning.textContent = source?.error || '';
     fullDiskWarning.hidden = !fullDiskWarning.textContent;
   }
@@ -7703,7 +7725,6 @@
     cancelPreparedFullDisk();
     const source = createFullDiskSource(fullDiskAccountId, filters, loadFullDiskPreferences(fullDiskAccountId));
     preparedFullDisk = source;
-    void refillFullDisk(source);
     source.controller.signal.addEventListener('abort', () => {
       source.resolveFirstItem?.(null);
       source.resolveFirstItem = null;
@@ -7765,21 +7786,23 @@
     return true;
   }
 
-  function fullDiskNeedsItems(source) {
+  function fullDiskNeedsItems(source, inFlight = 0) {
     if (!source || source.controller.signal.aborted || source.accountChanged || source.exhausted) return false;
     const session = fullDiskSession(source);
-    if (!session) return source.items.length < FULL_DISK_RESERVE;
+    if (!session) return source.starting && source.items.length + inFlight < 1;
     if (session.closed || session.authBlocked || session.favoriteFolderPlayback?.active || session.sameFolderMode?.active) {
       return false;
     }
-    const pendingSwaps = Array.from(source.pendingSwaps.entries()).filter(([cell, generation]) =>
-      cell && !cell.locked && !cell.deleting && cell.generation === generation
+    const needed = session.cells.filter(cell =>
+      cell && cell.index < session.layoutCount && !cell.locked && !cell.deleting &&
+      (!cell.item || source.pendingSwaps.get(cell) === cell.generation)
     ).length;
-    return session.availableItems.length < FULL_DISK_RESERVE + pendingSwaps;
+    return session.availableItems.length + inFlight < FULL_DISK_EXPLORE_RESERVE + needed;
   }
 
-  function refillFullDisk(source) {
+  function refillFullDisk(source, resume = false) {
     if (source.refilling || source.controller.signal.aborted || source.accountChanged || source.exhausted ||
+        (!resume && (source.limited || source.error)) ||
         !fullDiskNeedsItems(source)) return source.refilling;
     source.error = '';
     source.limited = false;
@@ -7803,19 +7826,13 @@
       clearTimeout(deadline);
       sourceSignal.removeEventListener('abort', stopBatch);
       source.refilling = null;
-      if (!source.items.length && (source.error || source.exhausted)) {
+      if (!source.items.length && (source.error || source.exhausted || source.limited)) {
         source.resolveFirstItem?.(null);
         source.resolveFirstItem = null;
       }
       if (!source.controller.signal.aborted) {
         refreshFullDiskView(source);
-        const session = fullDiskSession(source);
-        const canContinue = (session || preparedFullDisk === source) &&
-          !source.exhausted && !source.error && fullDiskNeedsItems(source);
-        if (canContinue) {
-          source.limited = false;
-          void refillFullDisk(source);
-        }
+        if (fullDiskSession(source) || preparedFullDisk === source) void refillFullDisk(source);
       }
     });
     refreshFullDiskView(source);
@@ -7839,6 +7856,8 @@
     refreshFullDiskView(source);
 
     let attempts = 0;
+    let inFlight = 0;
+    const acceptedBefore = source.accepted;
     let candidatesSinceAccountCheck = 0;
     let accountCheckPromise = null;
 
@@ -7855,19 +7874,17 @@
 
     async function drawFromEngine() {
       while (!signal.aborted && !source.error &&
-          attempts < FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source)) {
+          attempts < FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source, inFlight)) {
         attempts++;
+        inFlight++;
         try {
           const t0 = timingEnabled() ? performance.now() : null;
           const candidate = await source.randomEngine.nextCandidate();
           if (t0 != null && candidate.item) candidateTimings.set(candidate.item, { t0, t1: performance.now() });
-          if (signal.aborted) return;
-          if (candidate.done) {
-            source.exhausted = true;
-            break;
-          }
+          if (signal.aborted || source.error) return;
+          if (candidate.done) break;
           await verifyAccountAtInterval();
-          if (signal.aborted) return;
+          if (signal.aborted || source.error) return;
           if (!candidate.item) continue;
           if (acceptFullDiskItem(source, candidate.item, allowed)) resetDeadline();
           const stats = source.randomEngine.getStats();
@@ -7876,8 +7893,10 @@
           refreshFullDiskView(source);
         } catch (error) {
           if (signal.aborted) return;
-          source.error = String(error?.message || error);
+          if (!source.error) source.error = String(error?.message || error);
           break;
+        } finally {
+          inFlight--;
         }
       }
     }
@@ -7888,13 +7907,14 @@
     );
     await Promise.all(workers);
     source.exhausted = !source.randomEngine.hasMore();
-    source.limited = attempts >= FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source);
+    source.limited = !source.error && attempts >= FULL_DISK_BATCH_ATTEMPTS &&
+      source.accepted === acceptedBefore && fullDiskNeedsItems(source);
   }
-  function refillSessionFullDisk(session) {
+  function refillSessionFullDisk(session, resume = false) {
     const source = session.fullDiskSource;
     if (!source || session.closed || session.favoriteFolderPlayback?.active || session.sameFolderMode?.active) return;
     updateFullDiskPlayer(source);
-    void refillFullDisk(source);
+    void refillFullDisk(source, resume);
   }
 
   function queueFullDiskSwap(session, cell) {
@@ -7928,11 +7948,7 @@
     folderModeInput.checked = !wholeDisk;
     folderSelectionPanel.hidden = wholeDisk;
     if (wholeDisk) folderPickerPanel.hidden = true;
-    if (!active && fullDiskAccountId && !fullDiskOverlay.hidden) {
-      const filters = readFullDiskFilters();
-      if (!validateFilters(filters)) prepareFullDisk(filters);
-      else cancelPreparedFullDisk();
-    }
+    if (preparedFullDisk && preparedFullDisk.filters.sourceMode !== exploreScope) cancelPreparedFullDisk();
     fullDiskStartButton.textContent = active?.fullDiskSource ? '继续抽取' : '开始随机探索';
     renderFullDiskSource();
   }
@@ -8008,7 +8024,7 @@
   }
   async function startFullDiskExplore() {
     if (active?.fullDiskSource) {
-      refillSessionFullDisk(active);
+      refillSessionFullDisk(active, true);
       return;
     }
     if (active || opening || !fullDiskAccountId) return;
@@ -8022,16 +8038,23 @@
     const revision = exploreDialogRevision;
     const source = prepareFullDisk(filters);
     if (source.starting) return;
+    if (!source.resolveFirstItem && !source.items.length) {
+      source.firstItemPromise = new Promise(resolve => { source.resolveFirstItem = resolve; });
+    }
     source.starting = true;
     fullDiskStartButton.disabled = true;
     fullDiskWarning.hidden = true;
     try {
       await preferenceStore.savePlayerSettings(fullDiskAccountId, { filters });
+      if (preparedFullDisk !== source) return;
       const preferences = await source.ready;
-      await confirmFullDiskAccount(source);
+      if (preparedFullDisk !== source) return;
+      void refillFullDisk(source, true);
       const firstCandidate = await source.firstItemPromise;
       if (!firstCandidate || !source.items.length) {
-        throw new Error(source.error || '当前范围没有符合条件的视频，请调整关键词或筛选条件。');
+        throw new Error(source.error || (source.limited
+          ? '本批暂无匹配，可手动继续抽取或调整筛选。'
+          : '当前范围没有符合条件的视频，请调整关键词或筛选条件。'));
       }
       await confirmFullDiskAccount(source);
       if (revision !== exploreDialogRevision || preparedFullDisk !== source ||
@@ -8060,11 +8083,12 @@
       });
     } catch (error) {
       if (revision !== exploreDialogRevision || preparedFullDisk !== source) return;
-      cancelPreparedFullDisk();
+      if (source.accountChanged || source.exhausted || !(source.error || source.limited)) cancelPreparedFullDisk();
       renderFullDiskSource();
       fullDiskWarning.textContent = String(error?.message || error);
       fullDiskWarning.hidden = false;
     } finally {
+      source.starting = false;
       if (revision === exploreDialogRevision && !active) fullDiskStartButton.disabled = false;
     }
   }
@@ -9173,6 +9197,7 @@
       updateProfileButtons();
       return;
     }
+    cancelPreparedFullDisk();
     writeFullDiskFilters(profile.filters);
     selectExploreScope(profile.filters.sourceMode);
     const filters = readFullDiskFilters();

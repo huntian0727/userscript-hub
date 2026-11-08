@@ -115,10 +115,10 @@ test('choosing a scheme applies its filters before persistence completes', () =>
   const changes = [];
   const bind = new Function('profileSelect', 'profileBusy', 'fullDiskAccountId', 'closeProfileNameForm',
     'dialogProfiles', 'profileMessage', 'writeFullDiskFilters', 'selectExploreScope', 'readFullDiskFilters',
-    'runProfileAction', source.slice(start, end));
+    'runProfileAction', 'cancelPreparedFullDisk', source.slice(start, end));
   bind(profileSelect, false, 'account', () => {}, [{ profileId: 'demo', name: '旅行', filters }], {},
     value => changes.push(value), mode => changes.push(mode), () => filters,
-    () => changes.push('persistence starts'));
+    () => changes.push('persistence starts'), () => {});
   profileSelect.onchange();
   assert.deepEqual(changes, [filters, 'full-disk', 'persistence starts']);
 });
@@ -202,6 +202,32 @@ test('capped or unavailable keyword search falls back to the whole-drive pool', 
     await engine.prepare();
     assert.equal((await engine.nextCandidate()).item.id, '1');
     assert.equal(calls.filter(call => call.kind === 'random').length, 2);
+  }
+});
+
+test('candidate refusal pauses search without falling back and preserves the rejected position for resume', async () => {
+  for (const code of [401, 403, 405, 429, 911]) {
+    const { adapter, calls } = createAdapter({ 0: [video(1, 'target')] });
+    const search = adapter.readSearchedVideo;
+    const failure = Object.assign(new Error('115 blocked candidate request'), code === 911 ? { code: '911' } : { httpStatus: code });
+    let blocked = true;
+    adapter.readSearchedVideo = (...args) => {
+      if (blocked) throw failure;
+      return search(...args);
+    };
+    const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+      config: { mode: 'full-disk', filters: { keyword: 'target' } } });
+    await assert.rejects(engine.prepare(), error => error === failure);
+    assert.deepEqual(calls, [], 'a refused search does not fall back to a list request');
+    blocked = false;
+    await engine.prepare();
+    blocked = true;
+    await assert.rejects(engine.nextCandidate(), error => error === failure);
+    assert.equal(engine.hasMore(), true, 'the last position remains available after rejection');
+    blocked = false;
+    assert.equal((await engine.nextCandidate()).item.id, '1');
+    assert.equal(engine.hasMore(), false);
+    assert.ok(calls.every(call => call.kind === 'search'));
   }
 });
 
@@ -379,12 +405,10 @@ test('folder browser loads pages on demand, navigates recursively, and maintains
   assert.deepEqual(Array.from(calls, item => item.cid), ['0', '0', '10', '0']);
 
 });
-test('v2 player connects the random engine to prefetch, first-ready startup, and failed-item handling', () => {
-  assert.match(source, /function fullDiskNeedsItems\(source\)/);
+test('v2 player connects the random engine to first-ready startup and failed-item handling', () => {
   assert.match(source, /source\.randomEngine\.nextCandidate\(\)/);
   assert.match(source, /session\.fullDiskSource\?\.randomEngine\?\.markFailed\(failedItem\)/);
   assert.match(source, /source\.resolveFirstItem\(item\)/);
-  assert.match(source, /session\.availableItems\.length < FULL_DISK_RESERVE \+ pendingSwaps/);
   assert.match(source, /folderBrowser\.setRecursive\(folder\.id, recursive\.checked\)/);
   assert.match(source, /preferenceStore\.saveProfile\(accountId/);
   assert.match(source, /fullDiskModeInput\.checked = wholeDisk/);
@@ -392,12 +416,21 @@ test('v2 player connects the random engine to prefetch, first-ready startup, and
   assert.match(source, /addExploreScopeOption\('full-disk', '整个网盘'/);
   assert.ok(source.includes('currentCid && /^[0-9]+$/.test(currentCid)'));  assert.doesNotMatch(source, /fullDiskFolderInput/);
 });
-test('v2 startup waits for a real first candidate and continues bounded batches until playable data or terminal state', () => {
-  assert.match(source, /const firstItemPromise = new Promise\(resolve => \{ resolveFirstItem = resolve; \}\)/);
-  assert.match(source, /source\.resolveFirstItem\(item\)/);
-  assert.match(source, /const canContinue = \(session \|\| preparedFullDisk === source\)/);
-  assert.match(source, /if \(!source\.items\.length && \(source\.error \|\| source\.exhausted\)\)/);
-  assert.match(source, /void refillFullDisk\(source\)/);
+test('v2 scope changes update settings without requesting random candidates', () => {
+  const start = source.indexOf('  function selectExploreScope(');
+  const end = source.indexOf('  function closeExploreDialog(', start);
+  const controls = Array.from({ length: 5 }, () => ({}));
+  const { selectExploreScope, getScope } = new Function('preparedFullDisk', 'cancelPreparedFullDisk', 'active',
+    'fullDiskModeInput', 'folderModeInput', 'folderSelectionPanel', 'folderPickerPanel', 'fullDiskStartButton',
+    'renderFullDiskSource', 'let exploreScope;\n' + source.slice(start, end) +
+    '\nreturn { selectExploreScope, getScope: () => exploreScope };')(
+    null, () => {}, null, ...controls, () => {});
+  selectExploreScope('folders');
+  assert.equal(getScope(), 'folders');
+  assert.equal(controls[2].hidden, false);
+  selectExploreScope('full-disk');
+  assert.equal(getScope(), 'full-disk');
+  assert.equal(controls[2].hidden, true);
 });
 
 test('v2 preference-store and player filter normalization preserve selected folder IDs and normalize Windows paths', () => {
@@ -451,33 +484,37 @@ test('v2 full-disk queue accepts only the active source and resolves the first p
 });
 
 test('v2 background refill counts only live unlocked pending swaps and pauses for competing playback modes', () => {
-  const needsStart = source.indexOf('  function fullDiskNeedsItems(source) {');
+  const needsStart = source.indexOf('  function fullDiskNeedsItems(');
   const needsEnd = source.indexOf('\n  function refillFullDisk', needsStart);
   assert.ok(needsStart >= 0 && needsEnd > needsStart, 'background refill demand helper is present');
   const activeSource = {
     controller: { signal: { aborted: false } },
     accountChanged: false, exhausted: false, items: [], pendingSwaps: new Map()
   };
-  const cellA = { locked: false, deleting: false, generation: 2 };
-  const cellB = { locked: true, deleting: false, generation: 1 };
-  const cellC = { locked: false, deleting: true, generation: 1 };
-  const cellD = { locked: false, deleting: false, generation: 4 };
+  const cellA = { index: 0, item: {}, locked: false, deleting: false, generation: 2 };
+  const cellB = { index: 1, item: {}, locked: true, deleting: false, generation: 1 };
+  const cellC = { index: 2, item: {}, locked: false, deleting: true, generation: 1 };
+  const cellD = { index: 3, item: {}, locked: false, deleting: false, generation: 4 };
   activeSource.pendingSwaps.set(cellA, 2);
   activeSource.pendingSwaps.set(cellB, 1);
   activeSource.pendingSwaps.set(cellC, 1);
   activeSource.pendingSwaps.set(cellD, 3);
   const session = {
     closed: false, authBlocked: false, favoriteFolderPlayback: null, sameFolderMode: null,
-    availableItems: Array(6).fill({}), cells: []
+    availableItems: Array(2).fill({}), cells: [cellA, cellB, cellC, cellD], layoutCount: 4
   };
-  const fullDiskNeedsItems = new Function('fullDiskSession', 'FULL_DISK_RESERVE',
+  const fullDiskNeedsItems = new Function('fullDiskSession', 'FULL_DISK_EXPLORE_RESERVE',
     source.slice(needsStart, needsEnd) + '\nreturn fullDiskNeedsItems;')(
     candidate => candidate === activeSource ? session : null,
-    6
+    2
   );
   assert.equal(fullDiskNeedsItems(activeSource), true,
-    'six queued candidates plus one valid pending swap still require one reserve slot');
-  session.availableItems = Array(7).fill({});
+    'one valid pending swap needs one more candidate');
+  assert.equal(fullDiskNeedsItems(activeSource, 1), false, 'in-flight reads count toward demand');
+  cellD.item = null;
+  assert.equal(fullDiskNeedsItems(activeSource, 1), true, 'an empty visible cell needs a candidate');
+  cellD.item = {};
+  session.availableItems = Array(3).fill({});
   assert.equal(fullDiskNeedsItems(activeSource), false);
   session.authBlocked = true;
   assert.equal(fullDiskNeedsItems(activeSource), false);

@@ -18,7 +18,7 @@ function numericConstant(name) {
 
 function getDrawBatch() {
   const start = source.indexOf('  async function drawFullDiskBatch(source, signal, resetDeadline) {');
-  const end = source.indexOf('  function refillSessionFullDisk(session) {', start);
+  const end = source.indexOf('  function refillSessionFullDisk(', start);
   assert.ok(start >= 0 && end > start, 'drawFullDiskBatch must be present');
   return new Function(
     'FULL_DISK_BATCH_ATTEMPTS',
@@ -59,7 +59,7 @@ test('full-disk candidate extraction runs four bounded workers and checks accoun
     () => () => true,
     () => null,
     () => {},
-    sourceState => sourceState.accepted < targetCount,
+    (sourceState, inFlight = 0) => sourceState.accepted + inFlight < targetCount,
     sourceState => {
       sourceState.accepted++;
       return true;
@@ -96,8 +96,7 @@ test('full-disk candidate extraction runs four bounded workers and checks accoun
 
   await drawFullDiskBatch(sourceState, new AbortController().signal, () => {});
 
-  assert.ok(sourceState.accepted >= targetCount && sourceState.accepted <= targetCount + concurrency - 1,
-    'in-flight workers may finish a small bounded number of extra candidates');
+  assert.equal(sourceState.accepted, targetCount, 'in-flight workers do not overshoot demand');
   assert.equal(maxInFlight, concurrency, 'candidate requests should overlap instead of serializing');
   assert.equal(accountChecks, 2, 'one initial check plus one check after 12 candidates');
   assert.equal(sourceState.error, '');
