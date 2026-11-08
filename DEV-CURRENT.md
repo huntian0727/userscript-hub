@@ -14,7 +14,7 @@
 
 ## 最近一次核对的代码状态
 - 当前分支：`develop/random-playback-v2.0`；项目仍使用独立 v2 更新通道。
-- 最新正式发布版本：2.0.2（Pages Actions #86 成功）；本轮修复准备升级为 2.0.3。
+- 最新正式发布版本：2.0.3（修复播放器初始化时 `actions is not defined`；GitHub Pages Actions #87 成功）。
 - 已发布修复：2.0.2 JSON 合并导入时同名但不同 ID 收藏夹合并，迁移旧收藏关系；2.0.1 历史快照保持不变。
 - 本轮 2.0.3 根因：`createFilterPanel(session)` 中保留了已拆除的筛选方案控件残留，最后 `panel.append(..., actions, ...)` 引用未定义的局部变量 `actions`。点击开始探索后，随机扫描和首个候选抽取正常，进入 `openPlayer()` 创建筛选面板时抛出 ReferenceError，导致播放器启动失败。
 - 2.0.3 修复：移除筛选面板内未挂载的旧方案控件残留及未定义的 `actions` 引用；保留实际使用的筛选字段、收藏过滤、筛选提示和 JSON 数据管理。方案保存/应用/排序继续由随机探索弹窗的方案管理区负责。
@@ -43,12 +43,11 @@
 
 ## 已确认产品规则
 
-- 当前线上版本：2.0.2；待发布修复版本：2.0.3。- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
-- 更新地址保持稳定：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`。
+- 当前线上版本：2.0.3。
+- 安装入口：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js`
+- 更新地址：`https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js`
 - 真实 115 验收仍由用户自行执行；未反馈前不得宣称真实账号验证已完成。
-
-- 多来源按 115 文件 ID 去重，不做内容哈希。
-- 文件夹模式支持一个或多个文件夹，默认递归子文件夹；全盘模式忽略文件夹选择。
+- 多来源按 115 文件 ID 去重，不做内容哈希。- 文件夹模式支持一个或多个文件夹，默认递归子文件夹；全盘模式忽略文件夹选择。
 - 关键词按视频文件名 OR 匹配；排除词本地过滤；支持最小/最大文件大小。
 - 按 115 匹配视频数量自然加权随机；每轮不重复；锁定宫格不替换；播放失败项跳过。
 - 方案保存来源范围、文件夹 ID/路径、过滤条件和排序；新建方案及使用方案后置顶；不依赖最近使用时间戳。
