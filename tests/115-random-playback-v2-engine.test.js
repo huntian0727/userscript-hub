@@ -178,6 +178,52 @@ function video(id, name = 'video-' + id + '.mp4', sizeBytes = 300 * 1024 * 1024)
   return { id: String(id), name, sizeBytes, isVideo: true, playable: true, pickcode: 'pick' + id };
 }
 
+test('single full-disk keyword draws from search and still enforces size and exclusions locally', async () => {
+  const items = Array.from({ length: 100 }, (_, i) => video(i, i < 3 ? 'target-' + i : 'other-' + i,
+    i === 0 ? 20 * 1024 * 1024 : 300 * 1024 * 1024));
+  const { adapter, calls } = createAdapter({ 0: items });
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+    config: { mode: 'full-disk', filters: { keyword: 'target', excludeKeyword: 'target-1', minSizeMB: 100 } } });
+  await engine.prepare();
+  const results = await Promise.all([engine.nextCandidate(), engine.nextCandidate(), engine.nextCandidate()]);
+  assert.deepEqual(results.filter(result => result.item).map(result => result.item.id), ['2']);
+  assert.ok(calls.every(call => call.kind === 'search'));
+  assert.equal(calls.length, 4, 'one count request plus three matching candidates, not 100 global reads');
+  const baseline = createAdapter({ 0: items });
+  delete baseline.adapter.readSearchedVideo;
+  const prior = api.createRandomPlaybackEngine({ adapter: baseline.adapter, random: () => 0,
+    config: { mode: 'full-disk', filters: { keyword: 'target', excludeKeyword: 'target-1', minSizeMB: 100 } } });
+  await prior.prepare();
+  const priorResults = [];
+  for (let i = 0; i < items.length; i++) priorResults.push(await prior.nextCandidate());
+  assert.deepEqual(priorResults.filter(result => result.item).map(result => result.item.id), ['2']);
+  assert.equal(baseline.calls.length, 101, 'previous path examines every global candidate in this fixture');
+});
+
+test('capped or unavailable keyword search falls back to the whole-drive pool', async () => {
+  for (const mode of ['capped', 'error']) {
+    const { adapter, calls } = createAdapter({ 0: [video(1, 'target')] });
+    adapter.readSearchedVideo = async () => {
+      if (mode === 'error') throw new Error('search unavailable');
+      return { count: 10000, capped: true };
+    };
+    const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+      config: { mode: 'full-disk', filters: { keyword: 'target' } } });
+    await engine.prepare();
+    assert.equal((await engine.nextCandidate()).item.id, '1');
+    assert.equal(calls.filter(call => call.kind === 'random').length, 2);
+  }
+});
+
+test('multiple keywords retain the full-drive OR pool', async () => {
+  const { adapter, calls } = createAdapter({ 0: [video(1, 'alpha'), video(2, 'beta')] });
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+    config: { mode: 'full-disk', filters: { keyword: 'alpha beta' } } });
+  await engine.prepare();
+  assert.equal((await engine.nextCandidate()).item.id, '1');
+  assert.ok(calls.every(call => call.kind === 'random'));
+});
+
 test('nested selected folders are removed when a recursive parent already covers them', () => {
   const normalized = api.normalizeFolderSources({ folders: [
     { cid: '10', name: 'A', path: '/A', recursive: true },

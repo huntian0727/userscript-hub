@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.4
+// @version      2.0.7
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2201,6 +2201,8 @@
     });
     if (!folders.length) throw new Error('请至少选择一个文件夹，或开启全盘随机');
     const terms = splitKeywords(filters.keyword);
+    const searchTerm = (config.fullDisk === true || config.mode === 'full-disk') && terms.length === 1 &&
+      typeof adapter.readSearchedVideo === 'function' ? terms[0] : '';
     const excludedPickcodes = new Set(Array.from(options.excludedPickcodes || [],
       value => String(value || '').trim().toLocaleLowerCase()).filter(Boolean));
     const seenFileIds = new Set();
@@ -2246,12 +2248,24 @@
     async function initializeDescriptor(descriptor) {
       throwIfAborted();
       try {
-        const result = await adapter.readRandomVideo(descriptor.cid, 0, {
+        const requestOptions = {
           signal,
+          cid: descriptor.cid,
           recursive: descriptor.recursive,
           minSizeMB: filters.minSizeMB,
           maxSizeMB: filters.maxSizeMB
-        });
+        };
+        let result;
+        if (searchTerm) {
+          try {
+            result = await adapter.readSearchedVideo(searchTerm, 0, requestOptions);
+            throwIfAborted();
+            if (!result.capped) descriptor.searchTerm = searchTerm;
+          } catch (error) {
+            throwIfAborted();
+          }
+        }
+        if (!descriptor.searchTerm) result = await adapter.readRandomVideo(descriptor.cid, 0, requestOptions);
         throwIfAborted();
         descriptor.count = Math.max(0, Number(result && result.count) || 0);
         descriptor.range = createSparseRange(descriptor.count);
@@ -2301,13 +2315,20 @@
       }
       const offset = takeSparseOffset(descriptor.range, random);
       if (offset === null) return { item: null, done: false, skipped: true };
-      const result = await adapter.readRandomVideo(descriptor.cid, offset, {
+      const requestOptions = {
         signal,
+        cid: descriptor.cid,
         recursive: descriptor.recursive,
         minSizeMB: filters.minSizeMB,
         maxSizeMB: filters.maxSizeMB
-      });
+      };
+      const result = descriptor.searchTerm
+        ? await adapter.readSearchedVideo(descriptor.searchTerm, offset, requestOptions)
+        : await adapter.readRandomVideo(descriptor.cid, offset, requestOptions);
       throwIfAborted();
+      if (descriptor.searchTerm && result.capped) {
+        throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
+      }
       state.candidatesRead += 1;
       if (Number(result && result.count) !== descriptor.count) {
         const nextCount = Math.max(0, Number(result && result.count) || 0);
@@ -2406,7 +2427,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.4';
+  const VERSION = '2.0.7';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -2428,6 +2449,31 @@
   });
   const FULL_DISK_RESERVE = 6;
   const FULL_DISK_BATCH_ATTEMPTS = 24;
+  const FULL_DISK_DRAW_CONCURRENCY = 4;
+  const FULL_DISK_ACCOUNT_CHECK_INTERVAL = 12;
+  // Opt in from the browser console: localStorage.setItem('115-v2-timing', '1').
+  // Timings contain no filenames, pickcodes, URLs, or account identifiers.
+  const candidateTimings = new WeakMap();
+  function timingEnabled() {
+    try { return localStorage.getItem('115-v2-timing') === '1'; } catch (_) { return false; }
+  }
+  function timingMark(cell, name) {
+    if (cell.timing && cell.timing[name] == null) {
+      cell.timing[name] = performance.now();
+      console.debug('[115-v2 timing stage]', { slot: cell.slotId, stage: name, atMs: Math.round(cell.timing[name]) });
+    }
+  }
+  function timingReport(cell) {
+    const t = cell.timing;
+    if (!t || t.reported) return;
+    t.reported = true;
+    const delta = (a, b) => t[a] == null || t[b] == null ? null : Math.round(t[b] - t[a]);
+    console.debug('[115-v2 timing]', { slot: cell.slotId, layout: t.layout,
+      candidateMs: delta('t0', 't1'), addressMs: delta('t2', 't3'),
+      manifestMs: delta('t3', 't4'), canplayMs: delta('t4', 't5'),
+      bufferingMs: delta('t4', 't6'), totalMs: delta('t0', 't6'),
+      addressStartMs: Math.round(t.t2), manifestStartMs: t.manifestStart == null ? null : Math.round(t.manifestStart) });
+  }
   const FULL_DISK_STALL_MS = 55000;
   let active = null;
   let opening = false;
@@ -3637,6 +3683,7 @@
     setStatus(cell, useGM ? '正在尝试油猴加载播放流…' : '正在加载播放流…');
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       if (session.closed || cell.generation !== generation || cell.hls !== hls) return;
+      timingMark(cell, 't4');
       if (cell.layoutPaused) hls.stopLoad();
       else void tryPlay(session, cell);
     });
@@ -3653,6 +3700,7 @@
         (reason ? '；' + reason.slice(0, 150) : '') + '。请确认原播放器可播放，并检查油猴访问授权。');
     });
     hls.attachMedia(cell.video);
+    timingMark(cell, 'manifestStart');
     hls.loadSource(source.url);
   }
 
@@ -3667,8 +3715,10 @@
     const abortOnClose = () => controller.abort();
     session.abort.signal.addEventListener('abort', abortOnClose, { once: true });
     try {
+      timingMark(cell, 't2');
       const result = await requestText('https://115.com/api/video/m3u8/' + encodeURIComponent(item.pickcode) + '.m3u8', controller.signal);
       if (session.closed || session.authBlocked || generation !== cell.generation || cell.item !== item) return;
+      timingMark(cell, 't3');
       const source = chooseSource(result.text, result.url);
       armCellPlaybackWatchdog(session, cell);
       if (typeof Hls !== 'undefined' && Hls.isSupported()) {
@@ -3760,6 +3810,7 @@
     if (session.closed || session.authBlocked || !item) return false;
     disposeCell(cell);
     cell.item = item;
+    cell.timing = timingEnabled() ? { ...(candidateTimings.get(item) || {}), layout: session.layoutCount } : null;
     cell.failed = false;
     cell.hasPlayed = false;
     cell.loadStarted = false;
@@ -5986,6 +6037,7 @@
       userPaused: false, layoutPaused: false, locked: false, deleting: false, deletionUncertain: false,
       aspectRatio: DEFAULT_ASPECT_RATIO, retryCount: 0, authBlocked: false
     };
+    cell.timing = item && timingEnabled() ? { ...(candidateTimings.get(item) || {}), layout: session.layoutCount } : null;
 
     const seekTo = event => {
       const duration = Number(video.duration);
@@ -6153,8 +6205,11 @@
       }
       updateCellControls(session, cell);
     });
+    video.addEventListener('canplay', () => { timingMark(cell, 't5'); });
     video.addEventListener('playing', () => {
       if (session.closed || cell.failed) return;
+      timingMark(cell, 't6');
+      timingReport(cell);
       cell.hasPlayed = true;
       clearTimeout(cell.timer);
       cell.timer = null;
@@ -7627,22 +7682,37 @@
     refreshFullDiskView(source);
 
     let attempts = 0;
+    let candidatesSinceAccountCheck = 0;
+    let accountCheckPromise = null;
+
+    async function verifyAccountAtInterval() {
+      candidatesSinceAccountCheck++;
+      if (!accountCheckPromise &&
+          candidatesSinceAccountCheck >= FULL_DISK_ACCOUNT_CHECK_INTERVAL) {
+        candidatesSinceAccountCheck = 0;
+        accountCheckPromise = confirmFullDiskAccount(source, signal)
+          .finally(() => { accountCheckPromise = null; });
+      }
+      if (accountCheckPromise) await accountCheckPromise;
+    }
+
     async function drawFromEngine() {
       while (!signal.aborted && !source.error &&
           attempts < FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source)) {
         attempts++;
         try {
+          const t0 = timingEnabled() ? performance.now() : null;
           const candidate = await source.randomEngine.nextCandidate();
+          if (t0 != null && candidate.item) candidateTimings.set(candidate.item, { t0, t1: performance.now() });
           if (signal.aborted) return;
           if (candidate.done) {
             source.exhausted = true;
             break;
           }
-          if (!candidate.item) continue;
-          const item = candidate.item;
-          await confirmFullDiskAccount(source, signal);
+          await verifyAccountAtInterval();
           if (signal.aborted) return;
-          if (acceptFullDiskItem(source, item, allowed)) resetDeadline();
+          if (!candidate.item) continue;
+          if (acceptFullDiskItem(source, candidate.item, allowed)) resetDeadline();
           const stats = source.randomEngine.getStats();
           source.count = stats.totalVideos;
           source.checked = stats.candidatesRead;
@@ -7655,7 +7725,11 @@
       }
     }
 
-    await Promise.all([drawFromEngine(), drawFromEngine()]);
+    const workers = Array.from(
+      { length: FULL_DISK_DRAW_CONCURRENCY },
+      () => drawFromEngine()
+    );
+    await Promise.all(workers);
     source.exhausted = !source.randomEngine.hasMore();
     source.limited = attempts >= FULL_DISK_BATCH_ATTEMPTS && fullDiskNeedsItems(source);
   }
