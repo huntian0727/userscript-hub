@@ -6,7 +6,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'userscripts', '115-multiview-random-v2.user.js'), 'utf8');const start = source.indexOf('(function exposeN115RandomPlayback(');
+const source = fs.readFileSync(path.join(__dirname, '..', 'userscripts', '115-multiview-random-v2.user.js'), 'utf8');
+const start = source.indexOf('(function exposeN115RandomPlayback(');
 const end = source.indexOf('\n/* global GM_xmlhttpRequest */', start);
 assert.ok(start >= 0 && end > start, 'random playback module boundaries are present');
 const context = {};
@@ -166,6 +167,121 @@ function createAdapter(data) {
 function video(id, name = 'video-' + id + '.mp4', sizeBytes = 300 * 1024 * 1024) {
   return { id: String(id), name, sizeBytes, isVideo: true, playable: true, pickcode: 'pick' + id };
 }
+
+test('line-based keywords match only the direct parent and cache parent lookups', async () => {
+  const items = [video(1, '01.mp4'), video(2, '02.mp4'), video(3, '纪录 片.mp4')];
+  items[0].parentId = items[1].parentId = '10';
+  items[2].parentId = '20';
+  const { adapter, calls } = createAdapter({ 0: items });
+  delete adapter.readSearchedVideo;
+  let parentReads = 0;
+  adapter.readVideoFolder = async id => {
+    parentReads++;
+    return [{ id: '1', name: '科幻' }, { id, name: id === '10' ? '正片' : '其他' }];
+  };
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+    config: { mode: 'full-disk', filters: { keyword: '正片\n纪录 片', keywordLines: true, matchParent: true } } });
+  await engine.prepare();
+  const results = await Promise.all([engine.nextCandidate(), engine.nextCandidate(), engine.nextCandidate()]);
+  assert.deepEqual(results.map(result => result.item.id).sort(), ['1', '2', '3']);
+  assert.equal(parentReads, 1, 'two videos share a lookup, while a filename hit needs none');
+  assert.ok(calls.every(call => call.kind === 'random'), 'parent matching searches beyond filenames');
+  const other = api.createRandomPlaybackEngine({ adapter, random: () => 0,
+    config: { mode: 'full-disk', filters: { keyword: '科幻', keywordLines: true, matchParent: true } } });
+  await other.prepare();
+  assert.equal((await other.nextCandidate()).item, null, 'ancestor names do not match');
+});
+
+test('whole-disk parent matching prioritizes bounded directory and filename search and deduplicates them', async () => {
+  const adapterStart = source.indexOf('(function expose115DataAdapter(');
+  const adapterEnd = source.indexOf('(function attach115PlayerPreferenceStore(', adapterStart);
+  const network = { URL, URLSearchParams };
+  vm.runInNewContext(source.slice(adapterStart, adapterEnd), network);
+  const calls = [];
+  const numeric = { fid: '11', cid: '10', n: '01.mp4', pc: 'fixture001', is_v: 1, s: 314572800 };
+  const named = { ...numeric, fid: '12', n: 'Science Fiction.mp4', pc: 'fixture002' };
+  const dirs = [
+    { cid: '10', pid: '7', n: 'Science Fiction' },
+    { cid: '20', pid: '7', n: 'Science Fiction sample' },
+    { cid: '30', pid: '10', n: 'Extras' },
+    { ...named }
+  ];
+  const adapter = network.N115DataAdapter.create115DataAdapter({ async request(href) {
+    const { pathname, searchParams: q } = new URL(href);
+    const cid = q.get('cid');
+    const offset = Number(q.get('offset'));
+    calls.push({ pathname, cid, offset, keyword: q.get('search_value'), recursive: q.get('cur') === '0' });
+    let data;
+    let count;
+    const path = cid === '10' ? [{ cid: '7', name: 'Archive' }, { cid: '10', name: 'Science Fiction' }] : [];
+    if (pathname === '/files/search' && q.get('show_dir') === '1') {
+      assert.equal(cid, '0');
+      assert.equal(q.get('fc'), '1');
+      assert.equal(q.get('limit'), '32');
+      assert.equal(q.get('search_value'), 'science fiction');
+      data = dirs;
+      count = dirs.length;
+    } else if (pathname === '/files/search') {
+      data = [named].slice(offset, offset + 1);
+      count = 1;
+    } else if (cid === '10') {
+      assert.equal(q.get('cur'), '1', 'read only videos directly in the matching folder');
+      data = [numeric, named].slice(offset, offset + 1);
+      count = 2;
+    } else {
+      assert.equal(cid, '0', 'excluded or nonmatching directories must not be sampled');
+      data = [offset === 0 ? numeric : { ...numeric, fid: '100', cid: '0', n: 'Unrelated.mp4' }];
+      count = 10000;
+    }
+    return JSON.stringify({ state: true, data, count, offset, path: pathname === '/files/search' ? [] : path });
+  } });
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+    fullDisk: true, filters: { keyword: 'Science Fiction', excludeKeyword: 'sample', matchParent: true, keywordLines: true }
+  } });
+  const first = await engine.nextCandidate();
+  const second = await engine.nextCandidate();
+  const third = await engine.nextCandidate();
+  const fourth = await engine.nextCandidate();
+  assert.deepEqual([first.item.id, second.item.id], ['12', '11']);
+  assert.equal(third.duplicate, true);
+  assert.equal(fourth.duplicate, true, 'a video in the fallback range remains deduplicated');
+  assert.equal(engine.getStats().totalVideos, 10000, 'overlapping priority counts do not inflate the range');
+  assert.equal(calls.filter(call => call.cid === '0' && call.pathname === '/files').length, 2,
+    'a count and a fallback draw, with no global candidate reads required before the two matches');
+});
+
+test('a refused whole-disk directory search pauses other probes until resumed', async () => {
+  const { adapter, calls } = createAdapter({ 0: [video(1, '正片.mp4')] });
+  adapter.searchKeywordFolders = async () => {
+    throw Object.assign(new Error('rate limited'), { httpStatus: 429 });
+  };
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+    fullDisk: true, filters: { keyword: '正片', keywordLines: true, matchParent: true }
+  } });
+  await assert.rejects(engine.nextCandidate(), /rate limited/);
+  assert.deepEqual(calls, []);
+  adapter.searchKeywordFolders = async () => { throw new Error('search unavailable'); };
+  assert.equal((await engine.nextCandidate()).item.id, '1');
+});
+
+test('specified folder scope keeps multiline phrases within a single field and applies parent exclusions', async () => {
+  const direct = { ...video(1, '01.mp4'), parentId: '10', pathSegments: [{ id: '10', name: 'Science Fiction' }] };
+  const blocked = { ...video(2, 'Science Fiction.mp4'), parentId: '11', pathSegments: [{ id: '11', name: 'Keep Out' }] };
+  const mixed = { ...video(3, 'Science'), parentId: '12', pathSegments: [{ id: '12', name: 'Fiction' }] };
+  const nested = { ...video(4, '02.mp4'), parentId: '13', pathSegments: [
+    { id: '10', name: 'Science Fiction' }, { id: '13', name: 'Other' }
+  ] };
+  const { adapter, calls } = createAdapter({ 10: [direct, blocked, mixed, nested] });
+  adapter.searchKeywordFolders = async () => assert.fail('selected-folder mode must not search the drive');
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+    folders: [{ cid: '10', recursive: true }],
+    filters: { keyword: 'Science Fiction\nAnother title', excludeKeyword: 'Keep Out', keywordLines: true, matchParent: true }
+  } });
+  const results = [];
+  for (let i = 0; i < 4; i++) results.push(await engine.nextCandidate());
+  assert.deepEqual(results.flatMap(result => result.item ? [result.item.id] : []), ['1']);
+  assert.ok(calls.every(call => call.kind === 'random' && call.cid === '10'));
+});
 
 test('single full-disk keyword draws from search and still enforces size and exclusions locally', async () => {
   const items = Array.from({ length: 100 }, (_, i) => video(i, i < 3 ? 'target-' + i : 'other-' + i,

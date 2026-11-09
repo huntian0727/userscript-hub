@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.20
+// @version      2.0.21
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -438,6 +438,19 @@
       return { count: Math.min(10000, reportedCount), capped: reportedCount > 10000,
         item: normalizeListedVideo(payload, folderId) };
     }
+    async function searchKeywordFolders(keyword, { signal } = {}) {
+      const url = new URL('/files/search', API_ORIGIN);
+      url.search = new URLSearchParams({
+        aid: '1', cid: '0', cur: '0', show_dir: '1', fc: '1', nf: '1',
+        search_value: keyword, limit: '32', offset: '0'
+      });
+      const payload = parseApiResponse(await request(url.href, { signal }));
+      throwIfAborted(signal);
+      return payload.data.slice(0, 32)
+        .map(row => normalizeRecord(row, '0', []))
+        .filter(record => record?.type === 'folder' && record.id !== '0');
+    }
+
     async function readDirectoryPage(cid, offset = 0, options = {}) {
       const folderId = normalizeId(cid, 'cid');
       const safeOffset = integerValue(offset, 'offset', 0);
@@ -725,6 +738,7 @@
       readRandomVideo,
       readGlobalVideo,
       readSearchedVideo,
+      searchKeywordFolders,
       readDirectoryPage,
       readVideoFolder,
       defaultPageSize: DEFAULT_PAGE_SIZE
@@ -1305,6 +1319,8 @@
       return {
         keyword: String(value.keyword || '').trim(),
         excludeKeyword: String(value.excludeKeyword || '').trim(),
+        keywordLines: value.keywordLines === true,
+        matchParent: value.matchParent === true,
         folderPath: String(value.folderPath || '').trim().replace(/\\/g, '/'),
         minSizeMB: value.minSizeMB === '' || value.minSizeMB == null ? '' : String(value.minSizeMB),
         maxSizeMB: value.maxSizeMB === '' || value.maxSizeMB == null ? '' : String(value.maxSizeMB),
@@ -2012,8 +2028,8 @@
 })(typeof globalThis === 'object' ? globalThis : this, function createN115RandomPlaybackModule() {
   'use strict';
 
-  function splitKeywords(value) {
-    return Array.from(new Set(String(value || '').split(/[\s,，;；]+/).map(item => item.trim().toLocaleLowerCase()).filter(Boolean)));
+  function splitKeywords(value, lines = false) {
+    return Array.from(new Set(String(value || '').split(lines ? /\r?\n/ : /[\s,，;；]+/).map(item => item.trim().toLocaleLowerCase()).filter(Boolean)));
   }
 
   function normalizeFolderSources(config) {
@@ -2192,16 +2208,21 @@
     return { minBytes: min === null ? null : min * 1024 * 1024, maxBytes: max === null ? null : max * 1024 * 1024 };
   }
 
-  function passesLocalFilters(item, filters, terms, excludedPickcodes) {
+  function matchesKeywords(name, parentName, included, excluded) {
+    const fields = [name, parentName].map(value => String(value || '').toLocaleLowerCase());
+    const matches = term => fields.some(field => field.includes(term));
+    return (!included.length || included.some(matches)) && !excluded.some(matches);
+  }
+
+  function passesLocalFilters(item, filters, terms, excludedTerms, excludedPickcodes) {
     if (!item || item.isVideo !== true || item.playable !== true) return false;
     const id = String(item.id || '').trim();
     if (!/^\d+$/.test(id)) return false;
     const pickcode = String(item.pickcode || '').trim().toLocaleLowerCase();
     if (excludedPickcodes.has(pickcode)) return false;
-    const name = String(item.name || '').toLocaleLowerCase();
-    if (terms.length && !terms.some(term => name.includes(term))) return false;
-    const excluded = splitKeywords(filters.excludeKeyword);
-    if (excluded.some(term => name.includes(term))) return false;
+    const parentName = filters.matchParent && !item.pathParentUnknown
+      ? item.pathSegments?.at(-1)?.name || item.parentFolderName : '';
+    if (!matchesKeywords(item.name, parentName, terms, excludedTerms)) return false;
     const size = item.sizeBytes == null ? NaN : Number(item.sizeBytes);
     const bounds = normalizeSizeFilter(filters);
     if (bounds.minBytes !== null && (!Number.isFinite(size) || size < bounds.minBytes)) return false;
@@ -2220,31 +2241,36 @@
     }
     const config = options.config && typeof options.config === 'object' ? options.config : {};
     const filters = config.filters && typeof config.filters === 'object' ? config.filters : config;
-    const folders = normalizeFolderSources({
-      fullDisk: config.fullDisk === true || config.mode === 'full-disk',
-      folders: config.folders
-    });
+    const fullDisk = config.fullDisk === true || config.mode === 'full-disk';
+    const folders = normalizeFolderSources({ fullDisk, folders: config.folders });
     if (!folders.length) throw new Error('请至少选择一个文件夹，或开启全盘随机');
-    const terms = splitKeywords(filters.keyword);
-    const searchTerm = (config.fullDisk === true || config.mode === 'full-disk') && terms.length === 1 &&
-      typeof adapter.readSearchedVideo === 'function' ? terms[0] : '';
+    const terms = splitKeywords(filters.keyword, filters.keywordLines);
+    const excludedTerms = splitKeywords(filters.excludeKeyword, filters.keywordLines);
+    const canSearchFiles = typeof adapter.readSearchedVideo === 'function';
+    const searchTerm = fullDisk && !filters.matchParent && terms.length === 1 && canSearchFiles ? terms[0] : '';
+    const priorityTerms = fullDisk && filters.matchParent ? terms.slice(0, 3) : [];
     const excludedPickcodes = new Set(Array.from(options.excludedPickcodes || [],
       value => String(value || '').trim().toLocaleLowerCase()).filter(Boolean));
     const seenFileIds = new Set();
+    const parentPaths = new Map();
     const failedPickcodes = new Set();
     const random = typeof options.random === 'function' ? options.random : Math.random;
     const signal = options.signal;
     const onStats = typeof options.onStats === 'function' ? options.onStats : null;
-    const descriptors = folders.map(folder => ({
-      cid: folder.cid,
-      folderName: folder.name,
-      folderPath: folder.path,
-      recursive: folder.recursive !== false,
-      count: null,
-      range: null,
-      ready: false,
-      error: ''
-    }));
+    function makeDescriptor(folder, extra = {}) {
+      return {
+        cid: folder.cid,
+        folderName: folder.name,
+        recursive: folder.recursive !== false,
+        count: null,
+        range: null,
+        ready: false,
+        error: '',
+        ...extra
+      };
+    }
+    const descriptors = folders.map(folder => makeDescriptor(folder, { keyword: searchTerm }));
+    let priorityPrepared = false;
     const state = {
       folders,
       descriptors,
@@ -2270,6 +2296,37 @@
       if (onStats) onStats(getStats());
     }
 
+    async function discoverPrioritySources() {
+      const sources = [];
+      const folderIds = new Set();
+      for (const term of priorityTerms) {
+        if (canSearchFiles) {
+          sources.push(makeDescriptor(folders[0], { keyword: term, priority: true }));
+        }
+        if (folderIds.size >= 6 || typeof adapter.searchKeywordFolders !== 'function') continue;
+        throwIfAborted();
+        let matches;
+        try {
+          matches = await adapter.searchKeywordFolders(term, { signal });
+        } catch (error) {
+          throwIfAborted();
+          if (isRandomReadBlocked(error)) throw error;
+          continue;
+        }
+        for (const folder of matches) {
+          if (!folder.id || folder.id === '0' || folderIds.has(folder.id) ||
+              !matchesKeywords(folder.name, '', [term], excludedTerms)) continue;
+          folderIds.add(folder.id);
+          sources.push(makeDescriptor({ cid: folder.id, name: folder.name, recursive: false }, {
+            priority: true,
+            parentMatch: true
+          }));
+          if (folderIds.size >= 6) break;
+        }
+      }
+      return sources;
+    }
+
     async function initializeDescriptor(descriptor) {
       throwIfAborted();
       try {
@@ -2281,17 +2338,21 @@
           maxSizeMB: filters.maxSizeMB
         };
         let result;
-        if (searchTerm) {
+        if (descriptor.keyword) {
           try {
-            result = await adapter.readSearchedVideo(searchTerm, 0, requestOptions);
+            result = await adapter.readSearchedVideo(descriptor.keyword, 0, requestOptions);
             throwIfAborted();
-            if (!result.capped) descriptor.searchTerm = searchTerm;
+            if (!result.capped) descriptor.searchTerm = descriptor.keyword;
           } catch (error) {
             throwIfAborted();
             if (isRandomReadBlocked(error)) throw error;
           }
         }
-        if (!descriptor.searchTerm) result = await adapter.readRandomVideo(descriptor.cid, 0, requestOptions);
+        if (!descriptor.keyword || (!descriptor.searchTerm && !descriptor.priority)) {
+          result = await adapter.readRandomVideo(descriptor.cid, 0, requestOptions);
+        } else if (!descriptor.searchTerm) {
+          result = null;
+        }
         throwIfAborted();
         descriptor.count = Math.max(0, Number(result && result.count) || 0);
         descriptor.range = createSparseRange(descriptor.count);
@@ -2310,15 +2371,22 @@
     async function prepare() {
       if (state.initialized) return state.pending;
       state.initialized = true;
-      const remaining = descriptors.filter(item => !item.ready);
-      state.pending = Promise.allSettled(remaining.map(initializeDescriptor)).then(results => {
-        const failed = results.find(result => result.status === 'rejected');
-        if (failed) {
-          state.initialized = false;
-          throw failed.reason;
+      state.pending = (async () => {
+        if (!priorityPrepared && priorityTerms.length) {
+          descriptors.push(...await discoverPrioritySources());
+          priorityPrepared = true;
+        }
+        const remaining = descriptors.filter(item => !item.ready);
+        for (let start = 0; start < remaining.length; start += 4) {
+          const results = await Promise.allSettled(remaining.slice(start, start + 4).map(initializeDescriptor));
+          const failed = results.find(result => result.status === 'rejected');
+          if (failed) throw failed.reason;
         }
         state.exhausted = !descriptors.some(item => item.range && item.range.remaining > 0);
         notify();
+      })().catch(error => {
+        state.initialized = false;
+        throw error;
       }).finally(() => {
         state.pending = null;
       });
@@ -2326,7 +2394,9 @@
     }
 
     function chooseWeightedDescriptor() {
-      const ready = descriptors.filter(item => item.ready && item.range && item.range.remaining > 0);
+      const available = descriptors.filter(item => item.ready && item.range && item.range.remaining > 0);
+      const priority = available.filter(item => item.priority);
+      const ready = priority.length ? priority : available;
       const total = ready.reduce((sum, item) => sum + item.range.remaining, 0);
       if (!total) return null;
       let target = Math.min(total - 1, Math.floor(random() * total));
@@ -2369,7 +2439,11 @@
       }
       throwIfAborted();
       if (descriptor.searchTerm && result.capped) {
-        throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
+        if (!descriptor.priority) throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
+        descriptor.count = 0;
+        descriptor.range = createSparseRange(0);
+        notify();
+        return { item: null, done: false, skipped: true };
       }
       state.candidatesRead += 1;
       if (Number(result && result.count) !== descriptor.count) {
@@ -2377,8 +2451,8 @@
         descriptor.count = nextCount;
         descriptor.range = createSparseRange(nextCount);
       }
-      const item = result && result.item;
-      if (!item) {
+      let item = result && result.item;
+      if (!item || (descriptor.parentMatch && item.parentId !== descriptor.cid)) {
         notify();
         return { item: null, done: false, skipped: true };
       }
@@ -2388,13 +2462,40 @@
         notify();
         return { item: null, done: false, skipped: true, duplicate: Boolean(fileId) };
       }
-      seenFileIds.add(fileId);
+      const filename = String(item.name || '').toLocaleLowerCase();
+      const needsParent = filters.matchParent && !item.pathParentUnknown &&
+        !excludedTerms.some(term => filename.includes(term)) &&
+        (excludedTerms.length || (terms.length && !terms.some(term => filename.includes(term))));
+      if (descriptor.parentMatch && item.pathSegments?.at(-1)?.id !== descriptor.cid) {
+        item = { ...item, parentFolderName: descriptor.folderName };
+      } else if (needsParent && item.parentId && item.parentId !== '0' &&
+          item.pathSegments?.at(-1)?.id !== item.parentId && typeof adapter.readVideoFolder === 'function') {
+        let lookup = parentPaths.get(item.parentId);
+        if (!lookup) {
+          lookup = adapter.readVideoFolder(item.parentId, { signal });
+          parentPaths.set(item.parentId, lookup);
+          lookup.catch(() => parentPaths.delete(item.parentId));
+        }
+        try {
+          item = { ...item, pathSegments: await lookup };
+        } catch (error) {
+          if (descriptor.range === range) range.positions.set(range.remaining++, offset);
+          throw error;
+        }
+        throwIfAborted();
+      }
+      if (seenFileIds.has(fileId)) {
+        state.duplicateIds += 1;
+        notify();
+        return { item: null, done: false, skipped: true, duplicate: true };
+      }
       const pickcode = String(item.pickcode || '').trim().toLocaleLowerCase();
-      if (failedPickcodes.has(pickcode) || !passesLocalFilters(item, filters, terms, excludedPickcodes)) {
+      if (failedPickcodes.has(pickcode) || !passesLocalFilters(item, filters, terms, excludedTerms, excludedPickcodes)) {
         state.filtered += 1;
         notify();
         return { item: null, done: false, skipped: true, filtered: true };
       }
+      seenFileIds.add(fileId);
       state.accepted += 1;
       notify();
       return { item: Object.assign({}, item, {
@@ -2424,7 +2525,8 @@
 
     function getStats() {
       const ready = descriptors.filter(item => item.ready);
-      const total = ready.reduce((sum, item) => sum + Number(item.count || 0), 0);
+      // The priority lanes are subsets of the full-disk range, so their counts overlap.
+      const total = ready.reduce((sum, item) => sum + (item.priority ? 0 : Number(item.count || 0)), 0);
       const remaining = ready.reduce((sum, item) => sum + Number(item.range && item.range.remaining || 0), 0);
       return {
         folders: folders.length,
@@ -2459,7 +2561,8 @@
     createSparseRange,
     takeSparseOffset,
     createFolderBrowser,
-    createRandomPlaybackEngine
+    createRandomPlaybackEngine,
+    matchesKeywords
   });
 });
 
@@ -2469,7 +2572,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.20';
+  const VERSION = '2.0.21';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
@@ -2736,6 +2839,8 @@
     return {
       keyword: String(value.keyword || '').trim(),
       excludeKeyword: String(value.excludeKeyword || '').trim(),
+      keywordLines: value.keywordLines === true,
+      matchParent: value.matchParent === true,
       folderPath: String(value.folderPath || '').trim().replace(/\\/g, '/'),
       minSizeMB: value.minSizeMB === '' || value.minSizeMB == null ? '' : String(value.minSizeMB),
       maxSizeMB: value.maxSizeMB === '' || value.maxSizeMB == null ? '' : String(value.maxSizeMB),
@@ -2772,14 +2877,12 @@
   }
 
   function matchesFilters(record, filters, favoritePickcodes) {
-    const keyword = String(filters.keyword || '').trim().toLocaleLowerCase();
-    const excludeKeyword = String(filters.excludeKeyword || '').trim().toLocaleLowerCase();
+    const keyword = N115RandomPlayback.splitKeywords(filters.keyword, filters.keywordLines);
+    const excludeKeyword = N115RandomPlayback.splitKeywords(filters.excludeKeyword, filters.keywordLines);
     const folderNames = recordFolderNames(record);
     const folderPath = folderNames.join('/').toLocaleLowerCase();
-    const haystack = [record.name || '', folderNames.join(' '), record.path || '']
-      .join(' ').toLocaleLowerCase();
-    if (keyword && !keyword.split(/\s+/).filter(Boolean).every(token => haystack.includes(token))) return false;
-    if (excludeKeyword && excludeKeyword.split(/\s+/).filter(Boolean).some(token => haystack.includes(token))) return false;
+    const parentName = filters.matchParent && !record.pathParentUnknown ? folderNames.at(-1) : '';
+    if (!N115RandomPlayback.matchesKeywords(record.name, parentName, keyword, excludeKeyword)) return false;
 
     const folderQuery = String(filters.folderPath || '').trim().replace(/\\/g, '/')
       .replace(/^\/+|\/+$/g, '').toLocaleLowerCase();
@@ -4582,6 +4685,8 @@
     return normalizeFilters({
       keyword: session.filterInputs.keyword.value,
       excludeKeyword: session.filterInputs.excludeKeyword.value,
+      keywordLines: session.filters.keywordLines,
+      matchParent: session.filters.matchParent,
       folderPath: session.filterInputs.folderPath.value,
       minSizeMB: session.filterInputs.minSizeMB.value,
       maxSizeMB: session.filterInputs.maxSizeMB.value,
@@ -5295,8 +5400,9 @@
     const addField = (labelText, className, type, placeholder) => {
       const label = element('label', 'filter-field');
       const caption = element('span', '', labelText);
-      const input = element('input', className);
-      input.type = type;
+      const input = element(type === 'textarea' ? 'textarea' : 'input', className);
+      if (type !== 'textarea') input.type = type;
+      else input.rows = 4;
       input.placeholder = placeholder || '';
       input.setAttribute('aria-label', labelText);
       label.append(caption, input);
@@ -5304,8 +5410,8 @@
       return input;
     };
     session.filterInputs = {
-      keyword: addField('包含关键词', 'filter-keyword', 'search', '不限'),
-      excludeKeyword: addField('排除关键词', 'filter-exclude-keyword', 'search', '命中任意词即排除；多个词用空格分隔'),
+      keyword: addField('包含关键词', 'filter-keyword', 'textarea', '不限'),
+      excludeKeyword: addField('排除关键词', 'filter-exclude-keyword', 'textarea', '每行一个排除词'),
       folderPath: addField('文件夹路径', 'filter-folder', 'text', '例如：科幻/星际（包含其子文件夹）'),
       minSizeMB: addField('最小大小（MB）', 'filter-min-size', 'number', '不限'),
       maxSizeMB: addField('最大大小（MB）', 'filter-max-size', 'number', '不限'),
@@ -7683,6 +7789,8 @@
     return normalizeFilters({
       keyword: fullDiskKeywordInput.value,
       excludeKeyword: fullDiskExcludeInput.value,
+      keywordLines: true,
+      matchParent: fullDiskMatchParentInput.checked,
       minSizeMB: fullDiskMinSizeInput.value,
       maxSizeMB: fullDiskMaxSizeInput.value,
       replaceCount: fullDiskReplaceCountInput.value,
@@ -7693,8 +7801,9 @@
   }
   function writeFullDiskFilters(filters) {
     const value = normalizeFilters(filters || DEFAULT_FILTERS);
-    fullDiskKeywordInput.value = value.keyword;
-    fullDiskExcludeInput.value = value.excludeKeyword;
+    fullDiskKeywordInput.value = value.keywordLines ? value.keyword : N115RandomPlayback.splitKeywords(value.keyword).join('\n');
+    fullDiskExcludeInput.value = value.keywordLines ? value.excludeKeyword : N115RandomPlayback.splitKeywords(value.excludeKeyword).join('\n');
+    fullDiskMatchParentInput.checked = value.matchParent;
     fullDiskMinSizeInput.value = value.minSizeMB;
     fullDiskMaxSizeInput.value = value.maxSizeMB;
     fullDiskReplaceCountInput.value = String(value.replaceCount);
@@ -7719,6 +7828,8 @@
         filters: {
           keyword: filters.keyword,
           excludeKeyword: filters.excludeKeyword,
+          keywordLines: filters.keywordLines,
+          matchParent: filters.matchParent,
           minSizeMB: filters.minSizeMB,
           maxSizeMB: filters.maxSizeMB
         }
@@ -8862,7 +8973,7 @@
     .drawer-settings-section .filter-field:nth-child(-n+2){grid-column:1/-1}
     .settings-section-title{margin:0;color:#edf5ff;font-size:14px;line-height:1.4;font-weight:750}
     .filter-field{display:flex;flex-direction:column;gap:5px;min-width:0;color:#aab5c7;font-size:11px}
-    .filter-field input,.filter-schemes input,.filter-schemes select{box-sizing:border-box;width:100%;min-width:0;padding:8px 9px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
+    .filter-field input,.filter-field textarea,.filter-schemes input,.filter-schemes select{box-sizing:border-box;width:100%;min-width:0;padding:8px 9px;border:1px solid #35465d;border-radius:7px;background:#0b111a;color:#edf3ff;font:inherit;font-size:12px}
     .filter-check{display:flex;align-items:center;gap:6px;color:#dce6f5;font-size:12px}
     .filter-check input{accent-color:#4f8df5}
     .filter-schemes{display:flex;gap:7px;flex-wrap:wrap}
@@ -8939,8 +9050,9 @@
     .explore-filter-section{padding-top:16px;border-top:1px solid #2c3e50}
     .full-disk-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
     .full-disk-field{display:flex;flex-direction:column;gap:6px;min-width:0;color:#b8c8da;font-size:12px}
-    .full-disk-field input{box-sizing:border-box;width:100%;min-width:0;border:1px solid #35475a;border-radius:8px;padding:9px 10px;background:#0a121c;color:#edf5ff;font:inherit;font-size:13px;outline:none}
-    .full-disk-field input:focus{border-color:#5ba7c8;box-shadow:0 0 0 2px #2b819b33}
+    .full-disk-field input,.full-disk-field textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid #35475a;border-radius:8px;padding:9px 10px;background:#0a121c;color:#edf5ff;font:inherit;font-size:13px;outline:none}
+    .full-disk-field textarea{min-height:96px;resize:vertical}
+    .full-disk-field input:focus,.full-disk-field textarea:focus{border-color:#5ba7c8;box-shadow:0 0 0 2px #2b819b33}
     .full-disk-checkbox{display:flex;align-items:center;gap:8px;grid-column:1/-1;padding:3px 0;color:#d8e6f4;font-size:12px}
     .full-disk-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .explore-footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 22px;border-top:1px solid #2c3e50;background:#0d1620;flex:none}
@@ -9044,12 +9156,16 @@
     label.append(element('span', '', labelText), input);
     return label;
   }
-  const fullDiskKeywordInput = element('input');
-  fullDiskKeywordInput.type = 'text';
-  fullDiskKeywordInput.placeholder = '多个关键词用空格分隔，命中任意一个即可';
-  const fullDiskExcludeInput = element('input');
-  fullDiskExcludeInput.type = 'text';
-  fullDiskExcludeInput.placeholder = '排除不想看的关键词';
+  const fullDiskKeywordInput = element('textarea');
+  fullDiskKeywordInput.rows = 4;
+  fullDiskKeywordInput.placeholder = '每行一个关键词';
+  const fullDiskExcludeInput = element('textarea');
+  fullDiskExcludeInput.rows = 4;
+  fullDiskExcludeInput.placeholder = '每行一个排除词';
+  const fullDiskMatchParentInput = element('input');
+  fullDiskMatchParentInput.type = 'checkbox';
+  const fullDiskMatchParentLabel = element('label', 'full-disk-checkbox');
+  fullDiskMatchParentLabel.append(fullDiskMatchParentInput, element('span', '', '也匹配直接父目录（包含词和排除词均适用）'));
   const fullDiskMinSizeInput = element('input');
   fullDiskMinSizeInput.type = 'number';
   fullDiskMinSizeInput.min = '0';
@@ -9068,6 +9184,7 @@
   fullDiskFields.append(
     createFullDiskField('包含关键词（命中任意一个）', fullDiskKeywordInput),
     createFullDiskField('排除关键词', fullDiskExcludeInput),
+    fullDiskMatchParentLabel,
     createFullDiskField('最小文件大小（MB）', fullDiskMinSizeInput),
     createFullDiskField('最大文件大小（MB）', fullDiskMaxSizeInput),
     createFullDiskField('本次替换数量（0 为全部未锁定窗口）', fullDiskReplaceCountInput)
@@ -9437,7 +9554,7 @@
   const exploreMain = element('div', 'explore-settings-main');
   const exploreFilters = element('section', 'explore-filter-section');
   exploreScopePicker.append(folderSelectionPanel, folderPickerPanel);
-  exploreFilters.append(element('h3', 'settings-section-title', '筛选条件'), fullDiskFields);
+  exploreFilters.append(element('h3', 'settings-section-title', '筛选条件'), element('div', 'full-disk-status', '关键词每行填写一个，包含命中任意一行，排除优先。'), fullDiskFields);
   exploreMain.append(exploreScopePicker, exploreFilters);
   exploreSettings.append(exploreMain, profileControls);
   const exploreFooter = element('footer', 'explore-footer');
