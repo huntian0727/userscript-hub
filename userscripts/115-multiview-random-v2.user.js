@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.14
+// @version      2.0.15
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2468,7 +2468,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.14';
+  const VERSION = '2.0.15';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -8544,7 +8544,7 @@
       session.versionBadge = element('span', 'version', 'v' + VERSION);
       session.versionBadge.id = 'versionBadge';
 
-      bar.append(session.swapAllButton, session.pauseAllButton,        session.toolsButton, session.favoritesButton, session.newRoundButton, session.audioSourceSelect,
+      bar.append(session.swapAllButton, session.newRoundButton, session.pauseAllButton, session.toolsButton, session.favoritesButton, session.audioSourceSelect,
         session.endModeSelect, session.aspectModeSelect, session.layoutPickerButton,
         session.infoText, session.versionBadge);
       panel.append(bar, grid, layoutPickerMenu, toolsLayer, session.resumeButton, session.roundStatus,
