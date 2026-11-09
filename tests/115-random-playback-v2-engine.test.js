@@ -272,7 +272,7 @@ test('specified folder scope keeps multiline phrases within a single field and a
     { id: '10', name: 'Science Fiction' }, { id: '13', name: 'Other' }
   ] };
   const { adapter, calls } = createAdapter({ 10: [direct, blocked, mixed, nested] });
-  adapter.searchKeywordFolders = async () => assert.fail('selected-folder mode must not search the drive');
+  delete adapter.readSearchedVideo;
   const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
     folders: [{ cid: '10', recursive: true }],
     filters: { keyword: 'Science Fiction\nAnother title', excludeKeyword: 'Keep Out', keywordLines: true, matchParent: true }
@@ -281,6 +281,101 @@ test('specified folder scope keeps multiline phrases within a single field and a
   for (let i = 0; i < 4; i++) results.push(await engine.nextCandidate());
   assert.deepEqual(results.flatMap(result => result.item ? [result.item.id] : []), ['1']);
   assert.ok(calls.every(call => call.kind === 'random' && call.cid === '10'));
+});
+
+test('keyword search finds sparse matches inside a selected folder and rejects results outside its scope', async () => {
+  const adapterStart = source.indexOf('(function expose115DataAdapter(');
+  const adapterEnd = source.indexOf('(function attach115PlayerPreferenceStore(', adapterStart);
+  const network = { URL, URLSearchParams };
+  vm.runInNewContext(source.slice(adapterStart, adapterEnd), network);
+  for (const recursive of [true, false]) {
+    const calls = [];
+    const filename = '关键词测试.mp4';
+    const createRow = (fid, cid) => ({ fid, cid, n: filename, pc: 'fixture' + fid, is_v: 1, s: 314572800 });
+    const folderPath = [{ cid: '10', name: '所选目录' }, { cid: '11', name: '其子目录' }];
+    const results = [createRow('50', '99'), createRow('51', '11'), createRow('52', '10')];
+    const adapter = network.N115DataAdapter.create115DataAdapter({ async request(href) {
+      const { pathname, searchParams: q } = new URL(href);
+      const cid = q.get('cid');
+      const offset = Number(q.get('offset'));
+      calls.push({ pathname, cid, offset, cur: q.get('cur'), listing: q.get('show_dir') === '1' });
+      let payload;
+      if (pathname === '/files/search') {
+        assert.equal(cid, '10');
+        assert.equal(q.get('search_value'), '关键词');
+        assert.equal(q.get('cur'), recursive ? '0' : '1');
+        assert.equal(q.get('show_dir'), '0', 'parent-directory search is disabled');
+        payload = { count: results.length, data: results.slice(offset, offset + 1), path: [] };
+      } else if (q.get('show_dir') === '1') {
+        const path = cid === '11' ? folderPath : [{ cid: '99', name: '范围外' }];
+        payload = { count: 0, data: [], path };
+      } else {
+        assert.equal(cid, '10');
+        payload = { count: 84863, data: [{ ...createRow('55', '10'), n: '无关.mp4' }], path: folderPath.slice(0, 1) };
+      }
+      return JSON.stringify({ state: true, offset, ...payload });
+    } });
+    const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+      folders: [{ cid: '10', recursive }],
+      filters: { keyword: '关键词', keywordLines: true }
+    } });
+    assert.equal((await engine.nextCandidate()).item, null, 'outside result is rejected even if search returns it');
+    assert.equal((await engine.nextCandidate()).item.id, '52');
+    const child = (await engine.nextCandidate()).item;
+    assert.equal(child?.id ?? null, recursive ? '51' : null);
+    assert.equal(engine.getStats().totalVideos, 84863);
+    assert.equal(calls.filter(call => call.pathname === '/files' && !call.listing).length, 1,
+      'reads one scope count and no random videos before finding a keyword match');
+    assert.equal(calls.filter(call => call.listing).length, recursive ? 2 : 0);
+  }
+});
+
+test('selected recursive folder discovers parent-name matches without accepting videos outside it', async () => {
+  const { adapter, calls } = createAdapter({
+    10: [video(60, '其他.mp4')],
+    11: [{ ...video(61, '01.mp4'), parentId: '11', pathSegments: [] }],
+    99: [{ ...video(62, '02.mp4'), parentId: '99', pathSegments: [] }]
+  });
+  adapter.searchKeywordFolders = async (term, { cid }) => {
+    assert.equal(term, '科幻');
+    assert.equal(cid, '10');
+    return [{ id: '99', name: '科幻' }, { id: '11', name: '科幻' }];
+  };
+  adapter.readVideoFolder = async id => id === '11'
+    ? [{ id: '10', name: '所选目录' }, { id, name: '科幻' }]
+    : [{ id, name: '科幻' }];
+  const filters = { keyword: '科幻', keywordLines: true, matchParent: true, minSizeMB: '', maxSizeMB: '' };
+  const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+    folders: [{ cid: '10', recursive: true }], filters
+  } });
+  assert.equal((await engine.nextCandidate()).item, null);
+  const result = await engine.nextCandidate();
+  assert.equal(result.item.id, '61');
+  assert.ok(calls.filter(call => call.cid === '11' || call.cid === '99').every(call => !call.options.recursive));
+  const playerStart = source.indexOf('  function recordFolderNames(');
+  const playerEnd = source.indexOf('  function buildPreferenceState(', playerStart);
+  const createPlayablePredicate = new Function('N115RandomPlayback',
+    source.slice(playerStart, playerEnd) + '\nreturn createPlayablePredicate;')(api);
+  const allowed = createPlayablePredicate(new Set(), filters);
+  assert.equal(allowed({ ...result.item, pathSegments: [], parentFolderName: '科幻' }), true,
+    'the player accepts the verified parent-name fallback when the listing lacks a breadcrumb');
+});
+
+test('ordinary scoped keyword search failure falls back and a refusal pauses further reads', async () => {
+  for (const httpStatus of [undefined, 429]) {
+    const { adapter, calls } = createAdapter({ 10: [video(1, '目标.mp4')] });
+    adapter.readSearchedVideo = async () => { throw Object.assign(new Error('search unavailable'), { httpStatus }); };
+    const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0, config: {
+      folders: [{ cid: '10', recursive: false }], filters: { keyword: '目标', keywordLines: true }
+    } });
+    if (httpStatus) {
+      await assert.rejects(engine.nextCandidate(), /search unavailable/);
+      assert.equal(calls.length, 1, 'only the already-started scope count completes');
+      adapter.readSearchedVideo = async () => ({ count: 0, item: null });
+    }
+    assert.equal((await engine.nextCandidate()).item.id, '1');
+    assert.ok(calls.every(call => call.cid === '10'));
+  }
 });
 
 test('single full-disk keyword draws from search and still enforces size and exclusions locally', async () => {
@@ -346,13 +441,16 @@ test('candidate refusal pauses search without falling back and preserves the rej
   }
 });
 
-test('multiple keywords retain the full-drive OR pool', async () => {
+test('multiple keywords prioritize filename search and retain the full-drive OR fallback', async () => {
   const { adapter, calls } = createAdapter({ 0: [video(1, 'alpha'), video(2, 'beta')] });
   const engine = api.createRandomPlaybackEngine({ adapter, random: () => 0,
     config: { mode: 'full-disk', filters: { keyword: 'alpha beta' } } });
   await engine.prepare();
   assert.equal((await engine.nextCandidate()).item.id, '1');
-  assert.ok(calls.every(call => call.kind === 'random'));
+  assert.equal((await engine.nextCandidate()).item.id, '2');
+  assert.deepEqual([...new Set(calls.filter(call => call.kind === 'search').map(call => call.keyword))],
+    ['alpha', 'beta']);
+  assert.equal(calls.filter(call => call.kind === 'random').length, 1, 'only the fallback count was requested');
 });
 
 test('nested selected folders are removed when a recursive parent already covers them', () => {
@@ -370,6 +468,7 @@ test('multiple folders are weighted by actual video counts, not by keyword count
     10: [video(1, '爱情.mp4'), video(2, '动作.mp4'), video(3, '科幻.mp4')],
     20: [video(4, '爱情-目录B.mp4')]
   });
+  delete adapter.readSearchedVideo;
   const engine = api.createRandomPlaybackEngine({    adapter,
     config: { mode: 'folders', folders: [{ cid: '10' }, { cid: '20' }], filters: { keyword: '爱情,动作,科幻' } },
     random: () => 0.9
@@ -417,6 +516,7 @@ test('keyword tokens use OR matching and duplicate file IDs across sources are o
     10: [shared, video(2, '动作.mp4')],
     20: [shared, video(3, '科幻.mp4')]
   });
+  delete adapter.readSearchedVideo;
   const engine = api.createRandomPlaybackEngine({
     adapter,
     config: { folders: [{ cid: '10' }, { cid: '20' }], filters: { keyword: '爱情,动作' } },
@@ -439,6 +539,7 @@ test('size and exclusion filters are applied locally without hashing or reading 
       video(3, '课程.mp4', 900 * 1024 * 1024)
     ]
   });
+  delete adapter.readSearchedVideo;
   const engine = api.createRandomPlaybackEngine({
     adapter,
     config: { folders: [{ cid: '10' }], filters: { keyword: '爱情', minSizeMB: '200' } },

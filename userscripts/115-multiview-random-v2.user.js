@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.21
+// @version      2.0.22
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -438,16 +438,17 @@
       return { count: Math.min(10000, reportedCount), capped: reportedCount > 10000,
         item: normalizeListedVideo(payload, folderId) };
     }
-    async function searchKeywordFolders(keyword, { signal } = {}) {
+    async function searchKeywordFolders(keyword, { cid = '0', signal } = {}) {
+      const folderId = normalizeId(cid, 'cid');
       const url = new URL('/files/search', API_ORIGIN);
       url.search = new URLSearchParams({
-        aid: '1', cid: '0', cur: '0', show_dir: '1', fc: '1', nf: '1',
+        aid: '1', cid: folderId, cur: '0', show_dir: '1', fc: '1', nf: '1',
         search_value: keyword, limit: '32', offset: '0'
       });
       const payload = parseApiResponse(await request(url.href, { signal }));
       throwIfAborted(signal);
       return payload.data.slice(0, 32)
-        .map(row => normalizeRecord(row, '0', []))
+        .map(row => normalizeRecord(row, folderId, []))
         .filter(record => record?.type === 'folder' && record.id !== '0');
     }
 
@@ -2248,7 +2249,8 @@
     const excludedTerms = splitKeywords(filters.excludeKeyword, filters.keywordLines);
     const canSearchFiles = typeof adapter.readSearchedVideo === 'function';
     const searchTerm = fullDisk && !filters.matchParent && terms.length === 1 && canSearchFiles ? terms[0] : '';
-    const priorityTerms = fullDisk && filters.matchParent ? terms.slice(0, 3) : [];
+    const priorityTerms = searchTerm ? [] : terms.slice(0, 3);
+    const canSearchFolders = filters.matchParent && typeof adapter.searchKeywordFolders === 'function';
     const excludedPickcodes = new Set(Array.from(options.excludedPickcodes || [],
       value => String(value || '').trim().toLocaleLowerCase()).filter(Boolean));
     const seenFileIds = new Set();
@@ -2299,32 +2301,53 @@
     async function discoverPrioritySources() {
       const sources = [];
       const folderIds = new Set();
+      // Bound startup probes even if many folders or keywords were selected.
+      const maxQueries = 6;
+      let queries = 0;
       for (const term of priorityTerms) {
-        if (canSearchFiles) {
-          sources.push(makeDescriptor(folders[0], { keyword: term, priority: true }));
-        }
-        if (folderIds.size >= 6 || typeof adapter.searchKeywordFolders !== 'function') continue;
-        throwIfAborted();
-        let matches;
-        try {
-          matches = await adapter.searchKeywordFolders(term, { signal });
-        } catch (error) {
+        for (const scope of folders) {
+          if (queries >= maxQueries) return sources;
+          const searchFolders = canSearchFolders && scope.recursive && folderIds.size < 6;
+          if (!canSearchFiles && !searchFolders) continue;
+          queries++;
+          const boundary = fullDisk ? null : scope;
+          if (canSearchFiles) {
+            sources.push(makeDescriptor(scope, { keyword: term, priority: true, boundary }));
+          }
+          if (!searchFolders) continue;
           throwIfAborted();
-          if (isRandomReadBlocked(error)) throw error;
-          continue;
-        }
-        for (const folder of matches) {
-          if (!folder.id || folder.id === '0' || folderIds.has(folder.id) ||
-              !matchesKeywords(folder.name, '', [term], excludedTerms)) continue;
-          folderIds.add(folder.id);
-          sources.push(makeDescriptor({ cid: folder.id, name: folder.name, recursive: false }, {
-            priority: true,
-            parentMatch: true
-          }));
-          if (folderIds.size >= 6) break;
+          let matches;
+          try {
+            matches = await adapter.searchKeywordFolders(term, { cid: scope.cid, signal });
+          } catch (error) {
+            throwIfAborted();
+            if (isRandomReadBlocked(error)) throw error;
+            continue;
+          }
+          for (const folder of matches) {
+            const key = scope.cid + '/' + folder.id;
+            if (!folder.id || folder.id === '0' || folder.id === scope.cid || folderIds.has(key) ||
+                !matchesKeywords(folder.name, '', [term], excludedTerms)) continue;
+            folderIds.add(key);
+            sources.push(makeDescriptor({ cid: folder.id, name: folder.name, recursive: false }, {
+              priority: true,
+              parentMatch: true,
+              boundary
+            }));
+            if (folderIds.size >= 6) break;
+          }
         }
       }
       return sources;
+    }
+
+    function isWithinBoundary(item, boundary) {
+      if (!boundary) return true;
+      if (item.pathParentUnknown) return false;
+      if (item.parentId === boundary.cid) return true;
+      const path = item.pathSegments;
+      return boundary.recursive && path?.length > 0 && path.at(-1).id === item.parentId &&
+        path.some(segment => segment.id === boundary.cid);
     }
 
     async function initializeDescriptor(descriptor) {
@@ -2342,7 +2365,7 @@
           try {
             result = await adapter.readSearchedVideo(descriptor.keyword, 0, requestOptions);
             throwIfAborted();
-            if (!result.capped) descriptor.searchTerm = descriptor.keyword;
+            if (descriptor.priority || !result.capped) descriptor.searchTerm = descriptor.keyword;
           } catch (error) {
             throwIfAborted();
             if (isRandomReadBlocked(error)) throw error;
@@ -2438,12 +2461,8 @@
         throw error;
       }
       throwIfAborted();
-      if (descriptor.searchTerm && result.capped) {
-        if (!descriptor.priority) throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
-        descriptor.count = 0;
-        descriptor.range = createSparseRange(0);
-        notify();
-        return { item: null, done: false, skipped: true };
+      if (descriptor.searchTerm && result.capped && !descriptor.priority) {
+        throw new Error('115 关键词搜索结果超过可读取范围，请重新开始本轮');
       }
       state.candidatesRead += 1;
       if (Number(result && result.count) !== descriptor.count) {
@@ -2468,7 +2487,10 @@
         (excludedTerms.length || (terms.length && !terms.some(term => filename.includes(term))));
       if (descriptor.parentMatch && item.pathSegments?.at(-1)?.id !== descriptor.cid) {
         item = { ...item, parentFolderName: descriptor.folderName };
-      } else if (needsParent && item.parentId && item.parentId !== '0' &&
+      }
+      const needsBoundaryPath = descriptor.boundary?.recursive && !isWithinBoundary(item, descriptor.boundary);
+      if ((needsBoundaryPath || (needsParent && !item.parentFolderName)) &&
+          !item.pathParentUnknown && item.parentId && item.parentId !== '0' &&
           item.pathSegments?.at(-1)?.id !== item.parentId && typeof adapter.readVideoFolder === 'function') {
         let lookup = parentPaths.get(item.parentId);
         if (!lookup) {
@@ -2479,10 +2501,17 @@
         try {
           item = { ...item, pathSegments: await lookup };
         } catch (error) {
-          if (descriptor.range === range) range.positions.set(range.remaining++, offset);
-          throw error;
+          throwIfAborted();
+          if (!needsBoundaryPath || isRandomReadBlocked(error)) {
+            if (descriptor.range === range) range.positions.set(range.remaining++, offset);
+            throw error;
+          }
         }
         throwIfAborted();
+      }
+      if (!isWithinBoundary(item, descriptor.boundary)) {
+        notify();
+        return { item: null, done: false, skipped: true };
       }
       if (seenFileIds.has(fileId)) {
         state.duplicateIds += 1;
@@ -2572,7 +2601,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.21';
+  const VERSION = '2.0.22';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
@@ -2881,7 +2910,8 @@
     const excludeKeyword = N115RandomPlayback.splitKeywords(filters.excludeKeyword, filters.keywordLines);
     const folderNames = recordFolderNames(record);
     const folderPath = folderNames.join('/').toLocaleLowerCase();
-    const parentName = filters.matchParent && !record.pathParentUnknown ? folderNames.at(-1) : '';
+    const parentName = filters.matchParent && !record.pathParentUnknown
+      ? folderNames.at(-1) || record.parentFolderName : '';
     if (!N115RandomPlayback.matchesKeywords(record.name, parentName, keyword, excludeKeyword)) return false;
 
     const folderQuery = String(filters.folderPath || '').trim().replace(/\\/g, '/')
