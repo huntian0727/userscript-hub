@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.16
+// @version      2.0.17
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2469,7 +2469,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.16';
+  const VERSION = '2.0.17';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
@@ -5244,46 +5244,47 @@
     });
   }
 
-  function createScriptUpdateSection() {
-    const section = element('section', 'script-update');
-    const title = element('h3', 'settings-section-title', '脚本更新');
-    const current = element('span', 'script-update-version', '当前版本 v' + VERSION);
-    const actions = element('div', 'full-disk-actions');
-    const check = element('button', 'full-disk-action', '检查更新');
-    check.type = 'button';
-    const install = element('a', 'full-disk-action full-disk-primary script-update-install', '立即更新');
+  function createScriptUpdateBadge() {
+    const badge = element('span', 'script-update-badge');
+    const status = element('span', 'script-update-status', VERSION);
+    status.setAttribute('role', 'status');
+    const install = element('a', 'script-update-link', '存在更新');
     install.target = '_blank';
     install.rel = 'noopener noreferrer';
     install.hidden = true;
-    const status = element('div', 'full-disk-status');
-    status.setAttribute('role', 'status');
-    install.onclick = () => { status.textContent = '请在 Tampermonkey 确认更新，然后刷新 115 页面。'; };
-    check.onclick = async () => {
-      if (check.disabled) return;
-      check.disabled = true;
-      install.hidden = true;
+    const retry = element('button', 'script-update-retry', '重试');
+    retry.type = 'button';
+    retry.hidden = true;
+    let checking = false;
+    async function check() {
+      if (checking) return;
+      checking = true;
+      install.hidden = retry.hidden = true;
       install.removeAttribute('href');
-      status.textContent = '正在检查更新…';
+      status.textContent = VERSION + ' 检查中…';
       try {
         const version = await readScriptUpdateVersion();
         const currentParts = VERSION.split('.').map(Number);
         const difference = version.split('.').map((part, index) => Number(part) - currentParts[index]).find(Boolean) || 0;
         if (difference > 0) {
-          status.textContent = '发现新版 v' + version;
+          status.textContent = VERSION;
           install.href = SCRIPT_RELEASE_ROOT + 'history/' + SCRIPT_RELEASE_ID + '/' + version + '.user.js';
+          install.title = '打开 ' + version + ' 的油猴更新确认';
           install.hidden = false;
         } else {
-          status.textContent = difference === 0 ? '已是最新版本。' : '当前版本比安装中心的 v' + version + ' 更新。';
+          status.textContent = VERSION + (difference === 0 ? ' 最新版本' : ' 高于发布版');
         }
       } catch (error) {
-        status.textContent = error.message;
+        status.textContent = VERSION + ' 检查失败';
+        retry.title = error.message;
+        retry.hidden = false;
       } finally {
-        check.disabled = false;
+        checking = false;
       }
-    };
-    actions.append(check, install);
-    section.append(title, current, actions, status);
-    return section;
+    }
+    retry.onclick = () => { void check(); };
+    badge.append(status, install, retry);
+    return { badge, check };
   }
 
   function createFilterPanel(session) {
@@ -5331,7 +5332,7 @@
     const filterSection = element('section', 'drawer-settings-section');
     filterSection.append(element('h3', 'settings-section-title', '当前筛选条件'),
       fields, favoriteLabel, session.filterMessage);
-    panel.append(filterSection, dataManagement, createScriptUpdateSection());
+    panel.append(filterSection, dataManagement);
     writeFilterControls(session, session.filters);
     return panel;
 
@@ -6186,6 +6187,7 @@
       closeToolsDrawer(session, true);
       return;
     }
+    if (session.toolsDrawerLayer.hidden) void session.checkScriptUpdate();
     session.toolsDrawerLayer.hidden = false;
     session.activeToolTab = tab;
     Object.entries(panels).forEach(([key, panel]) => {
@@ -8070,6 +8072,7 @@
     const revision = ++exploreDialogRevision;
     fullDiskAccountId = null;
     fullDiskOverlay.hidden = false;
+    void exploreScriptUpdate.check();
     exploreSettings.hidden = Boolean(active);
     exploreSettings.scrollTop = 0;
     dialogProfiles = [];
@@ -8381,7 +8384,8 @@
       toolsClose.type = 'button';
       toolsClose.setAttribute('aria-label', '关闭工具抽屉');
       toolsClose.onclick = () => closeToolsDrawer(session, true);
-      toolsHeader.append(toolsTitle, toolsClose);
+      const toolsScriptUpdate = createScriptUpdateBadge();
+      toolsHeader.append(toolsTitle, toolsScriptUpdate.badge, toolsClose);
       const toolsTabs = element('nav', 'tools-drawer-tabs');
       toolsTabs.setAttribute('role', 'tablist');
       toolsTabs.setAttribute('aria-label', '工具分类');
@@ -8411,7 +8415,7 @@
       toolsLayer.append(toolsBackdrop, toolsDrawer);
       Object.assign(session, {
         toolsDrawerLayer: toolsLayer, toolsDrawer, toolsDrawerTabs: toolsTabs,
-        toolsDrawerBody: toolsBody
+        toolsDrawerBody: toolsBody, checkScriptUpdate: toolsScriptUpdate.check
       });
       bar.id = 'topbar';
       bar.classList.add('toolbar');
@@ -8915,15 +8919,16 @@
     .full-disk-overlay[hidden]{display:none!important}
     .full-disk-dialog{box-sizing:border-box;width:min(820px,100%);max-height:min(92vh,100%);overflow:hidden;display:flex;flex-direction:column;border:1px solid #36546a;border-radius:14px;background:#101923;box-shadow:0 24px 90px #000c;color:#edf5ff}
     .full-disk-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 22px;border-bottom:1px solid #2c3e50;flex:none}
-    .full-disk-title{font-size:18px;font-weight:900;letter-spacing:.2px}.full-disk-version{margin-left:auto;font-size:11px;color:#8fa7bc;white-space:nowrap}
+    .full-disk-title{font-size:18px;font-weight:900;letter-spacing:.2px}
     .full-disk-close{border:1px solid #40566a;border-radius:8px;padding:7px 11px;background:#202d3a;color:#e7f0fa}
     .explore-settings{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:24px;padding:20px 22px;min-height:0;overflow:auto;overscroll-behavior:contain;align-items:start}
     .explore-settings[hidden]{display:none}
     .explore-settings-main,.explore-filter-section{display:grid;gap:14px;min-width:0}
     .explore-settings-main{gap:20px}
-    .script-update{display:grid;gap:8px;padding:12px;border:1px solid #2c3e50;border-radius:9px;background:#0b131d;min-width:0}
-    .script-update-version{font-size:12px;color:#b8c8da}
-    .script-update-install{text-decoration:none}
+    .script-update-badge{margin-left:auto;display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:11px;color:#9fb7cc}
+    .script-update-link,.script-update-retry{padding:5px 7px;border:1px solid #3e7769;border-radius:6px;background:#193a32;color:#b9f4df;font:inherit;text-decoration:none;cursor:pointer}
+    .script-update-link:hover,.script-update-retry:hover{background:#245144}
+    .script-update-link:focus-visible,.script-update-retry:focus-visible{outline:2px solid #8fc9ed;outline-offset:2px}
     .explore-filter-section{padding-top:16px;border-top:1px solid #2c3e50}
     .full-disk-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
     .full-disk-field{display:flex;flex-direction:column;gap:6px;min-width:0;color:#b8c8da;font-size:12px}
@@ -9001,11 +9006,11 @@
   const fullDiskDialog = element('div', 'full-disk-dialog');
   const fullDiskHeader = element('header', 'full-disk-head');
   const fullDiskTitle = element('div', 'full-disk-title', '随机探索');
-  const fullDiskVersion = element('span', 'full-disk-version', 'v' + VERSION);
+  const exploreScriptUpdate = createScriptUpdateBadge();
   const fullDiskCloseButton = element('button', 'full-disk-close', '收起');
   fullDiskCloseButton.type = 'button';
   fullDiskCloseButton.setAttribute('aria-label', '收起随机探索窗口');
-  fullDiskHeader.append(fullDiskTitle, fullDiskVersion, fullDiskCloseButton);
+  fullDiskHeader.append(fullDiskTitle, exploreScriptUpdate.badge, fullDiskCloseButton);
 
   const exploreScopePicker = element('fieldset', 'explore-scope-picker');
   exploreScopePicker.append(element('legend', 'settings-section-title', '探索范围'));
@@ -9422,13 +9427,11 @@
   fullDiskControls.append(exploreStatus, fullDiskStatus, fullDiskMetrics, fullDiskProgressTrack, fullDiskWarning);
   const exploreSettings = element('div', 'explore-settings');
   const exploreMain = element('div', 'explore-settings-main');
-  const exploreSide = element('div', 'explore-settings-main');
   const exploreFilters = element('section', 'explore-filter-section');
   exploreScopePicker.append(folderSelectionPanel, folderPickerPanel);
   exploreFilters.append(element('h3', 'settings-section-title', '筛选条件'), fullDiskFields);
   exploreMain.append(exploreScopePicker, exploreFilters);
-  exploreSide.append(profileControls, createScriptUpdateSection());
-  exploreSettings.append(exploreMain, exploreSide);
+  exploreSettings.append(exploreMain, profileControls);
   const exploreFooter = element('footer', 'explore-footer');
   exploreFooter.append(fullDiskControls, fullDiskActions);
   fullDiskDialog.append(fullDiskHeader, exploreSettings, exploreFooter);

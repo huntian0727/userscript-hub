@@ -93,14 +93,13 @@ test('createFilterPanel initializes after scheme controls moved to the explorati
     return node;
   };
   const createFilterPanel = new Function(
-    'element', 'createDataManagementSection', 'writeFilterControls', 'createScriptUpdateSection',
+    'element', 'createDataManagementSection', 'writeFilterControls',
     functionSource + '\nreturn createFilterPanel;'
-  )(element, () => element('details', 'data-management'), () => {}, () => element('section', 'script-update'));
+  )(element, () => element('details', 'data-management'), () => {});
   const session = { fullDiskSource: {}, filters: {}, profiles: [] };
   const panel = createFilterPanel(session);
-  assert.equal(panel.children.length, 3);
+  assert.equal(panel.children.length, 2);
   assert.equal(panel.children[1].className, 'data-management');
-  assert.equal(panel.children[2].className, 'script-update');
   assert.equal(session.filterInputs.keyword.readOnly, true);
   assert.equal(session.filterInputs.folderPath.parentElement.hidden, true);
   assert.equal(Object.hasOwn(session.filterInputs, 'profileSelect'), false);

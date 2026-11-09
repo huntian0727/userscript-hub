@@ -51,19 +51,19 @@ test('unified exploration upgrades the existing test channel', () => {
   assert.notEqual(readMetadata(source).namespace, readMetadata(read(stable.source)).namespace, 'parallel install must have a distinct Tampermonkey namespace');
 });
 
-test('random playback v2.0.16 is a separately published channel and preserves prior snapshots', () => {
+test('random playback v2.0.17 is a separately published channel and preserves prior snapshots', () => {
   const v2 = registry.scripts.find(item => item.id === '115-multiview-random-v2');
   assert.ok(v2);
   assert.equal(v2.enabled, true);
   const source = read(v2.source);
   const served = withUpdateUrls(source, v2.id, baseUrl);
-  assert.equal(readMetadata(source).version, '2.0.16');
+  assert.equal(readMetadata(source).version, '2.0.17');
   assert.equal(readMetadata(source).name, '115多画面播放器（随机探索 v2.0）');
   assert.equal(readMetadata(source).namespace, 'local.115.multiview.random.v2');
   assert.equal(served.updateUrl, baseUrl + '/userscripts/115-multiview-random-v2.meta.js');
   assert.equal(served.downloadUrl, baseUrl + '/userscripts/115-multiview-random-v2.user.js');
   const meta = read('userscripts/115-multiview-random-v2.meta.js');
-  assert.equal(readMetadata(meta).version, '2.0.16');
+  assert.equal(readMetadata(meta).version, '2.0.17');
   assert.ok(meta.includes('// @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js'));
   assert.ok(meta.includes('// @downloadURL  https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js'));
   assert.equal(normalizeEol(read('userscripts/115-multiview-full-disk.user.js')),
@@ -77,10 +77,10 @@ test('parallel v1.7.0 snapshot uses only the independent update channel', () => 
   assert.ok(!snapshot.includes('/userscripts/115-multiview-indexed.meta.js'));
 });
 
-test('manual v2 update check accepts only the fixed release metadata', async () => {
+test('v2 update check accepts only the fixed release metadata', async () => {
   const source = read('userscripts/115-multiview-random-v2.user.js');
   const start = source.indexOf('  function readScriptUpdateVersion()');
-  const end = source.indexOf('  function createScriptUpdateSection()', start);
+  const end = source.indexOf('  function createScriptUpdateBadge()', start);
   assert.ok(start >= 0 && end > start);
   let responseText = read('userscripts/115-multiview-random-v2.meta.js');
   let redirect = false;
