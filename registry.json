@@ -14,8 +14,9 @@
       "displayName": "115 多画面播放器（四宫格验证版）",
       "description": "从 115 当前页面已加载的视频中随机抽取最多 4 个，同时静音播放。当前为验证体验版。",
       "source": "userscripts/115-multiview-quad.user.js",
-      "channel": "公开验证体验",
-      "enabled": true
+      "channel": "已归档 · 四宫格早期验证版",
+      "enabled": false,
+      "archive": true
     },
     {
       "id": "115-index-verifier",
@@ -23,7 +24,20 @@
       "description": "只读扫描115目录，支持IndexedDB本地分批保存、断点续扫和视频索引。",
       "source": "userscripts/115-index-verifier.user.js",
       "channel": "独立入口已停用 · 功能已并入v0.9.0（历史快照保留）",
-      "enabled": false
+      "enabled": false,
+      "archive": true
+    },
+    {
+      "id": "98tang-search-enhanced",
+      "source": "userscripts/98tang-search-enhanced.user.js",
+      "channel": "正式版 · 同步自 Greasy Fork",
+      "enabled": true
+    },
+    {
+      "id": "98tang-115-download",
+      "source": "userscripts/98tang-115-download.user.js",
+      "channel": "正式版 · 同步自 Greasy Fork",
+      "enabled": true
     },
     {
       "id": "115-multiview-indexed",

@@ -14,10 +14,13 @@
 
 | 脚本 | 当前状态 |
 |---|---|
-| 115 多画面播放器（四宫格验证版） v0.1.1 | 公开迁移验证版 |
+| [98堂搜索加强版 v1.9.5](https://huntian0727.github.io/userscript-hub/userscripts/98tang-search-enhanced.user.js) | 同步 Greasy Fork 已发布的正式版本 |
+| [98堂_资源一键快速下载(115) v1.15.0](https://huntian0727.github.io/userscript-hub/userscripts/98tang-115-download.user.js) | 同步 Greasy Fork 已发布的云解压密码池版本 |
 | [115 多画面播放器稳定版 v0.12.4](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-indexed.user.js) | 原链接不变，服务现有用户 |
 | [115 多画面播放器 · 随机探索 v1.9.1](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-full-disk.user.js) | 独立公开测试版。全盘随机发现视频后，可按需切换到所在文件夹整页播放；入口按钮已重新设计，保留锁定窗口；真实115账号体验反馈持续收集。 |
+| [115 多画面播放器 · 随机探索 v2.0.21](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js) | 正式版，支持逐行关键词和直接父目录筛选 |
 | [拉面视频宇宙 · 3D 探索版 v0.3.1](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | HOME真实账号试用候选：已发现星球/视频搜索、卫星换批、当前目录路径导航；默认真实115模式，完整播放交给115官方播放器。真实账号验收待进行 |
+| [拉面视频宇宙 · 3D 独立试用版 v0.3.4](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe-lab.user.js) | 与 v0.3.1 并行的试用入口，支持本机星球收藏 |
 | [视频宇宙 v0.1.0 历史快照](history/115-video-universe/0.1.0.user.js) | 2D 首个试点，独立归档供回滚 |
 **视频宇宙效果预览（仅模拟目录数据）：** [查看星系界面截图](docs/images/video-universe-v0.1.0-demo.png)。探索类独立发行规范见 [EXPLORATION-INDEPENDENT-RELEASES.md](docs/EXPLORATION-INDEPENDENT-RELEASES.md)。
 **产品路线图：** [真实115产品化路线图](VIDEO_UNIVERSE_PRODUCT_ROADMAP.md)。
@@ -37,6 +40,11 @@ GitHub Actions 使用 node scripts/build-pages.js --check-history，不会在 CI
 ## 历史版本
 
 history/<script-id>/<version>.user.js 是不可覆盖的发布快照。相同脚本、相同版本若代码发生变化，构建会失败，必须先递增 @version。
+
+以下早期验证脚本已从首页、公开清单和固定更新入口下架，原版快照仍可查阅。
+
+- [115 多画面播放器四宫格验证版 v0.1.1](https://huntian0727.github.io/userscript-hub/history/115-multiview-quad/0.1.1.user.js)
+- [115 目录索引验证版 v0.3.0](https://huntian0727.github.io/userscript-hub/history/115-index-verifier/0.3.0.user.js)
 
 ## 安全边界
 

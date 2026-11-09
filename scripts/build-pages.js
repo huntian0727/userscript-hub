@@ -204,11 +204,12 @@ function buildPages(options = {}) {
   const ids = new Set();
   const pending = [];
   for (const item of registry.scripts) {
-    if (!item || item.enabled === false) continue;
+    if (!item || (item.enabled === false && item.archive !== true)) continue;
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.id || '') || ids.has(item.id)) {
       throw new Error('Invalid or duplicate userscript id: ' + String(item.id));
     }
     ids.add(item.id);
+    if (item.enabled === false) continue;
     const sourcePath = resolveSource(rootDir, userscriptsDir, item.source);
     const source = fs.readFileSync(sourcePath, 'utf8');
     assertNoEmbeddedSecrets(source, item.source);
@@ -399,18 +400,19 @@ function buildPages(options = {}) {
   for (const entry of pending) {
     fs.writeFileSync(path.join(outputDir, 'userscripts', entry.item.id + '.user.js'), entry.artifact);
     fs.writeFileSync(path.join(outputDir, 'userscripts', entry.item.id + '.meta.js'), entry.metaArtifact);
-    const sourceHistoryDir = path.join(historyDir, entry.item.id);
-    const outputHistoryDir = path.join(outputDir, 'history', entry.item.id);
+  }
+  for (const id of ids) {
+    const sourceHistoryDir = path.join(historyDir, id);
+    if (!fs.existsSync(sourceHistoryDir)) continue;
+    if (!fs.lstatSync(sourceHistoryDir).isDirectory()) throw new Error('Invalid history directory: ' + id);
+    const outputHistoryDir = path.join(outputDir, 'history', id);
     fs.mkdirSync(outputHistoryDir, { recursive: true });
-    if (fs.existsSync(sourceHistoryDir)) {
-      for (const file of fs.readdirSync(sourceHistoryDir)) {
-        if (/^[0-9A-Za-z.+_-]+\.user\.js$/.test(file)) {
-          const sourceHistoryPath = path.join(sourceHistoryDir, file);
-          const stat = fs.lstatSync(sourceHistoryPath);
-          if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Invalid history file: ' + file);
-          fs.copyFileSync(sourceHistoryPath, path.join(outputHistoryDir, file));
-        }
-      }
+    for (const file of fs.readdirSync(sourceHistoryDir)) {
+      if (!/^[0-9A-Za-z.+_-]+\.user\.js$/.test(file)) continue;
+      const sourceHistoryPath = path.join(sourceHistoryDir, file);
+      const stat = fs.lstatSync(sourceHistoryPath);
+      if (!stat.isFile()) throw new Error('Invalid history file: ' + file);
+      fs.copyFileSync(sourceHistoryPath, path.join(outputHistoryDir, file));
     }
   }
   return { manifest, integration, outputDir };

@@ -103,6 +103,27 @@ test('build emits manifest, integration descriptor, install artifacts and immuta
   }
 });
 
+test('archiving removes the live install and update paths and preserves the published snapshot', () => {
+  const root = fixture();
+  try {
+    const options = { rootDir: root, baseUrl: 'https://example.github.io/repo' };
+    buildPages(options);
+    const registryPath = path.join(root, 'registry.json');
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    registry.scripts[0].enabled = false;
+    registry.scripts[0].archive = true;
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    const { manifest, outputDir } = buildPages({ ...options, checkHistory: true });
+    assert.deepEqual(manifest.scripts, []);
+    assert.equal(fs.existsSync(path.join(outputDir, 'userscripts/sample-script.user.js')), false);
+    assert.equal(fs.existsSync(path.join(outputDir, 'userscripts/sample-script.meta.js')), false);
+    const snapshot = 'history/sample-script/1.0.0.user.js';
+    assert.deepEqual(fs.readFileSync(path.join(outputDir, snapshot)), fs.readFileSync(path.join(root, snapshot)));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('build refuses to overwrite a published version with changed content', () => {
   const root = fixture();
   try {
