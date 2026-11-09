@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.15
+// @version      2.0.16
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -9,6 +9,7 @@
 // @connect      115vod.com
 // @connect      115cdn.net
 // @connect      anxia.com
+// @connect      huntian0727.github.io
 // @grant        GM_xmlhttpRequest
 // @noframes
 // @run-at       document-idle
@@ -2468,7 +2469,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.15';
+  const VERSION = '2.0.16';
+  const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
+  const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
   const TOOLBAR_AUTO_HIDE_MS = 1000;
   const TOOLBAR_REVEAL_ZONE_PX = 60;
@@ -5207,6 +5210,82 @@
     return section;
   }
 
+  function readScriptUpdateVersion() {
+    const url = SCRIPT_RELEASE_ROOT + 'userscripts/' + SCRIPT_RELEASE_ID + '.meta.js?check=' + Date.now();
+    return new Promise((resolve, reject) => {
+      let request;
+      const fail = () => {
+        clearTimeout(timer);
+        reject(new Error('无法连接安装中心，请重试。'));
+      };
+      const timer = setTimeout(() => {
+        fail();
+        request?.abort();
+      }, 10000);
+      try {
+        request = GM_xmlhttpRequest({
+          method: 'GET', url, anonymous: true, nocache: true,
+          onload: response => {
+            clearTimeout(timer);
+            if (response.status !== 200 || response.finalUrl !== url) return fail();
+            const header = /^\/\/ ==UserScript==\r?\n([\s\S]*?)^\/\/ ==\/UserScript==[ \t]*\r?$/m
+              .exec(response.responseText)?.[1];
+            const version = /^\/\/[ \t]+@version[ \t]+(\d{1,6}\.\d{1,6}\.\d{1,6})[ \t]*\r?$/m.exec(header)?.[1];
+            if (!version || !/^\/\/[ \t]+@namespace[ \t]+local\.115\.multiview\.random\.v2[ \t]*\r?$/m.test(header)) {
+              return reject(new Error('安装中心返回的版本信息无效，请重试。'));
+            }
+            resolve(version);
+          },
+          onerror: fail, onabort: fail, ontimeout: fail
+        });
+      } catch {
+        fail();
+      }
+    });
+  }
+
+  function createScriptUpdateSection() {
+    const section = element('section', 'script-update');
+    const title = element('h3', 'settings-section-title', '脚本更新');
+    const current = element('span', 'script-update-version', '当前版本 v' + VERSION);
+    const actions = element('div', 'full-disk-actions');
+    const check = element('button', 'full-disk-action', '检查更新');
+    check.type = 'button';
+    const install = element('a', 'full-disk-action full-disk-primary script-update-install', '立即更新');
+    install.target = '_blank';
+    install.rel = 'noopener noreferrer';
+    install.hidden = true;
+    const status = element('div', 'full-disk-status');
+    status.setAttribute('role', 'status');
+    install.onclick = () => { status.textContent = '请在 Tampermonkey 确认更新，然后刷新 115 页面。'; };
+    check.onclick = async () => {
+      if (check.disabled) return;
+      check.disabled = true;
+      install.hidden = true;
+      install.removeAttribute('href');
+      status.textContent = '正在检查更新…';
+      try {
+        const version = await readScriptUpdateVersion();
+        const currentParts = VERSION.split('.').map(Number);
+        const difference = version.split('.').map((part, index) => Number(part) - currentParts[index]).find(Boolean) || 0;
+        if (difference > 0) {
+          status.textContent = '发现新版 v' + version;
+          install.href = SCRIPT_RELEASE_ROOT + 'history/' + SCRIPT_RELEASE_ID + '/' + version + '.user.js';
+          install.hidden = false;
+        } else {
+          status.textContent = difference === 0 ? '已是最新版本。' : '当前版本比安装中心的 v' + version + ' 更新。';
+        }
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        check.disabled = false;
+      }
+    };
+    actions.append(check, install);
+    section.append(title, current, actions, status);
+    return section;
+  }
+
   function createFilterPanel(session) {
     const panel = element('section', 'filter-panel');
     panel.hidden = true;
@@ -5252,7 +5331,7 @@
     const filterSection = element('section', 'drawer-settings-section');
     filterSection.append(element('h3', 'settings-section-title', '当前筛选条件'),
       fields, favoriteLabel, session.filterMessage);
-    panel.append(filterSection, dataManagement);
+    panel.append(filterSection, dataManagement, createScriptUpdateSection());
     writeFilterControls(session, session.filters);
     return panel;
 
@@ -8842,6 +8921,9 @@
     .explore-settings[hidden]{display:none}
     .explore-settings-main,.explore-filter-section{display:grid;gap:14px;min-width:0}
     .explore-settings-main{gap:20px}
+    .script-update{display:grid;gap:8px;padding:12px;border:1px solid #2c3e50;border-radius:9px;background:#0b131d;min-width:0}
+    .script-update-version{font-size:12px;color:#b8c8da}
+    .script-update-install{text-decoration:none}
     .explore-filter-section{padding-top:16px;border-top:1px solid #2c3e50}
     .full-disk-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
     .full-disk-field{display:flex;flex-direction:column;gap:6px;min-width:0;color:#b8c8da;font-size:12px}
@@ -9340,11 +9422,13 @@
   fullDiskControls.append(exploreStatus, fullDiskStatus, fullDiskMetrics, fullDiskProgressTrack, fullDiskWarning);
   const exploreSettings = element('div', 'explore-settings');
   const exploreMain = element('div', 'explore-settings-main');
+  const exploreSide = element('div', 'explore-settings-main');
   const exploreFilters = element('section', 'explore-filter-section');
   exploreScopePicker.append(folderSelectionPanel, folderPickerPanel);
   exploreFilters.append(element('h3', 'settings-section-title', '筛选条件'), fullDiskFields);
   exploreMain.append(exploreScopePicker, exploreFilters);
-  exploreSettings.append(exploreMain, profileControls);
+  exploreSide.append(profileControls, createScriptUpdateSection());
+  exploreSettings.append(exploreMain, exploreSide);
   const exploreFooter = element('footer', 'explore-footer');
   exploreFooter.append(fullDiskControls, fullDiskActions);
   fullDiskDialog.append(fullDiskHeader, exploreSettings, exploreFooter);

@@ -46,7 +46,7 @@
       "displayName": "115 多画面播放器 · 随机探索 v2.0",
       "description": "文件夹/全盘统一随机探索，按115文件ID去重；支持关键词/大小筛选、方案保存排序、锁定/换片/失败跳过；提供本地JSON备份，可手动上传至115根目录。",
       "source": "userscripts/115-multiview-random-v2.user.js",
-      "channel": "正式发布 · v2.0.15（顶部工具栏顺序）",
+      "channel": "正式发布 · v2.0.16（设置内检查脚本更新）",
       "enabled": true
     },
     {

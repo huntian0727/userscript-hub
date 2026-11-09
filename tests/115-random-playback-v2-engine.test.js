@@ -56,7 +56,6 @@ test('player filter panel does not reference removed scheme action containers', 
   assert.ok(start >= 0 && end > start, 'player filter panel function is present');
   const panel = source.slice(start, end);
   assert.equal(panel.includes('actions'), false, 'filter panel must not reference an out-of-scope actions variable');
-  assert.ok(panel.includes('panel.append(filterSection, dataManagement);'));
 });
 
 test('player startup and backup import do not call the removed profile-select renderer', () => {
@@ -94,13 +93,14 @@ test('createFilterPanel initializes after scheme controls moved to the explorati
     return node;
   };
   const createFilterPanel = new Function(
-    'element', 'createDataManagementSection', 'writeFilterControls',
+    'element', 'createDataManagementSection', 'writeFilterControls', 'createScriptUpdateSection',
     functionSource + '\nreturn createFilterPanel;'
-  )(element, () => element('details', 'data-management'), () => {});
+  )(element, () => element('details', 'data-management'), () => {}, () => element('section', 'script-update'));
   const session = { fullDiskSource: {}, filters: {}, profiles: [] };
   const panel = createFilterPanel(session);
-  assert.equal(panel.children.length, 2);
+  assert.equal(panel.children.length, 3);
   assert.equal(panel.children[1].className, 'data-management');
+  assert.equal(panel.children[2].className, 'script-update');
   assert.equal(session.filterInputs.keyword.readOnly, true);
   assert.equal(session.filterInputs.folderPath.parentElement.hidden, true);
   assert.equal(Object.hasOwn(session.filterInputs, 'profileSelect'), false);

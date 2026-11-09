@@ -51,19 +51,19 @@ test('unified exploration upgrades the existing test channel', () => {
   assert.notEqual(readMetadata(source).namespace, readMetadata(read(stable.source)).namespace, 'parallel install must have a distinct Tampermonkey namespace');
 });
 
-test('random playback v2.0.15 is a separately published channel and preserves prior snapshots', () => {
+test('random playback v2.0.16 is a separately published channel and preserves prior snapshots', () => {
   const v2 = registry.scripts.find(item => item.id === '115-multiview-random-v2');
   assert.ok(v2);
   assert.equal(v2.enabled, true);
   const source = read(v2.source);
   const served = withUpdateUrls(source, v2.id, baseUrl);
-  assert.equal(readMetadata(source).version, '2.0.15');
+  assert.equal(readMetadata(source).version, '2.0.16');
   assert.equal(readMetadata(source).name, '115多画面播放器（随机探索 v2.0）');
   assert.equal(readMetadata(source).namespace, 'local.115.multiview.random.v2');
   assert.equal(served.updateUrl, baseUrl + '/userscripts/115-multiview-random-v2.meta.js');
   assert.equal(served.downloadUrl, baseUrl + '/userscripts/115-multiview-random-v2.user.js');
   const meta = read('userscripts/115-multiview-random-v2.meta.js');
-  assert.equal(readMetadata(meta).version, '2.0.15');
+  assert.equal(readMetadata(meta).version, '2.0.16');
   assert.ok(meta.includes('// @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.meta.js'));
   assert.ok(meta.includes('// @downloadURL  https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js'));
   assert.equal(normalizeEol(read('userscripts/115-multiview-full-disk.user.js')),
@@ -75,6 +75,33 @@ test('parallel v1.7.0 snapshot uses only the independent update channel', () => 
   assert.ok(snapshot.includes('/userscripts/115-multiview-full-disk.meta.js'));
   assert.ok(snapshot.includes('/userscripts/115-multiview-full-disk.user.js'));
   assert.ok(!snapshot.includes('/userscripts/115-multiview-indexed.meta.js'));
+});
+
+test('manual v2 update check accepts only the fixed release metadata', async () => {
+  const source = read('userscripts/115-multiview-random-v2.user.js');
+  const start = source.indexOf('  function readScriptUpdateVersion()');
+  const end = source.indexOf('  function createScriptUpdateSection()', start);
+  assert.ok(start >= 0 && end > start);
+  let responseText = read('userscripts/115-multiview-random-v2.meta.js');
+  let redirect = false;
+  let status = 200;
+  const check = new Function('GM_xmlhttpRequest', 'SCRIPT_RELEASE_ROOT', 'SCRIPT_RELEASE_ID',
+    source.slice(start, end) + '\nreturn readScriptUpdateVersion;')(request => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.anonymous, true);
+    assert.equal(request.nocache, true);
+    assert.match(request.url, /^https:\/\/huntian0727\.github\.io\/userscript-hub\/userscripts\/115-multiview-random-v2\.meta\.js\?check=\d+$/);
+    request.onload({ status, responseText, finalUrl: redirect ? 'https://example.test/update.meta.js' : request.url });
+  }, baseUrl + '/', '115-multiview-random-v2');
+  assert.equal(await check(), readMetadata(responseText).version);
+  status = 404;
+  await assert.rejects(check(), /无法连接安装中心/);
+  status = 200;
+  redirect = true;
+  await assert.rejects(check(), /无法连接安装中心/);
+  redirect = false;
+  responseText = responseText.replace('local.115.multiview.random.v2', 'local.unrelated');
+  await assert.rejects(check(), /版本信息无效/);
 });
 test('v1.6.0 through v1.6.2 previous releases remain immutable and available', () => {
   for (const [version, delivery] of [['1.6.0', 'FDX-160-01'], ['1.6.1', 'FDX-161-01'], ['1.6.2', 'FDX-162-01']]) {
