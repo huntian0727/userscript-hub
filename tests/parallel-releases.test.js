@@ -14,8 +14,10 @@ const explorer = registry.scripts.find(item => item.id === '115-multiview-full-d
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 const normalizeEol = value => value.replace(/\r\n/g, '\n');
 
-test('legacy v0.12.4 keeps the original stable install and update addresses', () => {
+test('legacy v0.12.4 is archived with its original source and metadata', () => {
   assert.ok(stable, 'legacy script registration must remain');
+  assert.equal(stable.enabled, false);
+  assert.equal(stable.archive, true);
   const source = read(stable.source);
   const served = withUpdateUrls(source, stable.id, baseUrl);
   assert.equal(readMetadata(source).version, '0.12.4');
@@ -25,8 +27,10 @@ test('legacy v0.12.4 keeps the original stable install and update addresses', ()
   assert.ok(!source.includes('full-disk-launcher'), 'stable package must not absorb v1.6-only UI');
 });
 
-test('unified exploration upgrades the existing test channel', () => {
-  assert.ok(explorer, 'parallel full-disk registration must remain');
+test('full-disk v1.9.1 is archived with its original source and metadata', () => {
+  assert.ok(explorer, 'full-disk script registration must remain');
+  assert.equal(explorer.enabled, false);
+  assert.equal(explorer.archive, true);
   const source = read(explorer.source);
   const served = withUpdateUrls(source, explorer.id, baseUrl);
   assert.equal(readMetadata(source).version, '1.9.1');
