@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.17
+// @version      2.0.18
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2469,7 +2469,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.17';
+  const VERSION = '2.0.18';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
