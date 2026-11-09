@@ -55,6 +55,7 @@ async function createImportHarness() {
       if (tx.pending === 0 && !tx.aborted && !tx.completionScheduled) {
         tx.completionScheduled = true;
         queueMicrotask(() => {
+          tx.completionScheduled = false;
           if (tx.pending !== 0 || tx.aborted) return;
           if (tx.mode === 'readwrite') {
             for (const [name, data] of tx.data) stores[name] = data;
@@ -84,6 +85,7 @@ async function createImportHarness() {
           if (!data) throw new Error('store not in transaction: ' + name);
           const keyPath = keyPaths[name];
           return {
+            get: key => enqueue(this, () => structuredClone(data.get(JSON.stringify(key)))),
             delete: key => enqueue(this, () => data.delete(JSON.stringify(key))),
             put: value => enqueue(this, () => {
               data.set(keyOf(value, keyPath), structuredClone(value));
@@ -153,7 +155,17 @@ async function createImportHarness() {
     readAccount('favoriteFolders'), readAccount('favoriteFolderItems'), async () => db,
     value => ({ value }),
     transactionPromise, requestPromise, 'default'
-  );  return { importAccountData, stores, existingFolders, existingRelations, accountId };}
+  );
+  const markStart = source.indexOf('    async function listVideoMarks(');
+  const markEnd = source.indexOf('    async function getPlayerSettings(', markStart);
+  assert.ok(markStart >= 0 && markEnd > markStart);
+  const marks = new Function('normalizeAccountId', 'normalizePickcode', 'normalizeVideoSnapshot',
+    'openDatabase', 'only', 'requestPromise', 'transactionPromise', 'DEFAULT_FAVORITE_FOLDER_ID',
+    source.slice(markStart, markEnd) + '\nreturn { listVideoMarks, setVideoMarks, setRecyclePending };'
+  )(normalizeAccountId, normalizePickcode, normalizeVideoSnapshot, async () => db,
+    value => ({ value }), requestPromise, transactionPromise, 'default');
+  return { importAccountData, ...marks, stores, seed, existingFolders, existingRelations, accountId };
+}
 
 test('merging backups reconciles same-named favorite folders and remaps existing relations', async () => {
   const { importAccountData, stores, existingFolders, existingRelations, accountId } = await createImportHarness();
@@ -190,4 +202,41 @@ test('merging backups reconciles same-named favorite folders and remaps existing
   assert.ok(relations.some(item => item.folderId === 'folder-keep' && item.pickcode === 'keep01'));
   assert.equal(existingFolders.length, 3);
   assert.equal(existingRelations.length, 2);
+});
+
+
+test('likes include legacy groups and dislikes preserve their metadata through backup', async () => {
+  const { accountId, seed, stores, listVideoMarks, setVideoMarks, setRecyclePending, importAccountData } =
+    await createImportHarness();
+  seed('videos', { accountId, pickcode: 'oldexc1', favorite: false, excluded: true });
+  seed('videos', { accountId: 'other-account', pickcode: 'old001', favorite: true });
+  let marks = new Map((await listVideoMarks(accountId)).map(entry => [entry.pickcode, entry]));
+  assert.equal(marks.get('old001').mark, 'like', 'custom-only legacy favorite appears in the aggregate');
+  assert.equal(marks.get('oldexc1').mark, 'dislike');
+  assert.equal(marks.get('oldexc1').excluded, true, 'legacy exclusions retain their filter behavior');
+  const snapshot = { scanId: 'session', id: '123', parentId: '456', name: '样本.mp4' };
+  await setVideoMarks(accountId, ['old001'], 'dislike', snapshot);
+  marks = new Map((await listVideoMarks(accountId)).map(entry => [entry.pickcode, entry]));
+  assert.equal(marks.get('old001').mark, 'dislike');
+  assert.equal(marks.get('old001').excluded, false);
+  assert.deepEqual(marks.get('old001').snapshot, snapshot);
+  assert.equal([...stores.favoriteFolderItems.values()].some(item => item.pickcode === 'old001'), false);
+  assert.equal((await listVideoMarks('other-account'))[0].mark, 'like');
+  await setRecyclePending(accountId, 'old001', true);
+  await assert.rejects(setRecyclePending(accountId, 'old001', true), /待核实/);
+  assert.equal((await listVideoMarks(accountId)).find(item => item.pickcode === 'old001').recyclePending, true);
+  await setVideoMarks(accountId, ['old001'], 'like', snapshot);
+  assert.equal((await listVideoMarks(accountId)).find(item => item.pickcode === 'old001').mark, 'like');
+  await assert.rejects(setRecyclePending(accountId, 'old001', true), /标记已变化/);
+  await setVideoMarks(accountId, ['old001'], '');
+  assert.equal((await listVideoMarks(accountId)).some(item => item.pickcode === 'old001'), false);
+
+  const imported = { pickcode: 'import01', favorite: false, excluded: false, disliked: true, snapshot };
+  await importAccountData(accountId, {
+    preferences: [imported], profiles: [], settings: { filters: {} }, recentDirectories: []
+  }, 'merge');
+  const entry = (await listVideoMarks(accountId)).find(item => item.pickcode === imported.pickcode);
+  assert.equal(entry.mark, 'dislike');
+  assert.equal(entry.excluded, false);
+  assert.deepEqual(entry.snapshot, snapshot);
 });

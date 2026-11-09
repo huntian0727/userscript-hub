@@ -13,14 +13,16 @@ const createHelpers = new Function('fullDiskAdapter', source.slice(start, end) +
   '\nreturn { resetCellFileDetails, updateCellFileSummary, loadCellFilePath };');
 
 function cellWith(item) {
-  return { item, video: { readyState: 0, duration: NaN }, fileDetails: {}, fileSummary: {}, filePath: {} };
+  return { item, video: { readyState: 0, duration: NaN }, fileDetails: {}, fileSummary: {}, filePath: {}, copyPathButton: {} };
 }
 
 test('file details show size and media duration, and clear when the item changes', () => {
   const { resetCellFileDetails, updateCellFileSummary } = createHelpers({});
   const cell = cellWith({ name: '片段.mp4', parentId: '0', sizeBytes: 1024 * 1024 });
   resetCellFileDetails(cell);
-  assert.equal(cell.filePath.textContent, '/片段.mp4');
+  assert.equal(cell.filePath.textContent, '所在目录 网盘根目录');
+  assert.equal(cell.fullFilePath, '/片段.mp4');
+  assert.equal(cell.copyPathButton.hidden, false);
   assert.equal(cell.fileSummary.textContent, '大小 1.00 MB · 时长 待加载');
 
   cell.video = { readyState: 1, duration: 3661 };
@@ -62,13 +64,15 @@ test('missing paths are looked up once per parent without overwriting a replaced
     { id: '23', parentId: '10', name: '旅行' }
   ]);
   await pending;
-  assert.equal(a.filePath.title, '/新视频.mp4');
-  assert.equal(b.filePath.title, '/素材/旅行/另一段.mp4');
+  assert.equal(a.filePath.title, '网盘根目录');
+  assert.equal(a.fullFilePath, '/新视频.mp4');
+  assert.equal(b.filePath.title, '/素材/旅行');
+  assert.equal(b.fullFilePath, '/素材/旅行/另一段.mp4');
 
   const unknown = cellWith({ name: '未知位置.mp4', parentId: '0', pathParentUnknown: true });
   resetCellFileDetails(unknown);
   await loadCellFilePath(session, unknown);
   assert.equal(unknown.filePath.title, '');
-  assert.equal(unknown.filePath.textContent, '完整路径暂不可用');
+  assert.equal(unknown.filePath.textContent, '目录暂不可用');
   assert.equal(calls, 1);
 });
