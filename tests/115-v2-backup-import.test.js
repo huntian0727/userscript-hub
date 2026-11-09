@@ -240,3 +240,46 @@ test('likes include legacy groups and dislikes preserve their metadata through b
   assert.equal(entry.excluded, false);
   assert.deepEqual(entry.snapshot, snapshot);
 });
+
+
+test('a new liked round drains old pending swaps and hidden cells before shuffling', () => {
+  const start = source.indexOf('  function startNewFavoriteFolderRound(');
+  const end = source.indexOf('  function exitFavoriteFolderPlayback(', start);
+  const startRound = new Function('itemKey', 'cancelPendingSkip', 'clearFavoritePlaybackCell',
+    'collectNextItem', 'shuffleItems', 'replaceCell', 'updateRoundControls',
+    source.slice(start, end) + '\nreturn startNewFavoriteFolderRound;'
+  )(
+    item => item?.pickcode || '',
+    cell => cell.returnPending?.(),
+    (_session, cell) => { cell.item = null; },
+    session => {
+      const state = session.favoriteFolderPlayback;
+      const item = state.availableItems.shift() || null;
+      if (item) {
+        assert.equal(state.playedPickcodes.has(item.pickcode), false);
+        state.playedPickcodes.add(item.pickcode);
+      }
+      return item;
+    },
+    items => items.slice(),
+    (_session, cell, item) => { cell.item = item; },
+    () => {}
+  );
+  const one = { pickcode: 'like01' };
+  const two = { pickcode: 'like02' };
+  const previous = new Set(['like02']);
+  const state = { active: true, markList: true, items: [one, two], playedPickcodes: previous, availableItems: [] };
+  const session = {
+    favoriteFolderPlayback: state,
+    videoMarks: new Map([['like01', { mark: 'like' }], ['like02', { mark: 'like' }]]),
+    layoutCount: 2, roundNumber: 1, failedPickcodes: new Set(),
+    cells: [{ index: 0 }, { index: 1 }, { index: 2, item: one, locked: true, returnPending() {
+      assert.equal(state.playedPickcodes, previous, 'a pending swap is released in the previous round');
+      state.availableItems.unshift(two);
+    } }]
+  };
+  assert.equal(startRound(session), true);
+  assert.deepEqual(session.cells.map(cell => cell.item?.pickcode ?? null), ['like01', 'like02', null]);
+  assert.equal(session.cells[2].locked, false);
+  assert.deepEqual(state.availableItems, []);
+});

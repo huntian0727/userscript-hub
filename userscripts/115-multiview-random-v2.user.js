@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.23
+// @version      2.0.24
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2702,7 +2702,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.23';
+  const VERSION = '2.0.24';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
@@ -4711,6 +4711,16 @@
       session.roundMessage = '当前所有窗口均已锁定，请先解锁一个窗口';
       updateRoundControls(session);
       return false;
+    }
+    if (state.markList) {
+      for (const cell of session.cells) {
+        if (!cell) continue;
+        cancelPendingSkip(cell);
+        if (cell.index >= session.layoutCount && cell.item) {
+          cell.locked = false;
+          clearFavoritePlaybackCell(session, cell);
+        }
+      }
     }
     const activePickcodes = new Set(session.cells
       .filter(cell => cell && cell.index < session.layoutCount && cell.item)
@@ -7937,6 +7947,7 @@
     if (nextMode === 'mainDual') session.dualSmallCount = count - 2;
     if (nextMode === 'grid') session.standardLayoutCount = count;
     const previousMode = session.layoutMode;
+    const previousCount = session.layoutCount;
     const previousMain = session.mainSlotId;
     const previousSecondary = session.secondaryMainSlotId;
     session.layoutMode = nextMode;
@@ -7947,7 +7958,12 @@
     syncSameFolderLayout(session);
     if (session.favoriteFolderPlayback?.markList && !session.authBlocked) {
       for (const cell of session.cells) {
-        if (!cell || cell.index >= count || cell.item || cell.locked) continue;
+        if (!cell || cell.index >= count) continue;
+        if (cell.index >= previousCount && cell.item && session.videoMarks.get(itemKey(cell.item))?.mark !== 'like') {
+          cell.locked = false;
+          clearFavoritePlaybackCell(session, cell);
+        }
+        if (cell.item || cell.locked) continue;
         const item = collectNextItem(session);
         if (item) replaceCell(session, cell, item);
       }
