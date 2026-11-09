@@ -418,7 +418,7 @@ test('v2 player connects the random engine to first-ready startup and failed-ite
 test('v2 scope changes update settings without requesting random candidates', () => {
   const start = source.indexOf('  function selectExploreScope(');
   const end = source.indexOf('  function closeExploreDialog(', start);
-  const controls = Array.from({ length: 5 }, () => ({}));
+  const controls = Array.from({ length: 5 }, () => ({ setAttribute() {} }));
   const { selectExploreScope, getScope } = new Function('preparedFullDisk', 'cancelPreparedFullDisk', 'active',
     'fullDiskModeInput', 'folderModeInput', 'folderSelectionPanel', 'folderPickerPanel', 'fullDiskStartButton',
     'renderFullDiskSource', 'let exploreScope;\n' + source.slice(start, end) +

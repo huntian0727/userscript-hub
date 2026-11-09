@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115多画面播放器（随机探索 v2.0）
 // @namespace    local.115.multiview.random.v2
-// @version      2.0.18
+// @version      2.0.20
 // @match        https://115.com/*
 // @connect      webapi.115.com
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js
@@ -2469,7 +2469,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.18';
+  const VERSION = '2.0.20';
   const SCRIPT_RELEASE_ROOT = 'https://huntian0727.github.io/userscript-hub/';
   const SCRIPT_RELEASE_ID = '115-multiview-random-v2';
   const CELL_HEADING_AUTO_HIDE_MS = 1000;
@@ -7763,8 +7763,8 @@
     const session = source && fullDiskSession(source);
     const remaining = session ? session.availableItems.length : (source?.items.length || 0);
     fullDiskAdjustFiltersButton.hidden = !session;
-    fullDiskStartButton.textContent = session || (source && !source.exhausted && (source.limited || source.error)) ? '继续抽取'
-      : ((source?.filters?.sourceMode || exploreScope) === 'folders' ? '开始文件夹探索' : '开始全盘探索');
+    fullDiskStartButton.textContent = session || (source && !source.exhausted && (source.limited || source.error)) ? '继续抽取' : '开启探索';
+    fullDiskStartButton.setAttribute('aria-label', fullDiskStartButton.textContent);
     fullDiskStartButton.disabled = session
       ? Boolean(source.refilling || source.exhausted || source.accountChanged || session.authBlocked ||
           session.favoriteFolderPlayback?.active || session.sameFolderMode?.active)
@@ -8057,7 +8057,8 @@
     folderSelectionPanel.hidden = wholeDisk;
     if (wholeDisk) folderPickerPanel.hidden = true;
     if (preparedFullDisk && preparedFullDisk.filters.sourceMode !== exploreScope) cancelPreparedFullDisk();
-    fullDiskStartButton.textContent = active?.fullDiskSource ? '继续抽取' : '开始随机探索';
+    fullDiskStartButton.textContent = active?.fullDiskSource ? '继续抽取' : '开启探索';
+    fullDiskStartButton.setAttribute('aria-label', fullDiskStartButton.textContent);
     renderFullDiskSource();
   }
 
@@ -8710,6 +8711,12 @@
       box-shadow:0 4px 18px rgba(0,0,0,.45),0 0 16px rgba(190,52,220,.32),0 0 22px rgba(255,133,54,.14)}
     .explore-launcher:hover{filter:brightness(1.16);box-shadow:0 6px 22px rgba(0,0,0,.5),0 0 20px rgba(190,52,220,.45),0 0 26px rgba(255,133,54,.22)}
     .launcher:disabled{opacity:.6;cursor:wait}
+    .launcher.radar-launcher{display:flex;align-items:center;gap:9px;width:auto;min-height:44px;padding:5px 15px 5px 7px;border:1px solid #729c5a;border-radius:28px;background:#1c2d2b;color:#f2f8ee;box-shadow:inset 0 0 0 2px #bbf57718;font-weight:650}
+    .radar-launcher::before,.explore-start::before{content:'';display:block;box-sizing:border-box;width:30px;height:30px;flex:none;border:1px dashed #bbf577aa;border-radius:50%;background:linear-gradient(135deg,transparent 47%,#bbf577 49%,#bbf577 52%,transparent 54%),radial-gradient(circle,#bbf577 0 2px,transparent 3px 6px,#bbf577 7px 8px,transparent 9px)}
+    .launcher.radar-launcher:hover,.explore-start:hover{filter:brightness(1.14);box-shadow:0 0 17px #bbf57748}
+    .explore-start{position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:9px;min-height:44px;padding:5px 12px 5px 7px;border-color:#a3da76;border-radius:9px 3px;background:linear-gradient(112deg,#405d37,#122925 80%);color:#f1ffe9;box-shadow:0 0 15px #bbf57726,inset 0 0 0 1px #345448}
+    .explore-start::after{content:'›';color:#bbf577;font-size:20px}
+    .explore-start:active{background:linear-gradient(112deg,#83b95e,#254534 80%)}
     .panel{pointer-events:auto;position:absolute;inset:0;background:#070a0f;color:#eee;display:flex;flex-direction:column;font-size:14px;overflow:hidden}
     #topbar{position:fixed;top:0;left:0;right:0;height:44px;z-index:50;display:flex;align-items:center;gap:10px;padding:0 14px;background:linear-gradient(to bottom,rgba(0,0,0,.8),transparent);transform:translateY(-100%);transition:transform .2s}
     #topbar.show{transform:translateY(0)}
@@ -8992,7 +8999,7 @@
     @media(max-width:380px){.explore-scope-options{grid-template-columns:minmax(0,1fr)}}
     @media(prefers-reduced-motion:reduce){.full-disk-progress.is-active,.tools-drawer{animation:none}}`;
   const entryActions = element('div', 'entry-actions');
-  const launcher = element('button', 'launcher', '随机探索');
+  const launcher = element('button', 'launcher radar-launcher', '多宫格随机探索');
   launcher.type = 'button';
   launcher.title = '选择一个或多个文件夹，或切换全盘范围，直接随机探索，无需建立索引';
   launcher.onclick = () => { void openExploreDialog('folders'); };
@@ -9379,8 +9386,9 @@
   };
 
   const fullDiskActions = element('div', 'full-disk-actions');
-  const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary', '开始随机探索');
+  const fullDiskStartButton = element('button', 'full-disk-action full-disk-primary explore-start', '开启探索');
   fullDiskStartButton.type = 'button';
+  fullDiskStartButton.setAttribute('aria-label', '开启探索');
   fullDiskStartButton.onclick = () => { void startFullDiskExplore(); };
   const fullDiskAdjustFiltersButton = element('button', 'full-disk-action', '查看筛选');
   fullDiskAdjustFiltersButton.hidden = true;

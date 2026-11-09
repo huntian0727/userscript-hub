@@ -25,7 +25,7 @@ assert.equal(source.includes('async function collectVideos('), false, 'v2 playba
 assert.equal(source.includes('async function scanTree('), false, 'v2 does not ship the legacy recursive scan path');
 assert.equal(source.includes('async function listDirectory('), false, 'v2 does not ship the legacy directory index reader');
 assert.equal(source.includes('globalThis.N115IndexManagerUI'), false, 'v2 does not depend on the old index UI');
-assert.match(source, /element\('button', 'launcher', '随机探索'\)/, 'v2 exposes one unified random-exploration entry');
+assert.match(source, /element\('button', 'launcher radar-launcher', '多宫格随机探索'\)/, 'v2 exposes one unified random-exploration entry');
 const context = { URL, URLSearchParams, setTimeout, clearTimeout };
 vm.runInNewContext(source.slice(start, end), context, { filename: 'N115DataAdapter.js' });
 const dataAdapterApi = context.N115DataAdapter;
