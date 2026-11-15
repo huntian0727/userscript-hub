@@ -36,7 +36,7 @@
     {
       "id": "98tang-115-download",
       "source": "userscripts/98tang-115-download.user.js",
-      "channel": "正式版 · 进帖自动预览TXT附件",
+      "channel": "正式版 · 剪贴板一键重命名",
       "enabled": true
     },
     {

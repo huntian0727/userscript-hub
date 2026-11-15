@@ -15,7 +15,7 @@
 | 脚本 | 当前状态 |
 |---|---|
 | [98堂搜索加强版 v1.9.5](https://huntian0727.github.io/userscript-hub/userscripts/98tang-search-enhanced.user.js) | 同步 Greasy Fork 已发布的正式版本 |
-| [98堂_资源一键快速下载(115) v1.15.1](https://huntian0727.github.io/userscript-hub/userscripts/98tang-115-download.user.js) | 进入帖子自动预览第一个可见的TXT附件，保留115云解压密码池 |
+| [98堂_资源一键快速下载(115) v1.15.2](https://huntian0727.github.io/userscript-hub/userscripts/98tang-115-download.user.js) | 115网盘悬浮条支持剪贴板一键重命名，保留进帖TXT自动预览与云解压密码池 |
 | [115 多画面播放器 · 随机探索 v2.0](https://huntian0727.github.io/userscript-hub/userscripts/115-multiview-random-v2.user.js) | 正式版，支持指定文件夹关键词搜索 |
 | [拉面视频宇宙 · 3D 探索版 v0.3.1](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe.user.js) | HOME真实账号试用候选：已发现星球/视频搜索、卫星换批、当前目录路径导航；默认真实115模式，完整播放交给115官方播放器。真实账号验收待进行 |
 | [拉面视频宇宙 · 3D 独立试用版 v0.3.4](https://huntian0727.github.io/userscript-hub/userscripts/115-video-universe-lab.user.js) | 与 v0.3.1 并行的试用入口，支持本机星球收藏 |

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         98堂_资源一键快速下载(115)
 // @namespace    http://tampermonkey.net/
-// @version      1.15.1
-// @description  一键115下载、复制主题、进帖自动预览TXT附件、查看下载定位与115云解压密码池；兼容98助手及蚂蚁定位脚本
+// @version      1.15.2
+// @description  一键115下载、复制主题、进帖自动预览TXT附件、查看下载定位、115剪贴板重命名与云解压密码池；兼容98助手及蚂蚁定位脚本
 // @author       yelc668
 // @match        *://*.115.com/*
 // @include      https://www.sehuatang.*
@@ -1834,8 +1834,159 @@
     scan()
   }
 
+  function init115ClipboardRename() {
+    if (!document.body || /^\/s(?:\/|$)/.test(location.pathname) ||
+        new URLSearchParams(location.search).get('ct') === 'share') return
+
+    const barSelector = '.file-opr, .file-opt'
+    const rowSelector = '[file_type="1"][file_id], [file_type="0"][cate_id]'
+    const buttonClass = 'tm115-clipboard-rename'
+    const pending = new Set()
+    const boundButtons = new WeakSet()
+    const readItem = (bar) => {
+      const row = bar?.closest(rowSelector)
+      if (!row || row === bar) return null
+      const folder = row.getAttribute('file_type') === '0'
+      const id = row.getAttribute(folder ? 'cate_id' : 'file_id')
+      const label = row.querySelector('.file-name .name a, .file-name a') || row.querySelector('.file-name .name')
+      const name = row.getAttribute('title')?.trim() || label?.textContent.trim()
+      return /^[1-9]\d*$/.test(id || '') && name ? { row, id, folder, label, name } : null
+    }
+
+    async function readClipboardName() {
+      // 网盘列表常在同源 iframe 中。优先从顶层文档读，跨源时使用当前文档权限。
+      let clipboard = navigator.clipboard
+      try { clipboard = window.top.navigator.clipboard || clipboard } catch (_) {}
+      try { return await clipboard.readText() }
+      catch (_) { throw new Error('无法读取剪贴板，请在浏览器中允许115读取剪贴板后重试') }
+    }
+
+    function renameItem(id, name) {
+      return new Promise((resolve, reject) => {
+        const uncertain = () => reject(new Error('未能确认115是否已改名，请先刷新核对'))
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: 'https://webapi.115.com/files/batch_rename',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          data: new URLSearchParams({ ['files_new_name[' + id + ']']: name }).toString(),
+          timeout: 15000, anonymous: false,
+          onload(response) {
+            let result
+            try { result = JSON.parse(response.responseText || response.response) }
+            catch (_) { return uncertain() }
+            if (response.status >= 500) return uncertain()
+            if (response.status < 200 || response.status >= 300 || ![true, 1, '1'].includes(result?.state)) {
+              const reason = [result?.error, result?.error_msg, result?.message].find((value) => typeof value === 'string' && value.trim())
+              reject(new Error(reason || '115未接受这次改名，请检查登录状态和文件权限'))
+            } else resolve()
+          },
+          onerror: uncertain, ontimeout: uncertain, onabort: uncertain,
+        })
+      })
+    }
+
+    function reflectName(item, name) {
+      if (item.row.getAttribute('title') === item.name) item.row.setAttribute('title', name)
+      if (item.label?.getAttribute('title') === item.name) item.label.setAttribute('title', name)
+      if (!item.label || item.label.textContent.trim() !== item.name) return false
+      const walker = document.createTreeWalker(item.label, NodeFilter.SHOW_TEXT)
+      while (walker.nextNode()) {
+        if (walker.currentNode.nodeValue.trim() === item.name) {
+          walker.currentNode.nodeValue = name
+          return true
+        }
+      }
+      return false
+    }
+
+    async function renameFromClipboard(bar, button) {
+      const item = readItem(bar)
+      if (!item || pending.has(item.id)) return
+      pending.add(item.id)
+      button.disabled = true
+      try {
+        let name = (await readClipboardName()).trim()
+        if (!name) throw new Error('剪贴板为空，请先复制要使用的名称')
+        if (/[\u0000-\u001f\u007f<>:"/\\|?*]/.test(name) || /^\.+$/.test(name)) {
+          throw new Error('请复制单行有效名称；名称不能含换行或路径字符')
+        }
+        const extension = item.folder ? '' : item.name.match(/^.+(\.[^.\s]+)$/)?.[1] || ''
+        if (extension && !name.toLowerCase().endsWith(extension.toLowerCase())) name += extension
+        if (name === item.name) { customNotify('名称没有变化'); return }
+        const current = bar.isConnected && readItem(bar)
+        if (current?.row !== item.row || current.id !== item.id || current.folder !== item.folder || current.name !== item.name) {
+          throw new Error('文件列表已变化，请对目标重新点击重命名')
+        }
+        await renameItem(item.id, name)
+        const latest = bar.isConnected && readItem(bar)
+        const updated = latest?.row === item.row && latest.id === item.id && latest.folder === item.folder &&
+          latest.name === item.name && reflectName(latest, name)
+        customNotify(updated ? '重命名成功' : '重命名成功，列表如未更新可刷新查看')
+      } catch (error) {
+        customNotify('重命名失败：' + (error?.message || '请稍后重试'))
+      } finally {
+        pending.delete(item.id)
+        button.disabled = false
+      }
+    }
+
+    function installButton(bar) {
+      if (!readItem(bar)) return
+      // 列表和缩略图两种操作栏并存时，只使用原生列表优先的那一条。
+      const row = bar.closest(rowSelector)
+      const primaryBar = row.querySelector('.file-opr') || row.querySelector('.file-opt')
+      if (bar !== primaryBar) {
+        bar.querySelector(':scope > .' + buttonClass)?.remove()
+        return
+      }
+      if (bar.matches('.file-opr')) row.querySelector('.file-opt > .' + buttonClass)?.remove()
+      let button = bar.querySelector(':scope > .' + buttonClass)
+      if (!button) {
+        button = document.createElement('button')
+        button.type = 'button'
+        button.className = buttonClass
+        button.textContent = '重命名'
+        button.title = '一键重命名：使用剪贴板名称，文件保留原扩展名'
+        button.style.cssText = 'background:none;border:0;color:inherit;font:inherit;padding:0 6px;white-space:nowrap;cursor:pointer;pointer-events:auto;'
+      }
+      if (!boundButtons.has(button)) {
+        boundButtons.add(button)
+        button.disabled = false
+        for (const type of ['pointerdown', 'mousedown', 'dblclick', 'keydown', 'keyup']) {
+          button.addEventListener(type, (event) => {
+            if ((type !== 'keydown' && type !== 'keyup') || ['Enter', ' '].includes(event.key)) event.stopPropagation()
+          })
+        }
+        button.addEventListener('click', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          renameFromClipboard(button.closest(barSelector), button)
+        })
+      }
+      if (bar.firstElementChild !== button) bar.prepend(button)
+    }
+
+    // 复用网盘自己的显示时机，只补充按钮；兼容分页及其他脚本后插入的播放按钮。
+    const barsFrom = (node, bars) => {
+      if (node.nodeType !== Node.ELEMENT_NODE) return
+      if (node.matches(barSelector)) bars.add(node)
+      for (const bar of node.querySelectorAll(barSelector)) bars.add(bar)
+    }
+    for (const bar of document.querySelectorAll(barSelector)) installButton(bar)
+    new MutationObserver((records) => {
+      const bars = new Set()
+      for (const { target, addedNodes } of records) {
+        const changedBar = target.closest?.(barSelector)
+        if (changedBar) bars.add(changedBar)
+        for (const node of addedNodes) barsFrom(node, bars)
+      }
+      for (const bar of bars) if (bar.isConnected) installButton(bar)
+    }).observe(document.body, { childList: true, subtree: true })
+  }
+
   if (/(^|\.)115\.com$/i.test(location.hostname)) {
     init115PasswordPool()
+    init115ClipboardRename()
   } else {
     findLinksAndCreateButtons()
     startTxtPreviewPositioning()
