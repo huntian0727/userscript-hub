@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         98堂_资源一键快速下载(115)
 // @namespace    http://tampermonkey.net/
-// @version      1.15.0
-// @description  一键115下载、复制主题、TXT附件预览、查看下载定位与115云解压密码池；兼容98助手及蚂蚁定位脚本
+// @version      1.15.1
+// @description  一键115下载、复制主题、进帖自动预览TXT附件、查看下载定位与115云解压密码池；兼容98助手及蚂蚁定位脚本
 // @author       yelc668
 // @match        *://*.115.com/*
 // @include      https://www.sehuatang.*
@@ -35,8 +35,6 @@
 // @connect      webapi.115.com
 // @connect      *
 // @run-at       document-idle
-// @downloadURL https://update.greasyfork.org/scripts/601796/98%E5%A0%82_%E8%B5%84%E6%BA%90%E4%B8%80%E9%94%AE%E5%BF%AB%E9%80%9F%E4%B8%8B%E8%BD%BD%28115%29.user.js
-// @updateURL https://update.greasyfork.org/scripts/601796/98%E5%A0%82_%E8%B5%84%E6%BA%90%E4%B8%80%E9%94%AE%E5%BF%AB%E9%80%9F%E4%B8%8B%E8%BD%BD%28115%29.meta.js
 // ==/UserScript==
 
 ;(function () {
@@ -55,6 +53,7 @@
   const codeContainerSelector = '.blockcode, pre, code'
   const downloadScopes = new Map()
   const txtAttachmentPreviews = new Map()
+  let initialTxtPreviewHandled = false
   const locatorButtons = new WeakSet()
   let lastDownloadLocation = null
   let locatorRevision = 0
@@ -144,13 +143,46 @@
         if (record.state === 'loading' || record.state === 'open') {
           resetTxtAttachmentPreview(record)
           findLinksAndCreateButtons()
-        } else loadTxtAttachmentPreview(record)
+        } else {
+          initialTxtPreviewHandled = true
+          loadTxtAttachmentPreview(record)
+        }
       })
       txtAttachmentPreviews.set(link, record)
       // 文件名行自身也可能限高，入口放在该行外，避免长文件名挤掉预览按钮。
       const anchor = link.closest('.attnm') || link
       anchor.insertAdjacentElement('afterend', controls)
     })
+  }
+
+  function autoOpenFirstTxtAttachment() {
+    if (initialTxtPreviewHandled ||
+        !(/(?:^|\/)thread-\d+|\/viewthread\.php$/i.test(location.pathname) ||
+          new URLSearchParams(location.search).get('mod') === 'viewthread')) return
+    if (hasOpenTxtAttachmentPreview()) {
+      initialTxtPreviewHandled = true
+      return
+    }
+    for (const link of document.querySelectorAll('a[href]')) {
+      if (link.closest(addonOwnUI + ', .quote, blockquote, .sign, ' + ignoredLinkContainer) ||
+          !getTxtAttachmentName(link) || new URL(link.href).origin !== location.origin ||
+          !isVisibleAttachmentPreview(link)) continue
+      const record = txtAttachmentPreviews.get(link)
+      if (record) {
+        initialTxtPreviewHandled = true
+        if (record.state === 'closed') loadTxtAttachmentPreview(record)
+        return
+      }
+      // 98助手先加载时，沿用它给当前附件添加的按钮，避免生成第二套预览。
+      const wrapper = link.parentElement?.nextElementSibling
+      const helperButton = link.dataset.hasPreviewBtn && wrapper?.matches('.txt-preview-btn-wrapper') &&
+        wrapper.querySelector('.txt-preview-btn')
+      if (helperButton) {
+        initialTxtPreviewHandled = true
+        if (helperButton.textContent.trim() === '[预览内容]') helperButton.click()
+        return
+      }
+    }
   }
 
   function decodeTxtAttachment(buffer) {
@@ -944,6 +976,7 @@
         settings.style.setProperty('display', display, 'important')
       }
     }
+    autoOpenFirstTxtAttachment()
   }
 
   function updateDownloadToolbarButtons(toolbar, links, linkSource = null) {
