@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书管理后台 · 我的常用
 // @namespace    feishu-admin-favorites.local
-// @version      0.10.4
+// @version      0.10.5
 // @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选与每页条数切换、常用入口和侧栏管理。
 // @match        https://baili-pharm.feishu.cn/admin*
 // @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.meta.js
@@ -27,6 +27,7 @@
     const connectionKey = 'githubConnection';
     const baselineKey = 'githubSyncBaseline';
     const hitLogPageSizeKey = 'hitLogPageSize';
+    const hitLogFetchSettingsKey = 'hitLogFetchSettings';
     const defaultGitHubRepo = 'huntian0727/personal-sync';
     const githubFile = 'projects/feishu-admin-favorites/config.json';
     const legacyGitHubFile = 'feishu-admin-favorites.json';
@@ -403,8 +404,16 @@
         const endpoint = '/suite/admin/cond_access/query_policy_log';
         const deviceSearchEndpoint = '/suite/admin/device/search';
         const pageSizeOptions = [20, 100, 200, 500, 1000, 2000, 5000, 10000];
-        const maxBackendBatch = 500;
-        const batchConcurrency = 3;
+        const batchSizeOptions = [100, 200, 500];
+        const maxPersistOptions = [20, 100, 200, 500, 10000];
+        const defaultFetchSettings = {
+            batchSize: 500,
+            concurrency: 1,
+            delayMinMs: 400,
+            delayMaxMs: 800,
+            backoffMs: 2500,
+            maxPersistedSize: 500,
+        };
         const viewPageSize = 200;
         const timePresets = [
             { key: '15m', label: '15分钟', ms: 15 * 60 * 1000 },
@@ -416,8 +425,29 @@
         const visible = element => Boolean(element?.getClientRects().length) && getComputedStyle(element).visibility === 'visible';
         const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
+        function normalizeFetchSettings(raw) {
+            const src = raw && typeof raw === 'object' ? raw : {};
+            const clampInt = (val, min, max, fallback) => {
+                const n = Math.trunc(Number(val));
+                return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+            };
+            const batchSize = batchSizeOptions.includes(Number(src.batchSize)) ? Number(src.batchSize) : defaultFetchSettings.batchSize;
+            const concurrency = clampInt(src.concurrency, 1, 3, defaultFetchSettings.concurrency);
+            const delayMinMs = clampInt(src.delayMinMs, 0, 10000, defaultFetchSettings.delayMinMs);
+            const delayMaxMs = Math.max(delayMinMs, clampInt(src.delayMaxMs, 0, 10000, defaultFetchSettings.delayMaxMs));
+            const backoffMs = clampInt(src.backoffMs, 0, 30000, defaultFetchSettings.backoffMs);
+            const maxPersistedSize = maxPersistOptions.includes(Number(src.maxPersistedSize))
+                ? Number(src.maxPersistedSize)
+                : defaultFetchSettings.maxPersistedSize;
+            return { batchSize, concurrency, delayMinMs, delayMaxMs, backoffMs, maxPersistedSize };
+        }
+
+        let fetchSettings = normalizeFetchSettings(GM_getValue(hitLogFetchSettingsKey, defaultFetchSettings));
         const savedSize = Number(GM_getValue(hitLogPageSizeKey, 20));
-        let desiredPageSize = pageSizeOptions.includes(savedSize) ? savedSize : 20;
+        let desiredPageSize = pageSizeOptions.includes(savedSize)
+            ? Math.min(savedSize, fetchSettings.maxPersistedSize)
+            : 20;
+        if (!pageSizeOptions.includes(desiredPageSize)) desiredPageSize = 20;
 
         const defaultDecisions = ['允许访问', '允许访问需验证身份', '拒绝访问'];
         const selected = new Set();
@@ -450,11 +480,16 @@
         let pageSizeSelect = null;
         let stopBtn = null;
         let exportBtn = null;
+        let settingsBtn = null;
+        let settingsPopover = null;
+        let settingsFields = null;
+        let settingsOpen = false;
         let pageSizeStatus = null;
         let emptyBanner = null;
         let bigWrap = null;
         let bigTableHost = null;
         let pagerInfo = null;
+        let appendBtn = null;
         let localPagerGroup = null;
         let localPagerInfo = null;
         let localPrevBtn = null;
@@ -522,6 +557,38 @@
             [${sizeAttr}] .feishu-hitlog-stop-btn:hover { background: #fff0ef; border-color: #d83931; color: #d83931; }
             [${sizeAttr}] .feishu-hitlog-size-status { font-size: 12px; color: var(--text-caption, #646a73); white-space: nowrap; }
             [${sizeAttr}] .feishu-hitlog-size-status:empty { display: none; }
+            [${sizeAttr}] .feishu-hitlog-settings-wrap { position: relative; display: inline-flex; }
+            [${sizeAttr}] .feishu-hitlog-settings-popover {
+                position: absolute; top: calc(100% + 4px); right: 0; z-index: 1060; width: 300px; padding: 12px 14px;
+                border-radius: 8px; background: var(--bg-float, #fff); color: var(--text-title, #1f2329);
+                box-shadow: 0 4px 16px rgba(31, 35, 41, .16), 0 0 0 1px var(--line-border-card, #dee0e3);
+                font-size: 13px;
+            }
+            [${sizeAttr}] .feishu-hitlog-settings-title { font-weight: 600; margin-bottom: 10px; font-size: 14px; }
+            [${sizeAttr}] .feishu-hitlog-settings-grid {
+                display: grid; grid-template-columns: 108px minmax(0, 1fr); align-items: center; gap: 8px 10px;
+            }
+            [${sizeAttr}] .feishu-hitlog-settings-grid label { color: var(--text-caption, #646a73); font-size: 12px; }
+            [${sizeAttr}] .feishu-hitlog-settings-grid select,
+            [${sizeAttr}] .feishu-hitlog-settings-grid input {
+                width: 100%; height: 28px; padding: 0 8px; box-sizing: border-box;
+                border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 5px;
+                background: var(--bg-body, #fff); color: inherit; font-size: 13px;
+            }
+            [${sizeAttr}] .feishu-hitlog-delay-pair { display: flex; align-items: center; gap: 4px; }
+            [${sizeAttr}] .feishu-hitlog-delay-pair input { min-width: 0; }
+            [${sizeAttr}] .feishu-hitlog-settings-foot {
+                display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 10px;
+                border-top: 1px solid var(--line-divider-default, #eff0f1);
+            }
+            [${sizeAttr}] .feishu-hitlog-settings-foot button {
+                height: 28px; padding: 0 10px; border: 1px solid var(--line-border-component, #d0d3d6);
+                border-radius: 5px; background: var(--bg-body, #fff); color: var(--text-title, #1f2329);
+                font-size: 12px; cursor: pointer;
+            }
+            [${sizeAttr}] .feishu-hitlog-settings-foot .feishu-hitlog-save-btn {
+                background: #3370ff; border-color: #3370ff; color: #fff;
+            }
             [${filterAttr}] .feishu-hitlog-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
             [${filterAttr}] .feishu-hitlog-value[data-placeholder="true"] { color: var(--text-placeholder, #8f959e); }
             [${filterAttr}] .feishu-hitlog-clear {
@@ -766,9 +833,38 @@
             if (pageSizeStatus) pageSizeStatus.textContent = text || '';
         }
 
+        function abortableSleep(ms, token) {
+            if (!ms || ms <= 0 || token?.cancelled) return Promise.resolve();
+            return new Promise(resolve => {
+                const timer = window.setTimeout(() => {
+                    token?.timers?.delete(timer);
+                    resolve();
+                }, ms);
+                token?.timers?.add(timer);
+                token?.resolvers?.add(resolve);
+            });
+        }
+
+        function randomBatchDelay(cfg) {
+            if (!cfg.delayMaxMs) return 0;
+            const span = Math.max(0, cfg.delayMaxMs - cfg.delayMinMs);
+            return cfg.delayMinMs + (span ? Math.floor(Math.random() * (span + 1)) : 0);
+        }
+
+        function isRateLimited(res) {
+            if (!res) return false;
+            if (res.status === 429) return true;
+            const msg = String(res.json?.message || res.json?.msg || '');
+            return /429|limit|freq|too many|频繁|限流|过快/i.test(msg);
+        }
+
         function cancelActiveFetch() {
             if (!batchAbort) return;
             batchAbort.cancelled = true;
+            for (const timer of batchAbort.timers ?? []) clearTimeout(timer);
+            batchAbort.timers?.clear();
+            for (const resolve of batchAbort.resolvers ?? []) resolve();
+            batchAbort.resolvers?.clear();
             for (const sub of batchAbort.subs) {
                 try { sub.abort(); } catch {}
             }
@@ -829,14 +925,29 @@
             });
         }
 
-        async function continueBatchFetch(seq, template, basePayload, logicalPage, targetSize, firstLogs, total) {
-            const batchSize = Math.min(targetSize, maxBackendBatch);
+        async function continueBatchFetch(seq, template, basePayload, logicalPage, targetSize, firstLogs, total, startedAt = performance.now()) {
+            const cfg = { ...fetchSettings };
+            const batchSize = Math.min(targetSize, cfg.batchSize);
             const batchesPerBlock = Math.max(1, Math.ceil(targetSize / batchSize));
             const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
             const remainingBudget = Math.min(targetSize, Math.max(0, total - (logicalPage - 1) * targetSize));
 
             const seenIds = new Set(firstLogs.map(log => log?.logid).filter(Boolean));
             const merged = [...firstLogs];
+            let completedBatches = 1;
+            let nextBackendPage = firstBackendPage + 1;
+
+            bigData = {
+                logs: merged,
+                total,
+                page: logicalPage,
+                size: targetSize,
+                batchSize,
+                nextBackendPage,
+                template,
+                basePayload,
+                exhausted: firstLogs.length < batchSize || merged.length >= total,
+            };
 
             if (merged.length >= remainingBudget || firstLogs.length < batchSize || batchesPerBlock <= 1) {
                 loading = false;
@@ -846,7 +957,7 @@
                 return;
             }
 
-            const token = { cancelled: false, subs: new Set() };
+            const token = { cancelled: false, subs: new Set(), timers: new Set(), resolvers: new Set() };
             batchAbort = token;
             if (stopBtn) stopBtn.hidden = false;
             setStatus(`已拉取 ${merged.length} / ${remainingBudget} 条…`);
@@ -858,22 +969,51 @@
             }
 
             let failed = false;
+            let rateLimited = false;
             let reachedEnd = false;
-            for (let i = 0; i < nextPages.length && !token.cancelled && !reachedEnd && !failed; i += batchConcurrency) {
-                const wave = nextPages.slice(i, i + batchConcurrency);
-                const results = await Promise.all(wave.map(pageNum => {
+            for (let i = 0; i < nextPages.length && !token.cancelled && !reachedEnd && !failed; i += cfg.concurrency) {
+                const delay = randomBatchDelay(cfg);
+                if (delay > 0) await abortableSleep(delay, token);
+                if (token.cancelled || seq !== requestSeq) break;
+
+                const wave = nextPages.slice(i, i + cfg.concurrency);
+                const runWave = () => Promise.all(wave.map(pageNum => {
                     const payload = { ...basePayload, pageSize: batchSize, pageNumber: pageNum };
                     return sendSubBatch(template, payload, token)
                         .then(res => ({ pageNum, res }))
                         .catch(err => ({ pageNum, err }));
                 }));
+
+                let results = await runWave();
                 if (seq !== requestSeq) return;
+
+                if (!token.cancelled && cfg.backoffMs > 0 && results.some(({ res }) => isRateLimited(res))) {
+                    setStatus(`触发限流，退避 ${(cfg.backoffMs / 1000).toFixed(1)}s 后重试…`);
+                    await abortableSleep(cfg.backoffMs, token);
+                    if (token.cancelled || seq !== requestSeq) break;
+                    const retryTargets = results.filter(({ res }) => isRateLimited(res)).map(item => item.pageNum);
+                    const retried = await Promise.all(retryTargets.map(pageNum => {
+                        const payload = { ...basePayload, pageSize: batchSize, pageNumber: pageNum };
+                        return sendSubBatch(template, payload, token)
+                            .then(res => ({ pageNum, res }))
+                            .catch(err => ({ pageNum, err }));
+                    }));
+                    if (seq !== requestSeq) return;
+                    const byPage = new Map(retried.map(item => [item.pageNum, item]));
+                    results = results.map(item => byPage.get(item.pageNum) ?? item);
+                }
+
                 results.sort((a, b) => a.pageNum - b.pageNum);
-                for (const { res, err } of results) {
+                for (const { pageNum, res, err } of results) {
                     if (err || res?.status !== 200 || res.json?.code !== 0 || !Array.isArray(res.json?.data?.logs)) {
-                        if (!token.cancelled) failed = true;
+                        if (!token.cancelled) {
+                            failed = true;
+                            if (isRateLimited(res)) rateLimited = true;
+                        }
                         continue;
                     }
+                    completedBatches++;
+                    nextBackendPage = Math.max(nextBackendPage, pageNum + 1);
                     const chunk = res.json.data.logs;
                     for (const item of chunk) {
                         const id = item?.logid;
@@ -883,7 +1023,17 @@
                     }
                     if (chunk.length < batchSize) reachedEnd = true;
                 }
-                bigData = { logs: merged, total, page: logicalPage, size: targetSize };
+                bigData = {
+                    logs: merged,
+                    total,
+                    page: logicalPage,
+                    size: targetSize,
+                    batchSize,
+                    nextBackendPage,
+                    template,
+                    basePayload,
+                    exhausted: reachedEnd || merged.length >= total,
+                };
                 lastBigKey = '';
                 setStatus(`已拉取 ${merged.length} / ${remainingBudget} 条…`);
                 schedule();
@@ -893,18 +1043,80 @@
             loading = false;
             if (batchAbort === token) batchAbort = null;
             if (stopBtn) stopBtn.hidden = true;
+            const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
             if (token.cancelled) setStatus(`已停止，保留 ${merged.length} 条`);
+            else if (rateLimited) setStatus(`触发限流已熔断，保留 ${merged.length} 条（建议调大间隔）`);
             else if (failed) setStatus(`部分批次受限，已保留 ${merged.length} 条`);
-            else setStatus('');
+            else setStatus(`已拉取 ${merged.length} 条（${completedBatches} 批，${elapsed}s）`);
             schedule();
+        }
+
+        async function appendNextBatch() {
+            if (!bigData || loading || bigData.exhausted) return;
+            const template = bigData.template ?? lastXhrTemplate;
+            const basePayload = bigData.basePayload ?? lastXhrTemplate?.payload;
+            if (!template || !basePayload) {
+                setStatus('请先切换一次时间或拉取条数再追加');
+                return;
+            }
+            const cfg = { ...fetchSettings };
+            const batchSize = bigData.batchSize || cfg.batchSize;
+            const pageNum = bigData.nextBackendPage || (Math.ceil(bigData.logs.length / batchSize) + 1);
+            const token = { cancelled: false, subs: new Set(), timers: new Set(), resolvers: new Set() };
+            batchAbort = token;
+            const seq = ++requestSeq;
+            loading = true;
+            if (stopBtn) stopBtn.hidden = false;
+            setStatus(`正在追加 +${batchSize} 条…`);
+            schedule();
+            try {
+                const payload = { ...basePayload, pageSize: batchSize, pageNumber: pageNum };
+                let res = await sendSubBatch(template, payload, token);
+                if (seq !== requestSeq) return;
+                if (!token.cancelled && cfg.backoffMs > 0 && isRateLimited(res)) {
+                    setStatus(`触发限流，退避 ${(cfg.backoffMs / 1000).toFixed(1)}s 后重试…`);
+                    await abortableSleep(cfg.backoffMs, token);
+                    if (!token.cancelled && seq === requestSeq) res = await sendSubBatch(template, payload, token);
+                }
+                if (seq !== requestSeq) return;
+                if (res.status === 200 && res.json?.code === 0 && Array.isArray(res.json.data?.logs)) {
+                    const chunk = res.json.data.logs;
+                    const seenIds = new Set(bigData.logs.map(item => item?.logid).filter(Boolean));
+                    let added = 0;
+                    for (const item of chunk) {
+                        const id = item?.logid;
+                        if (id && seenIds.has(id)) continue;
+                        if (id) seenIds.add(id);
+                        bigData.logs.push(item);
+                        added++;
+                    }
+                    bigData.nextBackendPage = pageNum + 1;
+                    bigData.exhausted = chunk.length < batchSize || bigData.logs.length >= bigData.total;
+                    lastBigKey = '';
+                    setStatus(added ? `已追加 ${added} 条（共 ${bigData.logs.length} 条）` : '没有更多新记录了');
+                } else {
+                    setStatus(isRateLimited(res) ? '触发限流，请稍后再试' : `追加失败：${res.json?.message || res.json?.msg || `HTTP ${res.status}`}`);
+                }
+            } catch {
+                if (seq !== requestSeq) return;
+                setStatus(token.cancelled ? '已取消追加' : '追加失败，请重试');
+            } finally {
+                if (seq === requestSeq) {
+                    loading = false;
+                    if (batchAbort === token) batchAbort = null;
+                    if (stopBtn) stopBtn.hidden = true;
+                    schedule();
+                }
+            }
         }
 
         async function runDirectBigFetch(logicalPage) {
             if (!lastXhrTemplate) return false;
             cancelActiveFetch();
             const seq = ++requestSeq;
+            const startedAt = performance.now();
             const size = desiredPageSize;
-            const batchSize = Math.min(size, maxBackendBatch);
+            const batchSize = Math.min(size, fetchSettings.batchSize);
             const batchesPerBlock = Math.max(1, Math.ceil(size / batchSize));
             const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
             const payload = { ...lastXhrTemplate.payload, pageSize: batchSize, pageNumber: firstBackendPage };
@@ -912,7 +1124,7 @@
                 payload.evaluateTimeStart = String(activeTimePreset.startMs);
                 payload.evaluateTimeEnd = String(activeTimePreset.endMs);
             }
-            const token = { cancelled: false, subs: new Set() };
+            const token = { cancelled: false, subs: new Set(), timers: new Set(), resolvers: new Set() };
             batchAbort = token;
             loading = true;
             localPage = 1;
@@ -925,10 +1137,10 @@
                 if (res.status === 200 && res.json?.code === 0 && Array.isArray(res.json.data?.logs)) {
                     const firstLogs = res.json.data.logs;
                     const total = Number(res.json.data.total) || firstLogs.length;
-                    bigData = { logs: firstLogs, total, page: logicalPage, size };
+                    bigData = { logs: firstLogs, total, page: logicalPage, size, batchSize, nextBackendPage: firstBackendPage + 1, template: lastXhrTemplate, basePayload: payload };
                     lastBigKey = '';
                     schedule();
-                    void continueBatchFetch(seq, lastXhrTemplate, payload, logicalPage, size, firstLogs, total);
+                    void continueBatchFetch(seq, lastXhrTemplate, payload, logicalPage, size, firstLogs, total, startedAt);
                 } else {
                     loading = false;
                     setStatus(`加载失败：${res.json?.message || res.json?.msg || `HTTP ${res.status}`}`);
@@ -1006,7 +1218,7 @@
                 const logicalPage = override?.pageNumber ?? 1;
                 override = null;
                 const size = desiredPageSize;
-                const batchSize = Math.min(size, maxBackendBatch);
+                const batchSize = Math.min(size, fetchSettings.batchSize);
                 const batchesPerBlock = Math.max(1, Math.ceil(size / batchSize));
                 const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
 
@@ -1018,9 +1230,10 @@
                 }
                 const sentPayload = JSON.parse(JSON.stringify(payload));
                 const seq = ++requestSeq;
+                const startedAt = performance.now();
                 loading = true;
                 localPage = 1;
-                setStatus(size > maxBackendBatch ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`);
+                setStatus(size > batchSize ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`);
                 schedule();
 
                 this.addEventListener('loadend', () => {
@@ -1029,10 +1242,10 @@
                     if (this.status === 200 && json?.code === 0 && Array.isArray(json.data?.logs)) {
                         const firstLogs = json.data.logs;
                         const total = Number(json.data.total) || firstLogs.length;
-                        bigData = { logs: firstLogs, total, page: logicalPage, size };
+                        bigData = { logs: firstLogs, total, page: logicalPage, size, batchSize, nextBackendPage: firstBackendPage + 1, template, basePayload: sentPayload };
                         lastBigKey = '';
                         schedule();
-                        void continueBatchFetch(seq, template, sentPayload, logicalPage, size, firstLogs, total);
+                        void continueBatchFetch(seq, template, sentPayload, logicalPage, size, firstLogs, total, startedAt);
                     } else {
                         loading = false;
                         setStatus(`加载失败：${json?.message || json?.msg || `HTTP ${this.status}`}`);
@@ -1084,7 +1297,9 @@
         function changePageSize(next) {
             if (!pageSizeOptions.includes(next) || next === desiredPageSize) return;
             desiredPageSize = next;
-            GM_setValue(hitLogPageSizeKey, next);
+            if (next <= fetchSettings.maxPersistedSize) {
+                GM_setValue(hitLogPageSizeKey, next);
+            }
             cancelActiveFetch();
             bigData = null;
             localPage = 1;
@@ -1237,9 +1452,7 @@
             stopBtn.className = 'feishu-hitlog-action-btn feishu-hitlog-stop-btn';
             stopBtn.textContent = '停止';
             stopBtn.hidden = true;
-            stopBtn.addEventListener('click', () => {
-                if (batchAbort) batchAbort.cancelled = true;
-            });
+            stopBtn.addEventListener('click', cancelActiveFetch);
 
             exportBtn = document.createElement('button');
             exportBtn.type = 'button';
@@ -1247,10 +1460,129 @@
             exportBtn.textContent = '导出 CSV';
             exportBtn.addEventListener('click', exportFilteredCsv);
 
+            const settingsWrap = document.createElement('div');
+            settingsWrap.className = 'feishu-hitlog-settings-wrap';
+            settingsBtn = document.createElement('button');
+            settingsBtn.type = 'button';
+            settingsBtn.className = 'feishu-hitlog-action-btn';
+            settingsBtn.textContent = '⚙ 拉取设置';
+            settingsBtn.setAttribute('aria-haspopup', 'dialog');
+            settingsBtn.setAttribute('aria-expanded', 'false');
+
+            settingsPopover = document.createElement('div');
+            settingsPopover.className = 'feishu-hitlog-settings-popover';
+            settingsPopover.hidden = true;
+            const sTitle = document.createElement('div');
+            sTitle.className = 'feishu-hitlog-settings-title';
+            sTitle.textContent = '拉取限速与风控参数';
+            const sGrid = document.createElement('div');
+            sGrid.className = 'feishu-hitlog-settings-grid';
+
+            const batchSel = document.createElement('select');
+            for (const n of batchSizeOptions) batchSel.add(new Option(`${n} 条/批`, String(n)));
+            const concSel = document.createElement('select');
+            concSel.add(new Option('1（串行，最稳）', '1'));
+            concSel.add(new Option('2（低并发）', '2'));
+            concSel.add(new Option('3（高并发）', '3'));
+            const delayPair = document.createElement('div');
+            delayPair.className = 'feishu-hitlog-delay-pair';
+            const delayMinInput = document.createElement('input');
+            delayMinInput.type = 'number';
+            delayMinInput.min = '0';
+            delayMinInput.max = '10000';
+            delayMinInput.step = '50';
+            delayMinInput.title = '批间最小等待毫秒数';
+            const delaySep = document.createElement('span');
+            delaySep.textContent = '~';
+            const delayMaxInput = document.createElement('input');
+            delayMaxInput.type = 'number';
+            delayMaxInput.min = '0';
+            delayMaxInput.max = '10000';
+            delayMaxInput.step = '50';
+            delayMaxInput.title = '批间最大等待毫秒数';
+            delayPair.append(delayMinInput, delaySep, delayMaxInput);
+
+            const backoffInput = document.createElement('input');
+            backoffInput.type = 'number';
+            backoffInput.min = '0';
+            backoffInput.max = '30000';
+            backoffInput.step = '500';
+            backoffInput.title = '遇到 429/限流时等待毫秒数，0 表示不重试直接停止';
+
+            const persistSel = document.createElement('select');
+            for (const n of maxPersistOptions) {
+                persistSel.add(new Option(n >= 10000 ? '不限制' : `≤ ${n} 条`, String(n)));
+            }
+
+            settingsFields = { batchSel, concSel, delayMinInput, delayMaxInput, backoffInput, persistSel };
+            const addSettingRow = (labelText, control) => {
+                const lb = document.createElement('label');
+                lb.textContent = labelText;
+                sGrid.append(lb, control);
+            };
+            addSettingRow('单批条数', batchSel);
+            addSettingRow('并发请求数', concSel);
+            addSettingRow('批间间隔 (ms)', delayPair);
+            addSettingRow('限流退避 (ms)', backoffInput);
+            addSettingRow('默认记住上限', persistSel);
+
+            const sFoot = document.createElement('div');
+            sFoot.className = 'feishu-hitlog-settings-foot';
+            const sReset = document.createElement('button');
+            sReset.type = 'button';
+            sReset.textContent = '恢复默认';
+            const sSave = document.createElement('button');
+            sSave.type = 'button';
+            sSave.className = 'feishu-hitlog-save-btn';
+            sSave.textContent = '保存';
+            sFoot.append(sReset, sSave);
+            settingsPopover.append(sTitle, sGrid, sFoot);
+            settingsWrap.append(settingsBtn, settingsPopover);
+
+            const syncSettingsForm = () => {
+                batchSel.value = String(fetchSettings.batchSize);
+                concSel.value = String(fetchSettings.concurrency);
+                delayMinInput.value = String(fetchSettings.delayMinMs);
+                delayMaxInput.value = String(fetchSettings.delayMaxMs);
+                backoffInput.value = String(fetchSettings.backoffMs);
+                persistSel.value = String(fetchSettings.maxPersistedSize);
+            };
+            const setSettingsOpen = open => {
+                settingsOpen = open;
+                settingsPopover.hidden = !open;
+                settingsBtn.setAttribute('aria-expanded', String(open));
+                if (open) syncSettingsForm();
+            };
+            settingsBtn.addEventListener('click', () => setSettingsOpen(!settingsOpen));
+            sReset.addEventListener('click', () => {
+                fetchSettings = { ...defaultFetchSettings };
+                GM_setValue(hitLogFetchSettingsKey, fetchSettings);
+                syncSettingsForm();
+                setStatus('已恢复默认拉取参数');
+            });
+            sSave.addEventListener('click', () => {
+                fetchSettings = normalizeFetchSettings({
+                    batchSize: batchSel.value,
+                    concurrency: concSel.value,
+                    delayMinMs: delayMinInput.value,
+                    delayMaxMs: delayMaxInput.value,
+                    backoffMs: backoffInput.value,
+                    maxPersistedSize: persistSel.value,
+                });
+                GM_setValue(hitLogFetchSettingsKey, fetchSettings);
+                if (desiredPageSize > fetchSettings.maxPersistedSize) {
+                    GM_setValue(hitLogPageSizeKey, fetchSettings.maxPersistedSize);
+                }
+                setSettingsOpen(false);
+                setStatus(`已保存：${fetchSettings.batchSize}/批 · 并发${fetchSettings.concurrency} · 间隔${fetchSettings.delayMinMs}~${fetchSettings.delayMaxMs}ms`);
+                schedule();
+            });
+            settingsWrap._close = () => setSettingsOpen(false);
+
             pageSizeStatus = document.createElement('span');
             pageSizeStatus.className = 'feishu-hitlog-size-status';
             pageSizeStatus.setAttribute('role', 'status');
-            pageSizeWrap.append(box, stopBtn, exportBtn, pageSizeStatus);
+            pageSizeWrap.append(box, stopBtn, exportBtn, settingsWrap, pageSizeStatus);
 
             pageSizeSelect.addEventListener('change', () => changePageSize(Number(pageSizeSelect.value)));
             trigger.addEventListener('click', event => {
@@ -1340,7 +1672,8 @@
                 last: pagerButton('末页', () => goToRemotePage(Infinity)),
                 jump: pagerButton('跳转', () => goToRemotePage(Number(pagerInput.value))),
             };
-            remotePagerGroup.append(pagerButtons.first, pagerButtons.prev, pagerInput, pagerButtons.next, pagerButtons.last, pagerButtons.jump);
+            appendBtn = pagerButton(`+追加 ${fetchSettings.batchSize} 条`, () => void appendNextBatch());
+            remotePagerGroup.append(appendBtn, pagerButtons.first, pagerButtons.prev, pagerInput, pagerButtons.next, pagerButtons.last, pagerButtons.jump);
 
             pager.append(pagerInfo, localPagerGroup, remotePagerGroup);
             bigWrap.append(bigTableHost, pager);
@@ -1373,7 +1706,13 @@
                 localNextBtn.disabled = localPage >= localPages;
             }
 
-            remotePagerGroup.hidden = remotePages <= 1;
+            remotePagerGroup.hidden = remotePages <= 1 && Boolean(bigData.exhausted);
+            if (appendBtn) {
+                const nextChunk = bigData.batchSize || fetchSettings.batchSize;
+                appendBtn.textContent = `+追加 ${nextChunk} 条`;
+                appendBtn.hidden = Boolean(bigData.exhausted) || logs.length >= total;
+                appendBtn.disabled = loading;
+            }
             pagerInput.max = String(remotePages);
             if (document.activeElement !== pagerInput) pagerInput.value = String(page);
             pagerButtons.first.disabled = pagerButtons.prev.disabled = loading || page <= 1;
@@ -1502,6 +1841,7 @@
         const ownershipLabels = { '0': '未知', '1': '企业设备', '2': '个人设备' };
         const credibilityLabels = { '0': '未知', '1': '可信', '2': '不可信' };
         const userDevicesCache = new Map();
+        const inflightDeviceQueries = new Map();
         let detailMountSeq = 0;
 
         function fetchUserDevices(uid, forceRefresh = false) {
@@ -1511,7 +1851,10 @@
             if (!forceRefresh && cached && Date.now() - cached.time < 120000) {
                 return Promise.resolve(cached.list);
             }
-            return new Promise((resolve, reject) => {
+            if (!forceRefresh && inflightDeviceQueries.has(key)) {
+                return inflightDeviceQueries.get(key);
+            }
+            const promise = new Promise((resolve, reject) => {
                 const NativeXHR = pageWindow.XMLHttpRequest;
                 const xhr = new NativeXHR();
                 xhr.__feishuHitLogSub = true;
@@ -1547,7 +1890,11 @@
                 xhr.onerror = () => reject(new Error('网络请求失败'));
                 xhr.ontimeout = () => reject(new Error('请求超时'));
                 xhr.send(JSON.stringify({ userIDList: [key], pageSize: 100 }));
+            }).finally(() => {
+                inflightDeviceQueries.delete(key);
             });
+            inflightDeviceQueries.set(key, promise);
+            return promise;
         }
 
         function createUserDevicesSection(log) {
@@ -1965,6 +2312,9 @@
         }).observe(document.body, { subtree: true, childList: true, characterData: true });
         document.addEventListener('pointerdown', event => {
             if (menuOpen && !container.contains(event.target)) setMenuOpen(false);
+            if (settingsOpen && settingsPopover && !settingsPopover.parentElement?.contains(event.target)) {
+                settingsPopover.parentElement?._close?.();
+            }
             if (event.isTrusted && activeTimePreset && event.target.closest?.('.universe-abs__filter__time-range')) {
                 activeTimePreset = null;
                 updatePresetButtons();
@@ -1973,13 +2323,21 @@
         document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
             if (detailBackdrop && !detailBackdrop.hidden) closeDetail();
-            else if (menuOpen) {
+            else if (settingsOpen) {
+                settingsPopover?.parentElement?._close?.();
+                settingsBtn?.focus();
+            } else if (menuOpen) {
                 setMenuOpen(false);
                 trigger.focus();
             }
         });
         GM_addValueChangeListener(hitLogPageSizeKey, (_key, _old, value, remote) => {
             if (remote && pageSizeOptions.includes(Number(value))) changePageSize(Number(value));
+        });
+        GM_addValueChangeListener(hitLogFetchSettingsKey, (_key, _old, value, remote) => {
+            if (!remote) return;
+            fetchSettings = normalizeFetchSettings(value);
+            schedule();
         });
         window.addEventListener('popstate', schedule);
         window.addEventListener('hashchange', schedule);
