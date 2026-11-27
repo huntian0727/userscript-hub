@@ -86,7 +86,7 @@
       "displayName": "飞书管理后台 · 我的常用",
       "description": "飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选/客户端类型列/大批量拉取与导出、常用入口、侧栏管理及 GitHub 配置同步。",
       "source": "userscripts/feishu-admin-favorites.user.js",
-      "channel": "正式发布 · v0.10.5",
+      "channel": "正式发布 · v0.10.6",
       "enabled": true
     }
   ]

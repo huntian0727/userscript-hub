@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书管理后台 · 我的常用
 // @namespace    feishu-admin-favorites.local
-// @version      0.10.5
+// @version      0.10.6
 // @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选与每页条数切换、常用入口和侧栏管理。
 // @match        https://baili-pharm.feishu.cn/admin*
 // @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.meta.js
@@ -65,6 +65,7 @@
     installUsagePresets();
     installUsageLogDefaults();
     installHitLogDecisionFilter();
+    installDeviceOldDeepLink();
 
     function findDatePreset(picker, label) {
         if (!picker.classList.contains('ud__picker-open')) return null;
@@ -1955,14 +1956,14 @@
                     }
                     const table = document.createElement('table');
                     const colgroup = document.createElement('colgroup');
-                    for (const width of ['50%', '25%', '25%']) {
+                    for (const width of ['42%', '20%', '20%', '18%']) {
                         const col = document.createElement('col');
                         col.style.width = width;
                         colgroup.append(col);
                     }
                     const thead = document.createElement('thead');
                     const hr = document.createElement('tr');
-                    for (const label of ['设备名称', '设备归属', '设备状态']) {
+                    for (const label of ['设备名称', '设备归属', '设备状态', '操作']) {
                         const th = document.createElement('th');
                         th.textContent = label;
                         hr.append(th);
@@ -1970,9 +1971,22 @@
                     thead.append(hr);
                     const tbody = document.createElement('tbody');
                     for (const item of list) {
+                        const params = new URLSearchParams();
+                        if (uid) params.set('uid', String(uid));
+                        if (item?.id) params.set('id', String(item.id));
+                        if (item?.did) params.set('did', String(item.did));
+                        const detailHref = `/admin/security/terminal-security/device_old#feishu-device-detail&${params.toString()}`;
+
                         const tr = document.createElement('tr');
                         const tdName = document.createElement('td');
-                        tdName.textContent = item?.deviceName || '-';
+                        const nameLink = document.createElement('a');
+                        nameLink.className = 'feishu-hitlog-dev-more';
+                        nameLink.href = detailHref;
+                        nameLink.target = '_blank';
+                        nameLink.rel = 'noopener noreferrer';
+                        nameLink.textContent = item?.deviceName || '-';
+                        nameLink.title = '在新标签页打开该设备的详情页';
+                        tdName.append(nameLink);
                         if (item?.did && String(item.did) === currentDid) {
                             const cur = document.createElement('span');
                             cur.className = 'feishu-hitlog-dev-cur';
@@ -1990,7 +2004,16 @@
                         tag.textContent = credibilityLabels[credCode] ?? (credCode || '-');
                         tdStatus.append(tag);
 
-                        tr.append(tdName, tdOwner, tdStatus);
+                        const tdAction = document.createElement('td');
+                        const detailLink = document.createElement('a');
+                        detailLink.className = 'feishu-hitlog-dev-more';
+                        detailLink.href = detailHref;
+                        detailLink.target = '_blank';
+                        detailLink.rel = 'noopener noreferrer';
+                        detailLink.textContent = '详情 ↗';
+                        tdAction.append(detailLink);
+
+                        tr.append(tdName, tdOwner, tdStatus, tdAction);
                         tbody.append(tr);
                     }
                     table.append(colgroup, thead, tbody);
@@ -2343,6 +2366,117 @@
         window.addEventListener('hashchange', schedule);
         window.addEventListener('resize', syncBigTableHeight);
         schedule();
+    }
+
+    function installDeviceOldDeepLink() {
+        const hashPrefix = '#feishu-device-detail';
+        const onDeviceOldPage = () => location.pathname.replace(/\/$/, '') === '/admin/security/terminal-security/device_old';
+        const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        let runSeq = 0;
+
+        function readDeviceTableProps() {
+            try {
+                const table = (pageWindow.document ?? document).querySelector('.ud__table');
+                if (!table) return null;
+                const fiberKey = Object.keys(table).find(key => key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$'));
+                if (!fiberKey) return null;
+                let fiber = table[fiberKey];
+                for (let depth = 0; fiber && depth < 30; depth++, fiber = fiber.return) {
+                    const props = fiber.memoizedProps;
+                    if (Array.isArray(props?.columns) && props.columns.length) return props;
+                }
+                return null;
+            } catch {
+                return null;
+            }
+        }
+
+        function findDetailClick(node) {
+            if (!node || typeof node !== 'object') return null;
+            if (typeof node.props?.onClick === 'function') {
+                const children = node.props?.children;
+                if (children === '详情' || (Array.isArray(children) && children.includes('详情'))) {
+                    return node.props.onClick;
+                }
+            }
+            const children = node.props?.children;
+            if (Array.isArray(children)) {
+                for (const child of children) {
+                    const fn = findDetailClick(child);
+                    if (fn) return fn;
+                }
+            } else if (children && typeof children === 'object') {
+                return findDetailClick(children);
+            }
+            return null;
+        }
+
+        function queryDeviceRecord(uid, id, did) {
+            return new Promise(resolve => {
+                if (!uid) {
+                    resolve(null);
+                    return;
+                }
+                const NativeXHR = pageWindow.XMLHttpRequest;
+                const xhr = new NativeXHR();
+                xhr.open('POST', '/suite/admin/device/search', true);
+                xhr.withCredentials = true;
+                xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+                const csrf = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/)?.[1];
+                if (csrf) xhr.setRequestHeader('X-Csrf-Token', decodeURIComponent(csrf));
+                xhr.onload = () => {
+                    try {
+                        const json = JSON.parse(xhr.responseText);
+                        const list = Array.isArray(json?.data?.list) ? json.data.list : [];
+                        const match = list.find(item => (id && String(item?.id) === id) || (did && String(item?.did) === did));
+                        resolve(match ?? null);
+                    } catch {
+                        resolve(null);
+                    }
+                };
+                xhr.onerror = () => resolve(null);
+                xhr.ontimeout = () => resolve(null);
+                xhr.send(JSON.stringify({ userIDList: [uid], pageSize: 100 }));
+            });
+        }
+
+        async function openTargetDevice() {
+            if (!onDeviceOldPage() || !location.hash.startsWith(hashPrefix)) return;
+            const params = new URLSearchParams(location.hash.slice(hashPrefix.length).replace(/^&/, ''));
+            const uid = params.get('uid') || '';
+            const id = params.get('id') || '';
+            const did = params.get('did') || '';
+            if (!id && !did) return;
+
+            const seq = ++runSeq;
+            const deadline = performance.now() + 8000;
+            let props = null;
+            while (seq === runSeq && onDeviceOldPage() && performance.now() < deadline) {
+                props = readDeviceTableProps();
+                if (props?.columns?.length && Array.isArray(props.dataSource) && props.dataSource.length) break;
+                await new Promise(resolve => window.setTimeout(resolve, 120));
+            }
+            if (seq !== runSeq || !onDeviceOldPage() || !props?.columns?.length) return;
+
+            const actionColumn = props.columns.find(col => col?.key === 'action' || col?.title === '操作') ?? props.columns[props.columns.length - 1];
+            if (typeof actionColumn?.render !== 'function') return;
+
+            let record = (props.dataSource ?? []).find(item => (id && String(item?.id) === id) || (did && String(item?.did) === did));
+            if (!record) record = await queryDeviceRecord(uid, id, did);
+            if (seq !== runSeq || !onDeviceOldPage() || !record) return;
+
+            const handler = findDetailClick(actionColumn.render(undefined, record, 0));
+            if (!handler) return;
+            handler({ preventDefault() {}, stopPropagation() {} });
+            try {
+                history.replaceState(null, '', location.pathname + location.search);
+            } catch {}
+        }
+
+        window.addEventListener('hashchange', () => void openTargetDevice());
+        window.addEventListener('popstate', () => void openTargetDevice());
+        void openTargetDevice();
     }
 
     function installQuotaLookup() {
