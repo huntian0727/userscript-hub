@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书管理后台 · 我的常用
 // @namespace    feishu-admin-favorites.local
-// @version      0.10.3
+// @version      0.10.4
 // @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选与每页条数切换、常用入口和侧栏管理。
 // @match        https://baili-pharm.feishu.cn/admin*
 // @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.meta.js
@@ -399,7 +399,9 @@
         const bigAttr = 'data-feishu-hitlog-big';
         const emptyAttr = 'data-feishu-hitlog-empty';
         const detailAttr = 'data-feishu-hitlog-detail';
+        const userDevicesAttr = 'data-feishu-hitlog-user-devices';
         const endpoint = '/suite/admin/cond_access/query_policy_log';
+        const deviceSearchEndpoint = '/suite/admin/device/search';
         const pageSizeOptions = [20, 100, 200, 500, 1000, 2000, 5000, 10000];
         const maxBackendBatch = 500;
         const batchConcurrency = 3;
@@ -625,6 +627,59 @@
             [${detailAttr}] .feishu-hitlog-detail-val { word-break: break-all; }
             [${detailAttr}] .feishu-hitlog-policy-item { padding: 8px 10px; border-radius: 6px; margin-bottom: 6px; background: #f5f6f7; }
             [${detailAttr}] pre { margin: 8px 0 0; padding: 10px; border-radius: 6px; overflow: auto; max-height: 240px; font-size: 12px; background: #f5f6f7; }
+            [${userDevicesAttr}] {
+                margin-top: 20px; padding-top: 16px;
+                border-top: 1px solid var(--line-divider-default, #eff0f1);
+                font-size: 13px; color: var(--text-title, #1f2329);
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-head {
+                display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                margin-bottom: 12px;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-title {
+                display: inline-flex; align-items: center; gap: 8px;
+                font-size: 14px; font-weight: 600; color: var(--text-title, #1f2329);
+                border-left: 3px solid #3370ff; padding-left: 8px; line-height: 1.3;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-count {
+                font-size: 12px; font-weight: 400; color: var(--text-caption, #646a73);
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-more {
+                font-size: 12px; color: #3370ff; text-decoration: none;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-more:hover { text-decoration: underline; }
+            [${userDevicesAttr}] table {
+                width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px;
+                border: 1px solid var(--line-divider-default, #eff0f1); border-radius: 6px; overflow: hidden;
+            }
+            [${userDevicesAttr}] th {
+                text-align: left; font-weight: 500; padding: 8px 10px;
+                background: var(--bg-body-overlay, #f5f6f7); color: var(--text-caption, #646a73);
+                border-bottom: 1px solid var(--line-divider-default, #eff0f1);
+            }
+            [${userDevicesAttr}] td {
+                padding: 8px 10px; border-bottom: 1px solid var(--line-divider-default, #eff0f1);
+                word-break: break-all; vertical-align: middle;
+            }
+            [${userDevicesAttr}] tbody tr:last-child td { border-bottom: 0; }
+            [${userDevicesAttr}] .feishu-hitlog-dev-tag {
+                display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; line-height: 18px;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-tag[data-tone="ok"] { background: #e8f7ed; color: #1f8b4c; }
+            [${userDevicesAttr}] .feishu-hitlog-dev-tag[data-tone="bad"] { background: #fdecec; color: #d83931; }
+            [${userDevicesAttr}] .feishu-hitlog-dev-tag[data-tone="muted"] { background: #f0f1f5; color: #646a73; }
+            [${userDevicesAttr}] .feishu-hitlog-dev-cur {
+                display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px;
+                font-size: 11px; line-height: 17px; background: #eaf0ff; color: #3370ff;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-msg {
+                padding: 12px; border-radius: 6px; background: var(--bg-body-overlay, #f5f6f7);
+                color: var(--text-caption, #646a73); text-align: center;
+            }
+            [${userDevicesAttr}] .feishu-hitlog-dev-retry {
+                margin-left: 8px; padding: 2px 8px; border: 1px solid #d0d3d6; border-radius: 4px;
+                background: #fff; color: #3370ff; font-size: 12px; cursor: pointer;
+            }
         `;
 
         function parseContext(log) {
@@ -1444,8 +1499,190 @@
             }
         }
 
+        const ownershipLabels = { '0': '未知', '1': '企业设备', '2': '个人设备' };
+        const credibilityLabels = { '0': '未知', '1': '可信', '2': '不可信' };
+        const userDevicesCache = new Map();
+        let detailMountSeq = 0;
+
+        function fetchUserDevices(uid, forceRefresh = false) {
+            const key = String(uid ?? '').trim();
+            if (!key) return Promise.resolve([]);
+            const cached = userDevicesCache.get(key);
+            if (!forceRefresh && cached && Date.now() - cached.time < 120000) {
+                return Promise.resolve(cached.list);
+            }
+            return new Promise((resolve, reject) => {
+                const NativeXHR = pageWindow.XMLHttpRequest;
+                const xhr = new NativeXHR();
+                xhr.__feishuHitLogSub = true;
+                xhr.open('POST', deviceSearchEndpoint, true);
+                xhr.withCredentials = true;
+                let hasCsrf = false;
+                let hasContentType = false;
+                let hasRequestedWith = false;
+                for (const [name, value] of lastXhrTemplate?.headers ?? []) {
+                    if (/^x-passport-dpop$/i.test(name)) continue;
+                    if (/^x-csrf-token$/i.test(name)) hasCsrf = true;
+                    if (/^content-type$/i.test(name)) hasContentType = true;
+                    if (/^x-requested-with$/i.test(name)) hasRequestedWith = true;
+                    try { xhr.setRequestHeader(name, value); } catch {}
+                }
+                if (!hasContentType) xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+                if (!hasRequestedWith) xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+                if (!hasCsrf) {
+                    const csrf = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/)?.[1];
+                    if (csrf) xhr.setRequestHeader('X-Csrf-Token', decodeURIComponent(csrf));
+                }
+                xhr.onload = () => {
+                    const json = readResponse(xhr);
+                    if (xhr.status === 200 && json?.code === 0 && Array.isArray(json.data?.list)) {
+                        const list = json.data.list.filter(item =>
+                            !item?.lastLoginUser?.uid || String(item.lastLoginUser.uid) === key);
+                        userDevicesCache.set(key, { list, time: Date.now() });
+                        resolve(list);
+                    } else {
+                        reject(new Error(json?.message || json?.msg || `HTTP ${xhr.status}`));
+                    }
+                };
+                xhr.onerror = () => reject(new Error('网络请求失败'));
+                xhr.ontimeout = () => reject(new Error('请求超时'));
+                xhr.send(JSON.stringify({ userIDList: [key], pageSize: 100 }));
+            });
+        }
+
+        function createUserDevicesSection(log) {
+            const uid = log?.userProfile?.uid || parseContext(log).USER_ID || '';
+            const currentDid = deviceText(log);
+            const section = document.createElement('div');
+            section.setAttribute(userDevicesAttr, '');
+
+            const head = document.createElement('div');
+            head.className = 'feishu-hitlog-dev-head';
+            const title = document.createElement('div');
+            title.className = 'feishu-hitlog-dev-title';
+            title.textContent = '该用户设备列表（最后登录）';
+            const count = document.createElement('span');
+            count.className = 'feishu-hitlog-dev-count';
+            title.append(count);
+
+            const more = document.createElement('a');
+            more.className = 'feishu-hitlog-dev-more';
+            more.href = '/admin/security/terminal-security/device_old';
+            more.target = '_blank';
+            more.rel = 'noopener noreferrer';
+            more.textContent = '设备管理 ↗';
+            head.append(title, more);
+
+            const body = document.createElement('div');
+            section.append(head, body);
+
+            const renderMessage = (text, canRetry = false) => {
+                const box = document.createElement('div');
+                box.className = 'feishu-hitlog-dev-msg';
+                box.textContent = text;
+                if (canRetry) {
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'feishu-hitlog-dev-retry';
+                    retry.textContent = '重试';
+                    retry.addEventListener('click', () => load(true));
+                    box.append(retry);
+                }
+                body.replaceChildren(box);
+            };
+
+            const load = (force = false) => {
+                if (!uid) {
+                    count.textContent = '';
+                    renderMessage('当前日志缺少用户 ID，无法查询设备');
+                    return;
+                }
+                count.textContent = '';
+                renderMessage('正在查询该用户的最后登录设备…');
+                fetchUserDevices(uid, force).then(list => {
+                    if (!section.isConnected) return;
+                    count.textContent = `（${list.length} 台）`;
+                    if (!list.length) {
+                        renderMessage('未查到最后登录为该用户的设备');
+                        return;
+                    }
+                    const table = document.createElement('table');
+                    const colgroup = document.createElement('colgroup');
+                    for (const width of ['50%', '25%', '25%']) {
+                        const col = document.createElement('col');
+                        col.style.width = width;
+                        colgroup.append(col);
+                    }
+                    const thead = document.createElement('thead');
+                    const hr = document.createElement('tr');
+                    for (const label of ['设备名称', '设备归属', '设备状态']) {
+                        const th = document.createElement('th');
+                        th.textContent = label;
+                        hr.append(th);
+                    }
+                    thead.append(hr);
+                    const tbody = document.createElement('tbody');
+                    for (const item of list) {
+                        const tr = document.createElement('tr');
+                        const tdName = document.createElement('td');
+                        tdName.textContent = item?.deviceName || '-';
+                        if (item?.did && String(item.did) === currentDid) {
+                            const cur = document.createElement('span');
+                            cur.className = 'feishu-hitlog-dev-cur';
+                            cur.textContent = '当前';
+                            tdName.append(cur);
+                        }
+                        const tdOwner = document.createElement('td');
+                        tdOwner.textContent = ownershipLabels[String(item?.deviceOwnership)] ?? String(item?.deviceOwnership ?? '-');
+
+                        const tdStatus = document.createElement('td');
+                        const credCode = String(item?.deviceCredibility ?? '');
+                        const tag = document.createElement('span');
+                        tag.className = 'feishu-hitlog-dev-tag';
+                        tag.dataset.tone = credCode === '1' ? 'ok' : credCode === '2' ? 'bad' : 'muted';
+                        tag.textContent = credibilityLabels[credCode] ?? (credCode || '-');
+                        tdStatus.append(tag);
+
+                        tr.append(tdName, tdOwner, tdStatus);
+                        tbody.append(tr);
+                    }
+                    table.append(colgroup, thead, tbody);
+                    body.replaceChildren(table);
+                }).catch(error => {
+                    if (!section.isConnected) return;
+                    renderMessage(`查询设备失败：${error.message}`, true);
+                });
+            };
+
+            load(false);
+            return section;
+        }
+
+        function mountDevicesInNativeDrawer(log) {
+            const seq = ++detailMountSeq;
+            const started = performance.now();
+            function locate() {
+                if (seq !== detailMountSeq || performance.now() - started > 3000) return;
+                const dialog = [...document.querySelectorAll('[role="dialog"], .ud__drawer, .ud__modal')]
+                    .find(el => visible(el) && el.textContent.includes('日志详情') && el.textContent.includes('日志基本信息'));
+                if (!dialog) {
+                    requestAnimationFrame(locate);
+                    return;
+                }
+                const target = dialog.querySelector('.ud__drawer-body, .ud__drawer__body, .ud__modal-body, .ud__modal__body') ??
+                    [...dialog.querySelectorAll('div')].find(el => el.textContent.includes('日志基本信息') && getComputedStyle(el).overflowY === 'auto') ??
+                    dialog;
+                dialog.querySelector(`[${userDevicesAttr}]`)?.remove();
+                target.append(createUserDevicesSection(log));
+            }
+            requestAnimationFrame(locate);
+        }
+
         function openDetail(log) {
-            if (openNativeDetail(log)) return;
+            if (openNativeDetail(log)) {
+                mountDevicesInNativeDrawer(log);
+                return;
+            }
             if (!detailBackdrop) {
                 detailBackdrop = document.createElement('div');
                 detailBackdrop.setAttribute(detailAttr, '');
@@ -1723,7 +1960,7 @@
         new MutationObserver(records => {
             if (records.some(record => {
                 const target = record.target instanceof Element ? record.target : record.target.parentElement;
-                return !target?.closest(`[${presetsAttr}], [${filterAttr}], [${sizeAttr}], [${emptyAttr}], [${bigAttr}], [${detailAttr}]`);
+                return !target?.closest(`[${presetsAttr}], [${filterAttr}], [${sizeAttr}], [${emptyAttr}], [${bigAttr}], [${detailAttr}], [${userDevicesAttr}]`);
             })) schedule();
         }).observe(document.body, { subtree: true, childList: true, characterData: true });
         document.addEventListener('pointerdown', event => {
