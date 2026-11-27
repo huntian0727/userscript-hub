@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         飞书管理后台 · 我的常用
 // @namespace    feishu-admin-favorites.local
-// @version      0.10.6
+// @version      0.10.7
 // @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选与每页条数切换、常用入口和侧栏管理。
 // @match        https://baili-pharm.feishu.cn/admin*
 // @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.meta.js
@@ -420,6 +420,7 @@
             { key: '15m', label: '15分钟', ms: 15 * 60 * 1000 },
             { key: '1h', label: '1小时', ms: 60 * 60 * 1000 },
             { key: '1d', label: '1天', ms: 24 * 60 * 60 * 1000 },
+            { key: '3d', label: '3天', ms: 3 * 24 * 60 * 60 * 1000 },
             { key: '7d', label: '7天', ms: 7 * 24 * 60 * 60 * 1000 },
         ];
         const onStrategyPage = () => location.pathname.replace(/\/$/, '') === '/admin/security/condition-access/strategy';
@@ -450,9 +451,8 @@
             : 20;
         if (!pageSizeOptions.includes(desiredPageSize)) desiredPageSize = 20;
 
-        const defaultDecisions = ['允许访问', '允许访问需验证身份', '拒绝访问'];
-        const selected = new Set();
-        const seenOptions = new Set(defaultDecisions);
+        const denyDecision = '拒绝访问';
+        let onlyDeny = false;
         const learnedDecisionLabels = new Map();
         const learnedEventLabels = new Map();
 
@@ -526,6 +526,23 @@
                 background: var(--ud-token-primary-fill-solid-01, #eaf0ff);
                 color: var(--ud-token-primary-text-default, #3370ff); font-weight: 500;
             }
+            [${filterAttr}] .feishu-hitlog-deny-btn {
+                display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
+                border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 6px;
+                background: var(--bg-body, #fff); color: var(--text-title, #1f2329);
+                font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap;
+                transition: border-color .15s, background-color .15s, color .15s;
+            }
+            [${filterAttr}] .feishu-hitlog-deny-btn:hover {
+                border-color: #d83931; color: #d83931;
+            }
+            [${filterAttr}] .feishu-hitlog-deny-btn[aria-pressed="true"] {
+                background: #fff0ef; border-color: #d83931; color: #d83931; font-weight: 500;
+            }
+            [${filterAttr}] .feishu-hitlog-deny-dot {
+                width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .45; flex: none;
+            }
+            [${filterAttr}] .feishu-hitlog-deny-btn[aria-pressed="true"] .feishu-hitlog-deny-dot { opacity: 1; }
             [${filterAttr}] .feishu-hitlog-trigger, [${sizeAttr}] .feishu-hitlog-size-box {
                 display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 12px;
                 border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 6px;
@@ -926,34 +943,44 @@
             });
         }
 
-        async function continueBatchFetch(seq, template, basePayload, logicalPage, targetSize, firstLogs, total, startedAt = performance.now()) {
+        async function continueBatchFetch(seq, template, basePayload, logicalPage, targetSize, firstLogs, total, startedAt = performance.now(), scanAll = false) {
             const cfg = { ...fetchSettings };
-            const batchSize = Math.min(targetSize, cfg.batchSize);
-            const batchesPerBlock = Math.max(1, Math.ceil(targetSize / batchSize));
-            const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
-            const remainingBudget = Math.min(targetSize, Math.max(0, total - (logicalPage - 1) * targetSize));
+            const effectiveTarget = scanAll ? Math.max(total, firstLogs.length) : targetSize;
+            const batchSize = scanAll ? cfg.batchSize : Math.min(effectiveTarget, cfg.batchSize);
+            const batchesPerBlock = Math.max(1, Math.ceil(effectiveTarget / batchSize));
+            const firstBackendPage = scanAll ? 1 : (logicalPage - 1) * batchesPerBlock + 1;
+            const remainingBudget = scanAll
+                ? total
+                : Math.min(effectiveTarget, Math.max(0, total - (logicalPage - 1) * effectiveTarget));
 
             const seenIds = new Set(firstLogs.map(log => log?.logid).filter(Boolean));
             const merged = [...firstLogs];
             let completedBatches = 1;
             let nextBackendPage = firstBackendPage + 1;
+            const countDeny = list => list.reduce((acc, item) => acc + (decisionLabel(item) === denyDecision ? 1 : 0), 0);
 
             bigData = {
                 logs: merged,
                 total,
                 page: logicalPage,
-                size: targetSize,
+                size: effectiveTarget,
                 batchSize,
                 nextBackendPage,
                 template,
                 basePayload,
+                scanAll,
                 exhausted: firstLogs.length < batchSize || merged.length >= total,
             };
 
             if (merged.length >= remainingBudget || firstLogs.length < batchSize || batchesPerBlock <= 1) {
                 loading = false;
                 if (stopBtn) stopBtn.hidden = true;
-                setStatus('');
+                if (scanAll) {
+                    const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+                    setStatus(`扫描完成：共 ${merged.length} 条，命中拒绝访问 ${countDeny(merged)} 条（1 批，${elapsed}s）`);
+                } else {
+                    setStatus('');
+                }
                 schedule();
                 return;
             }
@@ -961,7 +988,9 @@
             const token = { cancelled: false, subs: new Set(), timers: new Set(), resolvers: new Set() };
             batchAbort = token;
             if (stopBtn) stopBtn.hidden = false;
-            setStatus(`已拉取 ${merged.length} / ${remainingBudget} 条…`);
+            setStatus(scanAll
+                ? `扫描拒绝访问：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countDeny(merged)} 条…`
+                : `已拉取 ${merged.length} / ${remainingBudget} 条…`);
 
             const nextPages = [];
             for (let offset = 1; offset < batchesPerBlock; offset++) {
@@ -1020,7 +1049,7 @@
                         const id = item?.logid;
                         if (id && seenIds.has(id)) continue;
                         if (id) seenIds.add(id);
-                        if (merged.length < targetSize) merged.push(item);
+                        if (scanAll || merged.length < effectiveTarget) merged.push(item);
                     }
                     if (chunk.length < batchSize) reachedEnd = true;
                 }
@@ -1028,15 +1057,18 @@
                     logs: merged,
                     total,
                     page: logicalPage,
-                    size: targetSize,
+                    size: effectiveTarget,
                     batchSize,
                     nextBackendPage,
                     template,
                     basePayload,
+                    scanAll,
                     exhausted: reachedEnd || merged.length >= total,
                 };
                 lastBigKey = '';
-                setStatus(`已拉取 ${merged.length} / ${remainingBudget} 条…`);
+                setStatus(scanAll
+                    ? `扫描拒绝访问：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countDeny(merged)} 条…`
+                    : `已拉取 ${merged.length} / ${remainingBudget} 条…`);
                 schedule();
             }
 
@@ -1045,10 +1077,11 @@
             if (batchAbort === token) batchAbort = null;
             if (stopBtn) stopBtn.hidden = true;
             const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-            if (token.cancelled) setStatus(`已停止，保留 ${merged.length} 条`);
-            else if (rateLimited) setStatus(`触发限流已熔断，保留 ${merged.length} 条（建议调大间隔）`);
-            else if (failed) setStatus(`部分批次受限，已保留 ${merged.length} 条`);
-            else setStatus(`已拉取 ${merged.length} 条（${completedBatches} 批，${elapsed}s）`);
+            const denyCount = countDeny(merged);
+            if (token.cancelled) setStatus(scanAll ? `已停止：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `已停止，保留 ${merged.length} 条`);
+            else if (rateLimited) setStatus(scanAll ? `触发限流已熔断：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `触发限流已熔断，保留 ${merged.length} 条（建议调大间隔）`);
+            else if (failed) setStatus(scanAll ? `部分批次受限：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `部分批次受限，已保留 ${merged.length} 条`);
+            else setStatus(scanAll ? `扫描完成：共 ${merged.length} 条，命中拒绝访问 ${denyCount} 条（${completedBatches} 批，${elapsed}s）` : `已拉取 ${merged.length} 条（${completedBatches} 批，${elapsed}s）`);
             schedule();
         }
 
@@ -1116,10 +1149,11 @@
             cancelActiveFetch();
             const seq = ++requestSeq;
             const startedAt = performance.now();
+            const scanAll = onlyDeny;
             const size = desiredPageSize;
-            const batchSize = Math.min(size, fetchSettings.batchSize);
+            const batchSize = scanAll ? fetchSettings.batchSize : Math.min(size, fetchSettings.batchSize);
             const batchesPerBlock = Math.max(1, Math.ceil(size / batchSize));
-            const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
+            const firstBackendPage = scanAll ? 1 : (logicalPage - 1) * batchesPerBlock + 1;
             const payload = { ...lastXhrTemplate.payload, pageSize: batchSize, pageNumber: firstBackendPage };
             if (activeTimePreset) {
                 payload.evaluateTimeStart = String(activeTimePreset.startMs);
@@ -1129,7 +1163,7 @@
             batchAbort = token;
             loading = true;
             localPage = 1;
-            setStatus(`加载中（目标 ${size} 条）…`);
+            setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部拒绝访问记录…` : `加载中（目标 ${size} 条）…`);
             schedule();
             try {
                 const res = await sendSubBatch(lastXhrTemplate, payload, token);
@@ -1138,10 +1172,10 @@
                 if (res.status === 200 && res.json?.code === 0 && Array.isArray(res.json.data?.logs)) {
                     const firstLogs = res.json.data.logs;
                     const total = Number(res.json.data.total) || firstLogs.length;
-                    bigData = { logs: firstLogs, total, page: logicalPage, size, batchSize, nextBackendPage: firstBackendPage + 1, template: lastXhrTemplate, basePayload: payload };
+                    bigData = { logs: firstLogs, total, page: logicalPage, size: scanAll ? total : size, batchSize, nextBackendPage: firstBackendPage + 1, template: lastXhrTemplate, basePayload: payload, scanAll };
                     lastBigKey = '';
                     schedule();
-                    void continueBatchFetch(seq, lastXhrTemplate, payload, logicalPage, size, firstLogs, total, startedAt);
+                    void continueBatchFetch(seq, lastXhrTemplate, payload, logicalPage, size, firstLogs, total, startedAt, scanAll);
                 } else {
                     loading = false;
                     setStatus(`加载失败：${res.json?.message || res.json?.msg || `HTTP ${res.status}`}`);
@@ -1216,12 +1250,13 @@
 
                 afterNativeLoad = null;
                 cancelActiveFetch();
-                const logicalPage = override?.pageNumber ?? 1;
+                const scanAll = onlyDeny;
+                const logicalPage = scanAll ? 1 : (override?.pageNumber ?? 1);
                 override = null;
                 const size = desiredPageSize;
-                const batchSize = Math.min(size, fetchSettings.batchSize);
+                const batchSize = scanAll ? fetchSettings.batchSize : Math.min(size, fetchSettings.batchSize);
                 const batchesPerBlock = Math.max(1, Math.ceil(size / batchSize));
-                const firstBackendPage = (logicalPage - 1) * batchesPerBlock + 1;
+                const firstBackendPage = scanAll ? 1 : (logicalPage - 1) * batchesPerBlock + 1;
 
                 payload.pageSize = batchSize;
                 payload.pageNumber = firstBackendPage;
@@ -1234,7 +1269,7 @@
                 const startedAt = performance.now();
                 loading = true;
                 localPage = 1;
-                setStatus(size > batchSize ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`);
+                setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部拒绝访问记录…` : (size > batchSize ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`));
                 schedule();
 
                 this.addEventListener('loadend', () => {
@@ -1243,10 +1278,10 @@
                     if (this.status === 200 && json?.code === 0 && Array.isArray(json.data?.logs)) {
                         const firstLogs = json.data.logs;
                         const total = Number(json.data.total) || firstLogs.length;
-                        bigData = { logs: firstLogs, total, page: logicalPage, size, batchSize, nextBackendPage: firstBackendPage + 1, template, basePayload: sentPayload };
+                        bigData = { logs: firstLogs, total, page: logicalPage, size: scanAll ? total : size, batchSize, nextBackendPage: firstBackendPage + 1, template, basePayload: sentPayload, scanAll };
                         lastBigKey = '';
                         schedule();
-                        void continueBatchFetch(seq, template, sentPayload, logicalPage, size, firstLogs, total, startedAt);
+                        void continueBatchFetch(seq, template, sentPayload, logicalPage, size, firstLogs, total, startedAt, scanAll);
                     } else {
                         loading = false;
                         setStatus(`加载失败：${json?.message || json?.msg || `HTTP ${this.status}`}`);
@@ -1259,19 +1294,41 @@
 
         function setMenuOpen(open) {
             menuOpen = open;
-            if (!container) return;
-            container.dataset.open = String(open);
-            trigger.setAttribute('aria-expanded', String(open));
-            menu.hidden = !open;
         }
 
         function clearSelection() {
-            if (!selected.size) return;
-            selected.clear();
+            if (!onlyDeny) return;
+            onlyDeny = false;
+            cancelActiveFetch();
             localPage = 1;
             lastRenderKey = '';
             lastBigKey = '';
+            setStatus('');
             refresh();
+        }
+
+        function toggleOnlyDeny() {
+            onlyDeny = !onlyDeny;
+            localPage = 1;
+            lastRenderKey = '';
+            lastBigKey = '';
+            if (!onlyDeny) {
+                cancelActiveFetch();
+                setStatus('');
+                refresh();
+                return;
+            }
+            const now = Date.now();
+            const targetPreset = (activeTimePreset && timePresets.find(p => p.key === activeTimePreset.key))
+                ?? timePresets.find(p => p.key === '7d');
+            if (targetPreset) {
+                activeTimePreset = { key: targetPreset.key, label: targetPreset.label, startMs: now - targetPreset.ms, endMs: now };
+                updatePresetButtons();
+            }
+            if (!triggerBigQuery(1)) {
+                setStatus('请先点一次页面时间或翻页以初始化请求');
+                refresh();
+            }
         }
 
         function updatePresetButtons() {
@@ -1392,48 +1449,19 @@
 
             container = document.createElement('div');
             container.setAttribute(filterAttr, '');
-            container.dataset.open = 'false';
-            trigger = document.createElement('div');
-            trigger.className = 'feishu-hitlog-trigger';
-            trigger.tabIndex = 0;
-            trigger.setAttribute('role', 'button');
-            trigger.setAttribute('aria-haspopup', 'listbox');
-            trigger.setAttribute('aria-expanded', 'false');
-            const label = document.createElement('span');
-            label.className = 'feishu-hitlog-label';
-            label.textContent = '决策';
+            trigger = document.createElement('button');
+            trigger.type = 'button';
+            trigger.className = 'feishu-hitlog-deny-btn';
+            trigger.setAttribute('aria-pressed', 'false');
+            trigger.title = '开启后默认拉取最近 7 天全部记录并筛选「拒绝访问」（若已选快捷时间则按所选时间拉取）';
+            const dot = document.createElement('span');
+            dot.className = 'feishu-hitlog-deny-dot';
+            dot.setAttribute('aria-hidden', 'true');
             valueNode = document.createElement('span');
-            valueNode.className = 'feishu-hitlog-value';
-            clearBtn = document.createElement('button');
-            clearBtn.type = 'button';
-            clearBtn.className = 'feishu-hitlog-clear';
-            clearBtn.title = '清空决策筛选';
-            clearBtn.setAttribute('aria-label', '清空决策筛选');
-            clearBtn.textContent = '×';
-            clearBtn.hidden = true;
-            const caret = document.createElement('span');
-            caret.className = 'feishu-hitlog-caret';
-            caret.setAttribute('aria-hidden', 'true');
-            caret.textContent = '▾';
-            trigger.append(label, valueNode, clearBtn, caret);
-
-            menu = document.createElement('div');
-            menu.className = 'feishu-hitlog-menu';
-            menu.hidden = true;
-            const head = document.createElement('div');
-            head.className = 'feishu-hitlog-menu-head';
-            summaryNode = document.createElement('span');
-            resetBtn = document.createElement('button');
-            resetBtn.type = 'button';
-            resetBtn.className = 'feishu-hitlog-reset';
-            resetBtn.textContent = '清空';
-            head.append(summaryNode, resetBtn);
-            optionsList = document.createElement('div');
-            optionsList.className = 'feishu-hitlog-options';
-            optionsList.setAttribute('role', 'listbox');
-            optionsList.setAttribute('aria-multiselectable', 'true');
-            menu.append(head, optionsList);
-            container.append(trigger, menu);
+            valueNode.textContent = '仅看拒绝访问';
+            trigger.append(dot, valueNode);
+            trigger.addEventListener('click', toggleOnlyDeny);
+            container.append(trigger);
 
             pageSizeWrap = document.createElement('div');
             pageSizeWrap.setAttribute(sizeAttr, '');
@@ -1586,20 +1614,6 @@
             pageSizeWrap.append(box, stopBtn, exportBtn, settingsWrap, pageSizeStatus);
 
             pageSizeSelect.addEventListener('change', () => changePageSize(Number(pageSizeSelect.value)));
-            trigger.addEventListener('click', event => {
-                if (!clearBtn.contains(event.target)) setMenuOpen(!menuOpen);
-            });
-            trigger.addEventListener('keydown', event => {
-                if (event.key === 'Enter' || event.key === ' ' || (event.key === 'ArrowDown' && !menuOpen)) {
-                    event.preventDefault();
-                    setMenuOpen(event.key === 'ArrowDown' ? true : !menuOpen);
-                }
-            });
-            clearBtn.addEventListener('click', event => {
-                event.stopPropagation();
-                clearSelection();
-            });
-            resetBtn.addEventListener('click', clearSelection);
         }
 
         function ensureEmptyBanner() {
@@ -1697,8 +1711,8 @@
             if (localPage > localPages) localPage = localPages;
 
             const timeTag = activeTimePreset ? ` · 最近${activeTimePreset.label}` : '';
-            const filterTag = selected.size ? `筛选命中 ${filteredLogs.length} / ` : '';
-            pagerInfo.textContent = `${filterTag}已加载 ${logs.length} 条（总计 ${total} 条${timeTag}） · 第 ${page}/${remotePages} 批`;
+            const filterTag = onlyDeny ? `拒绝访问命中 ${filteredLogs.length} / ` : '';
+            pagerInfo.textContent = `${filterTag}已加载 ${logs.length} 条（总计 ${total} 条${timeTag}）${bigData.scanAll ? '' : ` · 第 ${page}/${remotePages} 批`}`;
 
             localPagerGroup.hidden = localPages <= 1;
             if (localPages > 1) {
@@ -2158,9 +2172,7 @@
             lastRenderKey = '';
             lastBigKey = '';
             if (forget) {
-                selected.clear();
-                seenOptions.clear();
-                for (const item of defaultDecisions) seenOptions.add(item);
+                onlyDeny = false;
                 activeTimePreset = null;
                 bigData = null;
                 localPage = 1;
@@ -2169,51 +2181,11 @@
             }
         }
 
-        function renderMenu(counts, matched, total) {
-            const filtering = selected.size > 0;
-            clearBtn.hidden = !filtering;
-            resetBtn.disabled = !filtering;
-            valueNode.dataset.placeholder = String(!filtering);
-            valueNode.textContent = !filtering ? '全部'
-                : selected.size === 1 ? `${[...selected][0]} (${matched}/${total})`
-                    : `已选 ${selected.size} 项 (${matched}/${total})`;
-            summaryNode.textContent = total ? `已加载 ${total} 条 · 命中 ${matched} 条` : '当前无记录';
-
-            const options = [...seenOptions];
-            const key = JSON.stringify([options.map(name => [name, counts.get(name) ?? 0, selected.has(name)]), matched, total]);
-            if (key === lastRenderKey) return;
-            lastRenderKey = key;
-            if (!options.length) {
-                const empty = document.createElement('div');
-                empty.className = 'feishu-hitlog-no-options';
-                empty.textContent = '当前暂无可选决策';
-                optionsList.replaceChildren(empty);
-                return;
-            }
-            optionsList.replaceChildren(...options.map(name => {
-                const option = document.createElement('label');
-                option.className = 'feishu-hitlog-option';
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = selected.has(name);
-                checkbox.addEventListener('change', () => {
-                    if (checkbox.checked) selected.add(name);
-                    else selected.delete(name);
-                    localPage = 1;
-                    lastRenderKey = '';
-                    lastBigKey = '';
-                    refresh();
-                });
-                const text = document.createElement('span');
-                text.className = 'feishu-hitlog-option-name';
-                text.textContent = name;
-                text.title = name;
-                const count = document.createElement('span');
-                count.className = 'feishu-hitlog-option-count';
-                count.textContent = String(counts.get(name) ?? 0);
-                option.append(checkbox, text, count);
-                return option;
-            }));
+        function renderMenu(_counts, matched, total) {
+            trigger.setAttribute('aria-pressed', String(onlyDeny));
+            valueNode.textContent = onlyDeny
+                ? `仅看拒绝访问 (${matched}/${total})`
+                : '仅看拒绝访问';
         }
 
         function refresh() {
@@ -2259,7 +2231,7 @@
             }
 
             const counts = new Map();
-            const filtering = selected.size > 0;
+            const filtering = onlyDeny;
             let matched = 0;
             let totalLoaded = 0;
 
@@ -2273,11 +2245,7 @@
                 const filtered = [];
                 for (const log of bigData.logs) {
                     const label = decisionLabel(log);
-                    if (label) {
-                        seenOptions.add(label);
-                        counts.set(label, (counts.get(label) ?? 0) + 1);
-                    }
-                    if (!filtering || selected.has(label)) filtered.push(log);
+                    if (!filtering || label === denyDecision) filtered.push(log);
                 }
                 lastFilteredLogs = filtered;
                 matched = filtered.length;
@@ -2288,7 +2256,9 @@
 
                 if (filtering && !matched && totalLoaded > 0) {
                     const banner = ensureEmptyBanner();
-                    banner.firstElementChild.textContent = `已加载的 ${totalLoaded} 条记录中没有所选决策的日志，可增大拉取条数或翻到下一批`;
+                    banner.firstElementChild.textContent = loading
+                        ? `正在扫描中（已拉取 ${totalLoaded} 条），暂未发现「拒绝访问」记录…`
+                        : `已扫描 ${totalLoaded} 条记录，未发现「拒绝访问」日志`;
                     if (banner.previousElementSibling !== bigTableHost) bigTableHost.after(banner);
                     banner.hidden = false;
                 } else if (emptyBanner) {
@@ -2301,17 +2271,13 @@
                 totalLoaded = nativeRows.length;
                 for (const row of nativeRows) {
                     const decision = row.cells[decisionIndex]?.textContent.trim() ?? '';
-                    if (decision) {
-                        seenOptions.add(decision);
-                        counts.set(decision, (counts.get(decision) ?? 0) + 1);
-                    }
-                    const show = !filtering || selected.has(decision);
+                    const show = !filtering || decision === denyDecision;
                     if (show) matched++;
                     if (row.hasAttribute(hiddenAttr) === show) row.toggleAttribute(hiddenAttr, !show);
                 }
                 if (filtering && !matched && totalLoaded > 0) {
                     const banner = ensureEmptyBanner();
-                    banner.firstElementChild.textContent = `当前页 ${totalLoaded} 条记录中没有所选决策的日志，可增大拉取条数一次筛选更多记录`;
+                    banner.firstElementChild.textContent = `当前页 ${totalLoaded} 条记录中未发现「拒绝访问」日志`;
                     if (banner.previousElementSibling !== nativeBlock) nativeBlock.after(banner);
                     banner.hidden = false;
                 } else if (emptyBanner) {
