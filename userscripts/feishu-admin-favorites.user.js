@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         飞书管理后台 · 我的常用
 // @namespace    feishu-admin-favorites.local
-// @version      0.10.7
-// @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、命中日志决策筛选与每页条数切换、常用入口和侧栏管理。
+// @version      0.11.0
+// @description  飞书后台辅助工具，支持 AI 额度查询、用量时间快捷切换、用量日志默认查询、访问与文件策略命中日志增强筛选（含策略/操作/客户端类型与用户设备反查）、常用入口和侧栏管理。
 // @match        https://baili-pharm.feishu.cn/admin*
 // @updateURL    https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.meta.js
 // @downloadURL  https://huntian0727.github.io/userscript-hub/userscripts/feishu-admin-favorites.user.js
@@ -423,7 +423,14 @@
             { key: '3d', label: '3天', ms: 3 * 24 * 60 * 60 * 1000 },
             { key: '7d', label: '7天', ms: 7 * 24 * 60 * 60 * 1000 },
         ];
-        const onStrategyPage = () => location.pathname.replace(/\/$/, '') === '/admin/security/condition-access/strategy';
+        const currentPageMode = () => {
+            const path = location.pathname.replace(/\/$/, '');
+            if (path === '/admin/security/condition-access/strategy') return 'access';
+            if (path === '/admin/security/condition-access/file-strategy') return 'file';
+            return null;
+        };
+        const onStrategyPage = () => currentPageMode() !== null;
+        let activePageMode = null;
         const visible = element => Boolean(element?.getClientRects().length) && getComputedStyle(element).visibility === 'visible';
         const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
@@ -452,7 +459,9 @@
         if (!pageSizeOptions.includes(desiredPageSize)) desiredPageSize = 20;
 
         const denyDecision = '拒绝访问';
-        let onlyDeny = false;
+        let denyFilterMode = ''; // '' | 'deny' | 'repOnlyDeny'
+        let selectedPolicy = '';
+        let selectedFileOp = '';
         const learnedDecisionLabels = new Map();
         const learnedEventLabels = new Map();
 
@@ -472,6 +481,12 @@
         let container = null;
         let trigger = null;
         let valueNode = null;
+        let repOnlyTrigger = null;
+        let repOnlyValueNode = null;
+        let policyBox = null;
+        let policySelect = null;
+        let fileOpBox = null;
+        let fileOpSelect = null;
         let clearBtn = null;
         let menu = null;
         let summaryNode = null;
@@ -526,6 +541,7 @@
                 background: var(--ud-token-primary-fill-solid-01, #eaf0ff);
                 color: var(--ud-token-primary-text-default, #3370ff); font-weight: 500;
             }
+            [${filterAttr}] { gap: 8px; flex-wrap: wrap; }
             [${filterAttr}] .feishu-hitlog-deny-btn {
                 display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
                 border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 6px;
@@ -539,10 +555,33 @@
             [${filterAttr}] .feishu-hitlog-deny-btn[aria-pressed="true"] {
                 background: #fff0ef; border-color: #d83931; color: #d83931; font-weight: 500;
             }
+            [${filterAttr}] .feishu-hitlog-reponly-btn:hover {
+                border-color: #de7802; color: #de7802;
+            }
+            [${filterAttr}] .feishu-hitlog-reponly-btn[aria-pressed="true"] {
+                background: #fff7e8; border-color: #de7802; color: #c46800; font-weight: 500;
+            }
             [${filterAttr}] .feishu-hitlog-deny-dot {
                 width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .45; flex: none;
             }
             [${filterAttr}] .feishu-hitlog-deny-btn[aria-pressed="true"] .feishu-hitlog-deny-dot { opacity: 1; }
+            [${filterAttr}] .feishu-hitlog-inline-select {
+                display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 8px 0 10px;
+                border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 6px;
+                background: var(--bg-body, #fff); color: var(--text-title, #1f2329);
+                font-size: 13px; box-sizing: border-box; transition: border-color .15s, box-shadow .15s;
+            }
+            [${filterAttr}] .feishu-hitlog-inline-select:hover {
+                border-color: var(--ud-token-primary-border-default, #3370ff);
+            }
+            [${filterAttr}] .feishu-hitlog-inline-select:focus-within {
+                border-color: var(--ud-token-primary-border-default, #3370ff);
+                box-shadow: 0 0 0 2px rgba(51, 112, 255, .18);
+            }
+            [${filterAttr}] .feishu-hitlog-inline-select select {
+                border: 0; outline: none; background: transparent; color: inherit; font: inherit;
+                cursor: pointer; max-width: 170px;
+            }
             [${filterAttr}] .feishu-hitlog-trigger, [${sizeAttr}] .feishu-hitlog-size-box {
                 display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 12px;
                 border: 1px solid var(--line-border-component, #d0d3d6); border-radius: 6px;
@@ -665,6 +704,31 @@
             }
             [${bigAttr}] .feishu-hitlog-table-host[data-loading="true"] { opacity: .65; }
             [${bigAttr}] table { width: 100%; min-width: 960px; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
+            [${bigAttr}] table.feishu-hitlog-file-table { min-width: 1080px; }
+            [${bigAttr}] table.feishu-hitlog-file-table th,
+            [${bigAttr}] table.feishu-hitlog-file-table td { padding: 12px 10px; }
+            [${bigAttr}] table.feishu-hitlog-file-table th { white-space: nowrap; }
+            [${bigAttr}] table.feishu-hitlog-file-table th:last-child,
+            [${bigAttr}] table.feishu-hitlog-file-table td:last-child {
+                position: sticky; right: 0; box-shadow: -4px 0 8px rgba(31, 35, 41, .06);
+            }
+            [${bigAttr}] table.feishu-hitlog-file-table th:last-child { z-index: 2; background: var(--bg-body-overlay, #f5f6f7); }
+            [${bigAttr}] table.feishu-hitlog-file-table td:last-child { background: var(--bg-body, #fff); }
+            [${bigAttr}] table.feishu-hitlog-file-table tbody tr:hover td:last-child { background: var(--fill-hover, #f5f6f7); }
+            [${bigAttr}] .feishu-hitlog-policies-cell { display: flex; flex-direction: column; gap: 3px; }
+            [${bigAttr}] .feishu-hitlog-policy-row {
+                display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+                font-size: 12px; line-height: 1.4;
+            }
+            [${bigAttr}] .feishu-hitlog-policy-badge {
+                flex: none; padding: 0 4px; border-radius: 3px; font-size: 11px; line-height: 16px;
+                background: #eaf0ff; color: #3370ff;
+            }
+            [${bigAttr}] .feishu-hitlog-policy-badge[data-tone="deny"] { background: #fdecec; color: #d83931; }
+            [${bigAttr}] .feishu-hitlog-policy-badge[data-tone="reponly-deny"] { background: #fff3dc; color: #c46800; }
+            [${bigAttr}] .feishu-hitlog-policy-badge[data-tone="reponly"] { background: #f0f1f5; color: #646a73; }
+            [${bigAttr}] .feishu-hitlog-policy-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            [${bigAttr}] .feishu-hitlog-decision-deny { color: #d83931; font-weight: 500; }
             [${bigAttr}] th {
                 text-align: left; font-weight: 500; color: var(--text-caption, #646a73); padding: 12px 16px;
                 background: var(--bg-body-overlay, #f5f6f7); position: sticky; top: 0; z-index: 1;
@@ -785,20 +849,115 @@
             return actions.map(item => (typeof item === 'string' ? item : item?.type ?? JSON.stringify(item)));
         }
 
+        const fileDomainLabels = {
+            CCM: '云文档',
+            IM: '即时消息',
+            Minutes: '妙记',
+            Mail: '邮件',
+            Drive: '云空间',
+            Base: '多维表格',
+            Wiki: '知识库',
+        };
+        const fileOperationLabels = {
+            Preview: '查看或预览',
+            Download: '下载或导出',
+            Print: '打印',
+            Copy: '复制',
+            Share: '分享或外发',
+            Upload: '上传',
+            SaveAs: '另存为',
+            ScreenCapture: '截屏或录屏',
+        };
+        const fileTypeLabels = {
+            Cloud: '在线文档',
+            Local: '本地文件',
+            Minutes: '妙记',
+        };
+
+        function isFileLog(log) {
+            return log?.policyType === 'FILE_PROTECT' || activePageMode === 'file';
+        }
+
+        function isDenyEffect(effect) {
+            return ['DENY', 'BLOCK', 'REJECT'].includes(String(effect ?? '').toUpperCase());
+        }
+
+        function isDenyLog(log) {
+            return isDenyEffect(log?.effect);
+        }
+
+        function isRepOnlyDenyLog(log) {
+            return Array.isArray(log?.repOnlyPolicies) && log.repOnlyPolicies.some(policy => isDenyEffect(policy?.decision?.effect));
+        }
+
+        function hitPoliciesOf(log) {
+            const list = [];
+            for (const policy of log?.enablePolicies ?? []) {
+                const name = policy?.policyName || policy?.policyID || '未命名策略';
+                list.push({ mode: '生效', name, isDeny: isDenyEffect(policy?.decision?.effect) });
+            }
+            for (const policy of log?.repOnlyPolicies ?? []) {
+                const name = policy?.policyName || policy?.policyID || '未命名策略';
+                list.push({ mode: '仅验证', name, isDeny: isDenyEffect(policy?.decision?.effect) });
+            }
+            return list;
+        }
+
+        function fileOperationGroup(log) {
+            const raw = String(parseContext(log).FILE_OPERATION ?? '').trim();
+            if (!raw) return '';
+            return fileOperationLabels[raw] ?? raw;
+        }
+
+        function activeScanLabel(mode = denyFilterMode) {
+            if (mode === 'repOnlyDeny') return '仅验证阻止';
+            return activePageMode === 'file' ? '阻止操作' : denyDecision;
+        }
+
+        function matchesScanMode(log, mode = denyFilterMode) {
+            if (mode === 'deny') return isDenyLog(log);
+            if (mode === 'repOnlyDeny') return isRepOnlyDenyLog(log);
+            return true;
+        }
+
+        function matchesAllFilters(log) {
+            if (denyFilterMode && !matchesScanMode(log, denyFilterMode)) return false;
+            if (activePageMode === 'file') {
+                if (selectedPolicy && !hitPoliciesOf(log).some(p => p.name === selectedPolicy)) return false;
+                if (selectedFileOp === '__non_preview__') {
+                    const op = fileOperationGroup(log);
+                    if (!op || op === '查看或预览') return false;
+                } else if (selectedFileOp && fileOperationGroup(log) !== selectedFileOp) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         function decisionKey(log) {
-            return `${String(log?.effect ?? '').toUpperCase()}|${[...new Set(actionList(log))].sort().join(',')}`;
+            const kind = isFileLog(log) ? 'FILE' : 'ACCESS';
+            return `${kind}|${String(log?.effect ?? '').toUpperCase()}|${[...new Set(actionList(log))].sort().join(',')}`;
         }
 
         function eventKey(log) {
-            return String(parseContext(log).FUNC_SCOPE ?? '');
+            const ctx = parseContext(log);
+            if (isFileLog(log)) {
+                return `FILE|${ctx.FILE_OP_BIZ_DOMAIN ?? ''}|${ctx.FILE_OPERATION ?? ''}|${ctx.FILE_TYPE ?? ''}`;
+            }
+            return `ACCESS|${String(ctx.FUNC_SCOPE ?? '')}`;
         }
 
         function decisionLabel(log) {
             const key = decisionKey(log);
             if (learnedDecisionLabels.has(key)) return learnedDecisionLabels.get(key);
-            const [effect, actions] = key.split('|');
+            const [kind, effect, actions] = key.split('|');
+            if (kind === 'FILE') {
+                if (effect === 'PERMIT') return '允许操作';
+                if (isDenyEffect(effect)) return '阻止操作';
+                return effect || '-';
+            }
             if (effect === 'PERMIT') return actions.includes('ACCESS_MFA') ? '允许访问需验证身份' : actions ? `允许访问（${actions}）` : '允许访问';
-            if (['DENY', 'BLOCK', 'REJECT'].includes(effect)) return '拒绝访问';
+            if (isDenyEffect(effect)) return '拒绝访问';
             return effect || '-';
         }
 
@@ -813,7 +972,15 @@
         function eventLabel(log) {
             const key = eventKey(log);
             if (learnedEventLabels.has(key)) return learnedEventLabels.get(key);
-            return key === 'LARK_ADMIN' ? '访问飞书管理后台' : '访问飞书';
+            if (isFileLog(log)) {
+                const ctx = parseContext(log);
+                const domain = fileDomainLabels[ctx.FILE_OP_BIZ_DOMAIN] ?? ctx.FILE_OP_BIZ_DOMAIN ?? '';
+                const op = fileOperationLabels[ctx.FILE_OPERATION] ?? ctx.FILE_OPERATION ?? '';
+                const type = fileTypeLabels[ctx.FILE_TYPE] ?? ctx.FILE_TYPE ?? '';
+                if (domain && op) return `在${domain}中${op}${type}`;
+                return [domain, op, type].filter(Boolean).join(' · ') || '文件操作';
+            }
+            return key === 'ACCESS|LARK_ADMIN' ? '访问飞书管理后台' : '访问飞书';
         }
 
         function formatTime(value) {
@@ -957,7 +1124,9 @@
             const merged = [...firstLogs];
             let completedBatches = 1;
             let nextBackendPage = firstBackendPage + 1;
-            const countDeny = list => list.reduce((acc, item) => acc + (decisionLabel(item) === denyDecision ? 1 : 0), 0);
+            const scanMode = denyFilterMode;
+            const scanLabel = activeScanLabel(scanMode);
+            const countMatched = list => list.reduce((acc, item) => acc + (matchesScanMode(item, scanMode) ? 1 : 0), 0);
 
             bigData = {
                 logs: merged,
@@ -977,7 +1146,7 @@
                 if (stopBtn) stopBtn.hidden = true;
                 if (scanAll) {
                     const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-                    setStatus(`扫描完成：共 ${merged.length} 条，命中拒绝访问 ${countDeny(merged)} 条（1 批，${elapsed}s）`);
+                    setStatus(`扫描完成：共 ${merged.length} 条，命中${scanLabel} ${countMatched(merged)} 条（1 批，${elapsed}s）`);
                 } else {
                     setStatus('');
                 }
@@ -989,7 +1158,7 @@
             batchAbort = token;
             if (stopBtn) stopBtn.hidden = false;
             setStatus(scanAll
-                ? `扫描拒绝访问：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countDeny(merged)} 条…`
+                ? `扫描${scanLabel}：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countMatched(merged)} 条…`
                 : `已拉取 ${merged.length} / ${remainingBudget} 条…`);
 
             const nextPages = [];
@@ -1067,7 +1236,7 @@
                 };
                 lastBigKey = '';
                 setStatus(scanAll
-                    ? `扫描拒绝访问：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countDeny(merged)} 条…`
+                    ? `扫描${scanLabel}：已拉取 ${merged.length} / ${remainingBudget} 条 · 命中 ${countMatched(merged)} 条…`
                     : `已拉取 ${merged.length} / ${remainingBudget} 条…`);
                 schedule();
             }
@@ -1077,11 +1246,11 @@
             if (batchAbort === token) batchAbort = null;
             if (stopBtn) stopBtn.hidden = true;
             const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-            const denyCount = countDeny(merged);
-            if (token.cancelled) setStatus(scanAll ? `已停止：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `已停止，保留 ${merged.length} 条`);
-            else if (rateLimited) setStatus(scanAll ? `触发限流已熔断：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `触发限流已熔断，保留 ${merged.length} 条（建议调大间隔）`);
-            else if (failed) setStatus(scanAll ? `部分批次受限：已扫描 ${merged.length} 条，命中拒绝访问 ${denyCount} 条` : `部分批次受限，已保留 ${merged.length} 条`);
-            else setStatus(scanAll ? `扫描完成：共 ${merged.length} 条，命中拒绝访问 ${denyCount} 条（${completedBatches} 批，${elapsed}s）` : `已拉取 ${merged.length} 条（${completedBatches} 批，${elapsed}s）`);
+            const matchedCount = countMatched(merged);
+            if (token.cancelled) setStatus(scanAll ? `已停止：已扫描 ${merged.length} 条，命中${scanLabel} ${matchedCount} 条` : `已停止，保留 ${merged.length} 条`);
+            else if (rateLimited) setStatus(scanAll ? `触发限流已熔断：已扫描 ${merged.length} 条，命中${scanLabel} ${matchedCount} 条` : `触发限流已熔断，保留 ${merged.length} 条（建议调大间隔）`);
+            else if (failed) setStatus(scanAll ? `部分批次受限：已扫描 ${merged.length} 条，命中${scanLabel} ${matchedCount} 条` : `部分批次受限，已保留 ${merged.length} 条`);
+            else setStatus(scanAll ? `扫描完成：共 ${merged.length} 条，命中${scanLabel} ${matchedCount} 条（${completedBatches} 批，${elapsed}s）` : `已拉取 ${merged.length} 条（${completedBatches} 批，${elapsed}s）`);
             schedule();
         }
 
@@ -1149,7 +1318,7 @@
             cancelActiveFetch();
             const seq = ++requestSeq;
             const startedAt = performance.now();
-            const scanAll = onlyDeny;
+            const scanAll = Boolean(denyFilterMode);
             const size = desiredPageSize;
             const batchSize = scanAll ? fetchSettings.batchSize : Math.min(size, fetchSettings.batchSize);
             const batchesPerBlock = Math.max(1, Math.ceil(size / batchSize));
@@ -1163,7 +1332,7 @@
             batchAbort = token;
             loading = true;
             localPage = 1;
-            setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部拒绝访问记录…` : `加载中（目标 ${size} 条）…`);
+            setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部${activeScanLabel()}记录…` : `加载中（目标 ${size} 条）…`);
             schedule();
             try {
                 const res = await sendSubBatch(lastXhrTemplate, payload, token);
@@ -1250,7 +1419,7 @@
 
                 afterNativeLoad = null;
                 cancelActiveFetch();
-                const scanAll = onlyDeny;
+                const scanAll = Boolean(denyFilterMode);
                 const logicalPage = scanAll ? 1 : (override?.pageNumber ?? 1);
                 override = null;
                 const size = desiredPageSize;
@@ -1269,7 +1438,7 @@
                 const startedAt = performance.now();
                 loading = true;
                 localPage = 1;
-                setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部拒绝访问记录…` : (size > batchSize ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`));
+                setStatus(scanAll ? `正在扫描最近${activeTimePreset?.label ?? '7天'}的全部${activeScanLabel()}记录…` : (size > batchSize ? `加载中 0 / ${size} 条…` : `加载中（${size} 条）…`));
                 schedule();
 
                 this.addEventListener('loadend', () => {
@@ -1297,8 +1466,10 @@
         }
 
         function clearSelection() {
-            if (!onlyDeny) return;
-            onlyDeny = false;
+            if (!denyFilterMode && !selectedPolicy && !selectedFileOp) return;
+            denyFilterMode = '';
+            selectedPolicy = '';
+            selectedFileOp = '';
             cancelActiveFetch();
             localPage = 1;
             lastRenderKey = '';
@@ -1307,12 +1478,12 @@
             refresh();
         }
 
-        function toggleOnlyDeny() {
-            onlyDeny = !onlyDeny;
+        function toggleDenyFilterMode(mode) {
+            denyFilterMode = denyFilterMode === mode ? '' : mode;
             localPage = 1;
             lastRenderKey = '';
             lastBigKey = '';
-            if (!onlyDeny) {
+            if (!denyFilterMode) {
                 cancelActiveFetch();
                 setStatus('');
                 refresh();
@@ -1371,10 +1542,9 @@
             if (bigData) {
                 for (const log of lastFilteredLogs) {
                     const ctx = parseContext(log);
-                    const policies = [
-                        ...(log?.enablePolicies ?? []).map(p => p?.policyName || p?.policyID || ''),
-                        ...(log?.repOnlyPolicies ?? []).map(p => `[上报]${p?.policyName || p?.policyID || ''}`),
-                    ].filter(Boolean).join('; ');
+                    const policies = hitPoliciesOf(log)
+                        .map(p => `[${p.mode}${p.isDeny ? ':阻止' : ''}]${p.name}`)
+                        .join('; ');
                     rowsToExport.push([
                         log?.userProfile?.name || '-',
                         eventLabel(log),
@@ -1421,7 +1591,7 @@
             const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
             const link = document.createElement('a');
             link.href = url;
-            link.download = `feishu-hit-log-${stamp}.csv`;
+            link.download = `${activePageMode === 'file' ? 'feishu-file-hit-log' : 'feishu-hit-log'}-${stamp}.csv`;
             document.body.append(link);
             link.click();
             link.remove();
@@ -1453,15 +1623,65 @@
             trigger.type = 'button';
             trigger.className = 'feishu-hitlog-deny-btn';
             trigger.setAttribute('aria-pressed', 'false');
-            trigger.title = '开启后默认拉取最近 7 天全部记录并筛选「拒绝访问」（若已选快捷时间则按所选时间拉取）';
+            trigger.title = '开启后默认拉取最近 7 天全部记录并筛选阻止/拒绝日志（若已选快捷时间则按所选时间拉取）';
             const dot = document.createElement('span');
             dot.className = 'feishu-hitlog-deny-dot';
             dot.setAttribute('aria-hidden', 'true');
             valueNode = document.createElement('span');
             valueNode.textContent = '仅看拒绝访问';
             trigger.append(dot, valueNode);
-            trigger.addEventListener('click', toggleOnlyDeny);
-            container.append(trigger);
+            trigger.addEventListener('click', () => toggleDenyFilterMode('deny'));
+
+            repOnlyTrigger = document.createElement('button');
+            repOnlyTrigger.type = 'button';
+            repOnlyTrigger.className = 'feishu-hitlog-deny-btn feishu-hitlog-reponly-btn';
+            repOnlyTrigger.setAttribute('aria-pressed', 'false');
+            repOnlyTrigger.hidden = true;
+            repOnlyTrigger.title = '开启后默认拉取最近 7 天全部记录并筛选命中「仅验证模式阻止」的试运行日志';
+            const repDot = document.createElement('span');
+            repDot.className = 'feishu-hitlog-deny-dot';
+            repDot.setAttribute('aria-hidden', 'true');
+            repOnlyValueNode = document.createElement('span');
+            repOnlyValueNode.textContent = '仅看仅验证阻止';
+            repOnlyTrigger.append(repDot, repOnlyValueNode);
+            repOnlyTrigger.addEventListener('click', () => toggleDenyFilterMode('repOnlyDeny'));
+
+            policyBox = document.createElement('label');
+            policyBox.className = 'feishu-hitlog-inline-select';
+            policyBox.hidden = true;
+            const policyLabel = document.createElement('span');
+            policyLabel.className = 'feishu-hitlog-label';
+            policyLabel.textContent = '策略';
+            policySelect = document.createElement('select');
+            policySelect.setAttribute('aria-label', '按命中策略筛选');
+            policySelect.add(new Option('全部策略', ''));
+            policySelect.addEventListener('change', () => {
+                selectedPolicy = policySelect.value;
+                localPage = 1;
+                lastBigKey = '';
+                refresh();
+            });
+            policyBox.append(policyLabel, policySelect);
+
+            fileOpBox = document.createElement('label');
+            fileOpBox.className = 'feishu-hitlog-inline-select';
+            fileOpBox.hidden = true;
+            const fileOpLabel = document.createElement('span');
+            fileOpLabel.className = 'feishu-hitlog-label';
+            fileOpLabel.textContent = '操作';
+            fileOpSelect = document.createElement('select');
+            fileOpSelect.setAttribute('aria-label', '按文件操作行为筛选');
+            fileOpSelect.add(new Option('全部操作', ''));
+            fileOpSelect.add(new Option('非查看/预览（高危）', '__non_preview__'));
+            fileOpSelect.addEventListener('change', () => {
+                selectedFileOp = fileOpSelect.value;
+                localPage = 1;
+                lastBigKey = '';
+                refresh();
+            });
+            fileOpBox.append(fileOpLabel, fileOpSelect);
+
+            container.append(trigger, repOnlyTrigger, policyBox, fileOpBox);
 
             pageSizeWrap = document.createElement('div');
             pageSizeWrap.setAttribute(sizeAttr, '');
@@ -1710,8 +1930,12 @@
             const localPages = Math.max(1, Math.ceil(filteredLogs.length / viewPageSize));
             if (localPage > localPages) localPage = localPages;
 
+            const isFile = activePageMode === 'file';
             const timeTag = activeTimePreset ? ` · 最近${activeTimePreset.label}` : '';
-            const filterTag = onlyDeny ? `拒绝访问命中 ${filteredLogs.length} / ` : '';
+            const hasAnyFilter = Boolean(denyFilterMode || (isFile && (selectedPolicy || selectedFileOp)));
+            const filterTag = hasAnyFilter
+                ? `${denyFilterMode ? activeScanLabel() : '筛选'}命中 ${filteredLogs.length} / `
+                : '';
             pagerInfo.textContent = `${filterTag}已加载 ${logs.length} 条（总计 ${total} 条${timeTag}）${bigData.scanAll ? '' : ` · 第 ${page}/${remotePages} 批`}`;
 
             localPagerGroup.hidden = localPages <= 1;
@@ -1737,12 +1961,15 @@
 
             const start = (localPage - 1) * viewPageSize;
             const pageSlice = filteredLogs.slice(start, start + viewPageSize);
-            const key = `${page}|${size}|${logs.length}|${filteredLogs.length}|${localPage}|${pageSlice[0]?.logid ?? ''}|${pageSlice[pageSlice.length - 1]?.logid ?? ''}|${learnedDecisionLabels.size}|${learnedEventLabels.size}`;
+            const key = `${activePageMode}|${denyFilterMode}|${selectedPolicy}|${selectedFileOp}|${page}|${size}|${logs.length}|${filteredLogs.length}|${localPage}|${pageSlice[0]?.logid ?? ''}|${pageSlice[pageSlice.length - 1]?.logid ?? ''}|${learnedDecisionLabels.size}|${learnedEventLabels.size}`;
             if (key === lastBigKey) return;
             lastBigKey = key;
 
-            const columns = [['用户', '135px'], ['事件名称', '165px'], ['决策', '155px'], ['时间', '175px'], ['IP 地址', '145px'], ['客户端类型', '110px'], ['设备', '166px'], ['操作', '66px']];
+            const columns = isFile
+                ? [['用户', '104px'], ['事件名称', '175px'], ['决策', '86px'], ['命中策略', '195px'], ['时间', '150px'], ['IP 地址', '128px'], ['客户端类型', '88px'], ['设备', '144px'], ['操作', '52px']]
+                : [['用户', '135px'], ['事件名称', '165px'], ['决策', '155px'], ['时间', '175px'], ['IP 地址', '145px'], ['客户端类型', '110px'], ['设备', '166px'], ['操作', '66px']];
             const table = document.createElement('table');
+            if (isFile) table.className = 'feishu-hitlog-file-table';
             const colgroup = document.createElement('colgroup');
             const headRow = document.createElement('tr');
             for (const [title, width] of columns) {
@@ -1780,13 +2007,20 @@
                 nameNode.title = name;
                 user.append(avatar, nameNode);
                 userCell.append(user);
-                const cells = [eventLabel(log), decisionLabel(log), formatTime(log?.evaluateTime), parseContext(log).SOURCE_IP || '-', clientTypeLabel(log), deviceText(log)]
-                    .map(text => {
-                        const cell = document.createElement('td');
-                        cell.textContent = text;
-                        cell.title = text;
-                        return cell;
-                    });
+
+                const makeTextCell = (text, extraClass = '') => {
+                    const cell = document.createElement('td');
+                    cell.textContent = text;
+                    cell.title = text;
+                    if (extraClass) cell.className = extraClass;
+                    return cell;
+                };
+
+                const eventCell = makeTextCell(eventLabel(log));
+                const decisionCell = makeTextCell(decisionLabel(log), isDenyLog(log) ? 'feishu-hitlog-decision-deny' : '');
+                const tailCells = [formatTime(log?.evaluateTime), parseContext(log).SOURCE_IP || '-', clientTypeLabel(log), deviceText(log)]
+                    .map(text => makeTextCell(text));
+
                 const actionCell = document.createElement('td');
                 const detail = document.createElement('button');
                 detail.type = 'button';
@@ -1794,7 +2028,42 @@
                 detail.textContent = '详情';
                 detail.addEventListener('click', () => openDetail(log));
                 actionCell.append(detail);
-                row.append(userCell, ...cells, actionCell);
+
+                if (isFile) {
+                    const policyCell = document.createElement('td');
+                    const policies = hitPoliciesOf(log);
+                    if (!policies.length) {
+                        policyCell.textContent = '-';
+                    } else {
+                        const wrap = document.createElement('div');
+                        wrap.className = 'feishu-hitlog-policies-cell';
+                        const titles = [];
+                        for (const p of policies) {
+                            const line = document.createElement('div');
+                            line.className = 'feishu-hitlog-policy-row';
+                            const badge = document.createElement('span');
+                            badge.className = 'feishu-hitlog-policy-badge';
+                            if (p.mode === '生效') {
+                                badge.dataset.tone = p.isDeny ? 'deny' : 'ok';
+                                badge.textContent = p.isDeny ? '阻止' : '生效';
+                            } else {
+                                badge.dataset.tone = p.isDeny ? 'reponly-deny' : 'reponly';
+                                badge.textContent = p.isDeny ? '仅验证阻止' : '仅验证';
+                            }
+                            const pName = document.createElement('span');
+                            pName.className = 'feishu-hitlog-policy-name';
+                            pName.textContent = p.name;
+                            line.append(badge, pName);
+                            wrap.append(line);
+                            titles.push(`[${badge.textContent}] ${p.name}`);
+                        }
+                        policyCell.title = titles.join('\n');
+                        policyCell.append(wrap);
+                    }
+                    row.append(userCell, eventCell, decisionCell, policyCell, ...tailCells, actionCell);
+                } else {
+                    row.append(userCell, eventCell, decisionCell, ...tailCells, actionCell);
+                }
                 tbody.append(row);
             }
             table.append(colgroup, thead, tbody);
@@ -2172,7 +2441,9 @@
             lastRenderKey = '';
             lastBigKey = '';
             if (forget) {
-                onlyDeny = false;
+                denyFilterMode = '';
+                selectedPolicy = '';
+                selectedFileOp = '';
                 activeTimePreset = null;
                 bigData = null;
                 localPage = 1;
@@ -2181,19 +2452,88 @@
             }
         }
 
+        function syncFileSelectOptions(logs) {
+            if (activePageMode !== 'file' || !policySelect || !fileOpSelect) return;
+            const policyCounts = new Map();
+            const opCounts = new Map();
+            let nonPreviewCount = 0;
+            for (const log of logs) {
+                const seenPolicy = new Set();
+                for (const p of hitPoliciesOf(log)) {
+                    if (seenPolicy.has(p.name)) continue;
+                    seenPolicy.add(p.name);
+                    policyCounts.set(p.name, (policyCounts.get(p.name) ?? 0) + 1);
+                }
+                const op = fileOperationGroup(log);
+                if (op) {
+                    opCounts.set(op, (opCounts.get(op) ?? 0) + 1);
+                    if (op !== '查看或预览') nonPreviewCount++;
+                }
+            }
+            const policyEntries = [...policyCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+            const policySig = policyEntries.map(([k, v]) => `${k}:${v}`).join('|');
+            if (policySelect.dataset.sig !== policySig) {
+                policySelect.dataset.sig = policySig;
+                policySelect.replaceChildren(new Option('全部策略', ''));
+                for (const [name, count] of policyEntries) {
+                    policySelect.add(new Option(`${name} (${count})`, name));
+                }
+                if (selectedPolicy && !policyCounts.has(selectedPolicy)) {
+                    policySelect.add(new Option(`${selectedPolicy} (0)`, selectedPolicy));
+                }
+            }
+            if (policySelect.value !== selectedPolicy) policySelect.value = selectedPolicy;
+
+            const opEntries = [...opCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+            const opSig = `${nonPreviewCount}|` + opEntries.map(([k, v]) => `${k}:${v}`).join('|');
+            if (fileOpSelect.dataset.sig !== opSig) {
+                fileOpSelect.dataset.sig = opSig;
+                fileOpSelect.replaceChildren(
+                    new Option('全部操作', ''),
+                    new Option(`非查看/预览（高危 ${nonPreviewCount}）`, '__non_preview__'),
+                );
+                for (const [op, count] of opEntries) {
+                    fileOpSelect.add(new Option(`${op} (${count})`, op));
+                }
+                if (selectedFileOp && selectedFileOp !== '__non_preview__' && !opCounts.has(selectedFileOp)) {
+                    fileOpSelect.add(new Option(`${selectedFileOp} (0)`, selectedFileOp));
+                }
+            }
+            if (fileOpSelect.value !== selectedFileOp) fileOpSelect.value = selectedFileOp;
+        }
+
         function renderMenu(_counts, matched, total) {
-            trigger.setAttribute('aria-pressed', String(onlyDeny));
-            valueNode.textContent = onlyDeny
-                ? `仅看拒绝访问 (${matched}/${total})`
-                : '仅看拒绝访问';
+            const isFile = activePageMode === 'file';
+            const denyLabel = isFile ? '仅看阻止操作' : '仅看拒绝访问';
+            trigger.setAttribute('aria-pressed', String(denyFilterMode === 'deny'));
+            valueNode.textContent = denyFilterMode === 'deny'
+                ? `${denyLabel} (${matched}/${total})`
+                : denyLabel;
+
+            repOnlyTrigger.hidden = !isFile;
+            policyBox.hidden = !isFile;
+            fileOpBox.hidden = !isFile;
+            if (isFile) {
+                repOnlyTrigger.setAttribute('aria-pressed', String(denyFilterMode === 'repOnlyDeny'));
+                repOnlyValueNode.textContent = denyFilterMode === 'repOnlyDeny'
+                    ? `仅看仅验证阻止 (${matched}/${total})`
+                    : '仅看仅验证阻止';
+            }
         }
 
         function refresh() {
             frame = 0;
-            if (!onStrategyPage()) {
+            const mode = currentPageMode();
+            if (!mode) {
                 teardown(true);
+                activePageMode = null;
                 return;
             }
+            if (activePageMode && activePageMode !== mode) {
+                teardown(true);
+                lastXhrTemplate = null;
+            }
+            activePageMode = mode;
             const context = findContext();
             if (!context) {
                 teardown(false);
@@ -2231,12 +2571,13 @@
             }
 
             const counts = new Map();
-            const filtering = onlyDeny;
+            const filtering = Boolean(denyFilterMode || (mode === 'file' && (selectedPolicy || selectedFileOp)));
             let matched = 0;
             let totalLoaded = 0;
 
             if (bigData) {
                 learnLabels(nativeRows, headers);
+                syncFileSelectOptions(bigData.logs);
                 nativeBlock.setAttribute(nativeHiddenAttr, '');
                 ensureBigWrap();
                 if (nativeBlock.nextElementSibling !== bigWrap) nativeBlock.after(bigWrap);
@@ -2244,8 +2585,7 @@
 
                 const filtered = [];
                 for (const log of bigData.logs) {
-                    const label = decisionLabel(log);
-                    if (!filtering || label === denyDecision) filtered.push(log);
+                    if (!filtering || matchesAllFilters(log)) filtered.push(log);
                 }
                 lastFilteredLogs = filtered;
                 matched = filtered.length;
@@ -2256,9 +2596,10 @@
 
                 if (filtering && !matched && totalLoaded > 0) {
                     const banner = ensureEmptyBanner();
+                    const filterName = denyFilterMode ? `「${activeScanLabel()}」` : '当前筛选条件';
                     banner.firstElementChild.textContent = loading
-                        ? `正在扫描中（已拉取 ${totalLoaded} 条），暂未发现「拒绝访问」记录…`
-                        : `已扫描 ${totalLoaded} 条记录，未发现「拒绝访问」日志`;
+                        ? `正在扫描中（已拉取 ${totalLoaded} 条），暂未发现${filterName}记录…`
+                        : `已扫描 ${totalLoaded} 条记录，未发现匹配${filterName}的日志`;
                     if (banner.previousElementSibling !== bigTableHost) bigTableHost.after(banner);
                     banner.hidden = false;
                 } else if (emptyBanner) {
@@ -2269,15 +2610,16 @@
                 if (bigWrap) bigWrap.hidden = true;
                 lastFilteredLogs = [];
                 totalLoaded = nativeRows.length;
+                const nativeDenyText = mode === 'file' ? '阻止操作' : denyDecision;
                 for (const row of nativeRows) {
                     const decision = row.cells[decisionIndex]?.textContent.trim() ?? '';
-                    const show = !filtering || decision === denyDecision;
+                    const show = denyFilterMode !== 'deny' || decision === nativeDenyText;
                     if (show) matched++;
                     if (row.hasAttribute(hiddenAttr) === show) row.toggleAttribute(hiddenAttr, !show);
                 }
-                if (filtering && !matched && totalLoaded > 0) {
+                if (denyFilterMode === 'deny' && !matched && totalLoaded > 0) {
                     const banner = ensureEmptyBanner();
-                    banner.firstElementChild.textContent = `当前页 ${totalLoaded} 条记录中未发现「拒绝访问」日志`;
+                    banner.firstElementChild.textContent = `当前页 ${totalLoaded} 条记录中未发现「${nativeDenyText}」日志`;
                     if (banner.previousElementSibling !== nativeBlock) nativeBlock.after(banner);
                     banner.hidden = false;
                 } else if (emptyBanner) {
